@@ -1,0 +1,15 @@
+title: "个人技术空间"
+description: "记录大模型推理、生成式推荐、源码阅读与工程设计"
+lang: "zh-CN"
+timezone: "Asia/Singapore"
+url: "https://zhanghanleo10.github.io"
+baseurl: ""
+permalink: /articles/:title/
+markdown: kramdown
+
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+
+exclude:
+  - README.md
