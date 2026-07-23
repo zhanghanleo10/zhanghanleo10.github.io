@@ -1,0 +1,35 @@
+---
+layout: default
+title: 文章归档
+permalink: /archive/
+---
+<div class="standard-shell">
+  <header class="page-intro">
+    <p class="eyebrow">ARCHIVE</p>
+    <h1>文章归档</h1>
+    <p>按时间沉淀问题，也按主题重新发现它们之间的联系。</p>
+  </header>
+
+  {% if site.posts.size > 0 %}
+    <section class="archive-list">
+      {% for post in site.posts %}
+        <article>
+          <time>{{ post.date | date: '%Y-%m-%d' }}</time>
+          <div>
+            {% if post.category %}<span>{{ post.category }}</span>{% endif %}
+            <h2><a href="{{ post.url | relative_url }}">{{ post.title }}</a></h2>
+            {% if post.description %}<p>{{ post.description }}</p>{% endif %}
+          </div>
+        </article>
+      {% endfor %}
+    </section>
+  {% else %}
+    <div class="empty-state archive-empty">
+      <span class="empty-number">00</span>
+      <div>
+        <h2>归档还是空的</h2>
+        <p>以后发布的全部文章都会按时间排列在这里。</p>
+      </div>
+    </div>
+  {% endif %}
+</div>
