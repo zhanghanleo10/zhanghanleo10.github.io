@@ -2,37 +2,60 @@
 layout: default
 title:
 ---
-<div class="shell content-grid">
+<section class="home-hero">
+  <div class="shell hero-grid">
+    <div class="hero-copy">
+      <p class="eyebrow">PERSONAL RESEARCH & ENGINEERING NOTES</p>
+      <h1>把复杂系统拆开，直到真正理解它。</h1>
+      <p class="hero-lead">
+        这里记录大模型推理、生成式推荐、训练与强化学习、AI 编译、图模式，以及 GPU/NPU 算子的源码阅读与工程分析。
+      </p>
+      <div class="hero-actions">
+        <a class="primary-button" href="{{ '/archive/' | relative_url }}">浏览全部文章</a>
+        <a class="text-button" href="{{ '/about/' | relative_url }}">关于这个空间 →</a>
+      </div>
+    </div>
+
+    <aside class="profile-card" aria-label="作者简介">
+      <div class="profile-avatar">TH</div>
+      <div>
+        <span class="profile-kicker">ZHANG HAN</span>
+        <h2>LLM Systems & Generative Retrieval</h2>
+        <p>关注模型 Serving、Beam Search、KV Cache、推荐系统、编译器和加速器算子。</p>
+      </div>
+      <div class="profile-links">
+        <a href="https://github.com/zhanghanleo10" target="_blank" rel="noreferrer">GitHub</a>
+        <a href="{{ '/archive/' | relative_url }}">Archive</a>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<div class="shell home-layout">
   <section class="article-column">
     <header class="section-heading">
       <div>
-        <span class="section-kicker">NEW POSTS</span>
-        <h1>最新文章</h1>
+        <span class="section-kicker">LATEST WRITING</span>
+        <h2>最新文章</h2>
       </div>
-      <span class="section-count">{{ site.posts | size }} 篇</span>
+      <a href="{{ '/archive/' | relative_url }}">查看归档 →</a>
     </header>
 
     {% if site.posts.size > 0 %}
       <div class="article-list">
         {% for post in site.posts %}
           <article class="article-card">
-            <div class="date-tile">
-              <strong>{{ post.date | date: '%d' }}</strong>
-              <span>{{ post.date | date: '%b' | upcase }}</span>
+            <div class="article-meta-line">
+              <time>{{ post.date | date: '%Y-%m-%d' }}</time>
+              {% if post.category %}<span>{{ post.category }}</span>{% endif %}
             </div>
-            <div class="article-body">
-              <h2><a href="{{ post.url | relative_url }}">{{ post.title }}</a></h2>
-              <div class="article-meta">
-                <time>{{ post.date | date: '%Y-%m-%d' }}</time>
-                {% if post.category %}<span>{{ post.category }}</span>{% endif %}
+            <h3><a href="{{ post.url | relative_url }}">{{ post.title }}</a></h3>
+            {% if post.description %}<p>{{ post.description }}</p>{% endif %}
+            <div class="article-footer">
+              <div class="tag-row">
+                {% for tag in post.tags limit:4 %}<span>#{{ tag }}</span>{% endfor %}
               </div>
-              {% if post.description %}<p>{{ post.description }}</p>{% endif %}
-              <div class="article-footer">
-                <div class="tag-row">
-                  {% for tag in post.tags %}<span>#{{ tag }}</span>{% endfor %}
-                </div>
-                <a class="read-more" href="{{ post.url | relative_url }}">阅读全文 →</a>
-              </div>
+              <a class="read-more" href="{{ post.url | relative_url }}">阅读全文 →</a>
             </div>
           </article>
         {% endfor %}
@@ -42,33 +65,28 @@ title:
         <span class="empty-number">00</span>
         <div>
           <h2>文章正在准备中</h2>
-          <p>博客骨架已经搭好。第一篇文章发布后，会自动出现在这里。</p>
+          <p>第一篇文章发布后，会自动出现在这里。</p>
         </div>
       </div>
     {% endif %}
   </section>
 
-  <aside class="sidebar" aria-label="侧边栏">
-    <section class="side-card about-card">
-      <p class="side-label">ABOUT</p>
-      <div class="avatar-placeholder" aria-hidden="true">TH</div>
-      <h2>关于作者</h2>
-      <p>关注大模型推理、生成式推荐、模型训练与强化学习、AI 编译、图模式及 GPU/NPU 算子。这里将记录源码阅读、架构分析与学习过程。</p>
-      <a class="side-link" href="{{ '/about/' | relative_url }}">了解更多 →</a>
+  <aside class="research-sidebar">
+    <section class="side-card research-card">
+      <p class="side-label">CURRENT FOCUS</p>
+      <h2>当前关注方向</h2>
+      <ul class="focus-list">
+        <li><span>01</span><strong>大模型推理与 Serving</strong></li>
+        <li><span>02</span><strong>生成式推荐与检索</strong></li>
+        <li><span>03</span><strong>模型训练与强化学习</strong></li>
+        <li><span>04</span><strong>AI 编译与图模式</strong></li>
+        <li><span>05</span><strong>GPU / NPU 算子</strong></li>
+      </ul>
     </section>
 
-    <section class="side-card">
-      <p class="side-label">TOPICS</p>
-      <h2>关注方向</h2>
-      <ul class="topic-list">
-        <li><span>01</span><strong>大模型推理</strong></li>
-        <li><span>02</span><strong>生成式推荐</strong></li>
-        <li><span>03</span><strong>源码与架构</strong></li>
-        <li><span>04</span><strong>论文解读</strong></li>
-        <li><span>05</span><strong>模型训练与强化学习</strong></li>
-        <li><span>06</span><strong>AI 编译与图模式</strong></li>
-        <li><span>07</span><strong>GPU / NPU 算子</strong></li>
-      </ul>
+    <section class="side-card note-card">
+      <p class="side-label">ABOUT THE NOTES</p>
+      <p>文章尽量保留问题背景、公式推导、源码变量、Tensor Shape 和工程边界，而不只给出结论。</p>
     </section>
   </aside>
 </div>
