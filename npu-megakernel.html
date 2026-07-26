@@ -1,0 +1,41 @@
+---
+layout: default
+title: "NPU · MegaKernel"
+description: "NPU MegaKernel 的编程模型、编译链、运行时和 Serving 专题。"
+permalink: /npu/megakernel/
+---
+<div class="standard-shell">
+  <header class="page-intro">
+    <p class="eyebrow">NPU / MEGAKERNEL</p>
+    <h1>MegaKernel</h1>
+    <p>这里从系统视角整理 NPU 程序如何跨越 DSL、IR、Tile ISA、任务运行时和模型 Serving。文章以代码实现为准，并单独标注设计目标与当前边界。</p>
+  </header>
+
+  <section class="stack-summary" aria-label="PTO 软件栈摘要">
+    <span>CURRENT STACK</span>
+    <p>PTO 生态并不是一个单仓库的“巨型 Kernel”，而是一条把模型计算、设备内 Kernel 与跨核/跨芯片编排连接起来的软件链。</p>
+    <div class="stack-flow" aria-label="软件栈调用关系">
+      <strong>pypto-serving</strong><i>→</i>
+      <strong>pypto-lib</strong><i>→</i>
+      <strong>pypto</strong><i>→</i>
+      <strong>PTOAS / simpler</strong><i>→</i>
+      <strong>pto-isa</strong>
+    </div>
+  </section>
+
+  {% assign megakernel_posts = site.posts | where: "series", "MegaKernel" %}
+  {% if megakernel_posts.size > 0 %}
+    <section class="archive-list">
+      {% for post in megakernel_posts %}
+        <article>
+          <time>{{ post.date | date: '%Y-%m-%d' }}</time>
+          <div>
+            {% if post.category %}<span>{{ post.category }}</span>{% endif %}
+            <h2><a href="{{ post.url | relative_url }}">{{ post.title }}</a></h2>
+            {% if post.description %}<p>{{ post.description }}</p>{% endif %}
+          </div>
+        </article>
+      {% endfor %}
+    </section>
+  {% endif %}
+</div>
