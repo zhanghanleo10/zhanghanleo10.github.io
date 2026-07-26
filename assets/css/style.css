@@ -260,6 +260,47 @@ img { height: auto; max-width: 100%; }
 .about-details h2 { font: 700 19px Georgia, "Noto Serif SC", serif; margin: 10px 0 10px; }
 .about-details p { color: var(--muted); font-size: 13px; line-height: 1.8; margin: 0; }
 
+/* Topic hubs: NPU → MegaKernel. */
+.topic-grid {
+  display: grid;
+  gap: 24px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.topic-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  min-height: 240px;
+  padding: 28px;
+}
+.topic-card > span { color: var(--accent); font: 800 10px ui-monospace, monospace; letter-spacing: .14em; text-transform: uppercase; }
+.topic-card h2 { font: 700 28px Georgia, "Noto Serif SC", serif; margin: 15px 0 12px; }
+.topic-card p { color: var(--muted); font-size: 14px; line-height: 1.85; margin: 0; }
+.topic-card > a { color: var(--link); font-size: 12px; font-weight: 700; margin-top: auto; padding-top: 28px; }
+.topic-card.is-muted { background: var(--surface-soft); box-shadow: none; }
+.topic-card.is-muted > span, .topic-card.is-muted > a { color: #98a2b3; }
+.stack-summary {
+  background: linear-gradient(135deg, var(--hero-a), var(--hero-b));
+  border-radius: 9px;
+  color: white;
+  margin-bottom: 40px;
+  padding: 30px;
+}
+.stack-summary > span { color: #86efdf; font: 800 10px ui-monospace, monospace; letter-spacing: .14em; }
+.stack-summary p { color: rgba(255,255,255,.76); font-size: 14px; line-height: 1.85; margin: 12px 0 0; }
+.stack-flow {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 20px;
+}
+.stack-flow strong { background: rgba(255,255,255,.11); border: 1px solid rgba(255,255,255,.17); border-radius: 5px; font-size: 11px; padding: 8px 10px; }
+.stack-flow i { color: #86efdf; font-style: normal; }
+
 /* Shared utility states. */
 .empty-state { align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 25px; grid-template-columns: 70px 1fr; margin-top: 30px; min-height: 210px; padding: 34px; }
 .empty-number { color: #98a2b3; font: 40px Georgia, serif; }
@@ -314,6 +355,7 @@ img { height: auto; max-width: 100%; }
   .about-hero { align-items: start; grid-template-columns: 1fr; }
   .about-seal { height: 90px; width: 90px; }
   .about-details { grid-template-columns: 1fr; }
+  .topic-grid { grid-template-columns: 1fr; }
   .empty-state { grid-template-columns: 1fr; }
   .footer-inner { align-items: flex-start; flex-direction: column; justify-content: center; gap: 18px; }
 }

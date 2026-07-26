@@ -1,0 +1,29 @@
+---
+layout: default
+title: NPU
+description: "NPU 编程、编译、运行时与高性能 Kernel 的源码分析专题。"
+permalink: /npu/
+---
+<div class="standard-shell">
+  <header class="page-intro">
+    <p class="eyebrow">NPU SYSTEMS</p>
+    <h1>NPU</h1>
+    <p>围绕 NPU 的编程模型、编译器、运行时、模型 Kernel 与 Serving，整理可复查的源码路径和系统边界。</p>
+  </header>
+
+  <section class="topic-grid" aria-label="NPU 专题">
+    <article class="topic-card">
+      <span>ACTIVE SERIES · 01</span>
+      <h2>MegaKernel</h2>
+      <p>从 Tile ISA、MLIR lowering 和任务运行时一路追到模型 Kernel 与推理服务，理解跨层融合怎样落到真实软件栈。</p>
+      <a href="{{ '/npu/megakernel/' | relative_url }}">进入专题 →</a>
+    </article>
+
+    <article class="topic-card is-muted">
+      <span>MORE TO COME</span>
+      <h2>更多 NPU 专题</h2>
+      <p>后续继续补充通信、内存层次、算子优化和硬件代际差异。</p>
+      <a href="{{ '/archive/' | relative_url }}">浏览全部文章 →</a>
+    </article>
+  </section>
+</div>
