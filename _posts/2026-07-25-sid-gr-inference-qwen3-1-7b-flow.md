@@ -11,11 +11,11 @@ tags:
   - KV Cache
   - Continuous Batching
   - CUDA Graph
-reading_time: "约 22 分钟"
+reading_time: "约 35 分钟"
 math: false
 ---
 
-> 本文分析 NVIDIA [`recsys-examples`](https://github.com/NVIDIA/recsys-examples) 仓库中 `examples/sid-gr-inference` 的真实实现，重点关注 **Qwen3-1.7B** 的端到端推理链路。分析基于提交 [`43465ae`](https://github.com/NVIDIA/recsys-examples/tree/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference)，避免后续代码变化导致文中路径和行为无法对应。
+> 本文分析 NVIDIA [`recsys-examples`](https://github.com/NVIDIA/recsys-examples) 仓库中 `examples/sid-gr-inference` 的真实实现，重点关注 **Batch 怎样形成、Beam Search 怎样重排、Prefill/Decode 怎样流动，以及专用 GR Decode Attention 怎样消费两段 KV**。分析基于提交 [`bdf16e3`](https://github.com/NVIDIA/recsys-examples/tree/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference)，避免后续代码变化导致文中路径和行为无法对应。
 
 这套系统面对的不是典型聊天模型工作负载，而是：
 
@@ -94,12 +94,16 @@ Scheduler Tick
 
 对应的核心文件：
 
-- [`tools/serve_qwen3_gr_http.py`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/tools/serve_qwen3_gr_http.py)：HTTP 服务装配入口；
-- [`tools/run_qwen3_real_weight_serving.py`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/tools/run_qwen3_real_weight_serving.py)：模型加载与离线/在线运行入口；
-- [`gr_serving/continuous.py`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_serving/continuous.py)：Continuous Scheduler 与 Executor；
-- [`gr_models/qwen3/model.py`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_models/qwen3/model.py)：Qwen3 模型级 Prefill / Decode；
-- [`gr_models/qwen3/layers.py`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_models/qwen3/layers.py)：Qwen3 单层计算；
-- [`gr_kernels/attention/existing_kernel_backend.py`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_kernels/attention/existing_kernel_backend.py)：外部 `gr-decode_atten` Kernel 适配。
+- [`tools/serve_qwen3_gr_http.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/tools/serve_qwen3_gr_http.py)：HTTP 服务装配入口；
+- [`tools/run_qwen3_real_weight_serving.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/tools/run_qwen3_real_weight_serving.py)：模型加载与离线/在线运行入口；
+- [`gr_serving/continuous.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_serving/continuous.py)：Continuous Scheduler 与 Executor；
+- [`gr_models/qwen3/model.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_models/qwen3/model.py)：Qwen3 模型级 Prefill / Decode；
+- [`gr_models/qwen3/layers.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_models/qwen3/layers.py)：Qwen3 单层计算；
+- [`gr_runtime/batched_beam_search.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_runtime/batched_beam_search.py)：Batch-aware Initial/Next TopK；
+- [`gr_runtime/batched_topk_indices.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_runtime/batched_topk_indices.py)：把 Beam 父链编译为算子索引；
+- [`gr_kernels/attention/existing_kernel_backend.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_kernels/attention/existing_kernel_backend.py)：外部 `gr-decode_atten` Kernel 适配；
+- [`corelib/gr_decode_atten/interface.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/corelib/gr_decode_atten/interface.py)：专用 Attention 的 Context、Sparse Beam、LSE Combine 与 Fused 路径；
+- [`corelib/gr_decode_atten/src/decode/flash_fwd.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/corelib/gr_decode_atten/src/decode/flash_fwd.py)：Sparse Beam KV Gather 与 Decode Attention Kernel。
 
 ---
 
@@ -111,7 +115,7 @@ Scheduler Tick
 Qwen/Qwen3-1.7B
 ```
 
-在 [`variants.py`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_models/qwen3/variants.py) 中，它的主要结构参数是：
+在 [`variants.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_models/qwen3/variants.py) 中，它的主要结构参数是：
 
 | 参数 | 数值 |
 | --- | ---: |
@@ -146,7 +150,7 @@ model.eval()
 
 ### 2.1 为什么要先 materialize logical weights
 
-[`weights.py`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_models/qwen3/weights.py) 会把 Hugging Face 权重映射为框架内部名称，并做两类拼接：
+[`weights.py`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_models/qwen3/weights.py) 会把 Hugging Face 权重映射为框架内部名称，并做两类拼接：
 
 ```text
 q_proj + k_proj + v_proj
@@ -239,6 +243,12 @@ Decode Step 1：产生第 3 枚 token
 
 最终响应还会按 `requested_max_new_tokens` 截断输出，保证 HTTP 语义与调用方一致。
 
+这里有一个边界细节：当 `max_new_tokens=1` 时，内部仍会保留至少一个 Decode Step 的容量，所以使用的是 `max(1, N-1)`，而不是严格的 `N-1`。HTTP 输出层再截断为调用方请求的长度。对常见的三级、五级 SID，内部有效关系就是：
+
+```text
+BeamPath Entry 数 = 1 个 Initial TopK + max_decode_steps 个 Decode TopK
+```
+
 ---
 
 ## 4. Continuous Scheduler 管理的不是普通 Sequence
@@ -286,7 +296,39 @@ scheduler.tick(
 6. 完成请求并释放 KV Lease
 ```
 
-### 4.1 Decode Batch 的分组键
+### 4.1 系统里其实有三层 Batch
+
+“组 Batch”不能只看一个 `torch.cat`。这套实现里有三层含义不同的 Batch：
+
+| 层次 | 何时发生 | 分组条件 | 目的 |
+| --- | --- | --- | --- |
+| 请求积累 | HTTP Worker | 到达时间与队列状态 | 把并发请求交给同一个 Scheduler |
+| Prefill Microbatch | 每个 Scheduler Tick | KV 预算允许，且执行时 `input_ids.shape` 相同 | 合并长 Context 的模型前向 |
+| Decode Microbatch | 每个 Scheduler Tick | `step, W_current, W_next, context_len` 相同 | 合并相同专用 Attention Shape 的一步 Decode |
+
+Scheduler 的 `max_prefill_batch_size` 和 `max_decode_batch_size` 是两套独立上限。请求被 Prefill 准入后立即进入 `decoding` 字典；随后同一个 Tick 的 `_plan_decode_batches()` 会看到这些新请求。因此在正常生产路径里：
+
+```text
+Tick N:
+  admit request
+  → run prefill
+  → initial topK
+  → 立刻进入 decode step 0
+```
+
+并不是先用一个 Tick 只做 Prefill，再等下一个 Tick 才做 Decode。
+
+Prefill 准入还受 KV Memory Budget 控制。Scheduler 在弹出队首请求后，先检查：
+
+```text
+running requests
+context tokens
+beam slots = max_decode_steps × beam_width
+```
+
+如果当前资源不够，请求会被放回队首等待；如果系统里没有任何运行请求，而单个请求仍超预算，则直接报错，而不是永久饥饿。
+
+### 4.2 Decode Batch 的分组键
 
 正在 Decode 的请求按以下四个维度分组：
 
@@ -321,6 +363,28 @@ Request Batch × Active Beams
 ```
 
 这是 SID-GR Inference 与通用 LLM Serving 在抽象层面的关键差异。
+
+例如当前有六个请求：
+
+| Request | Step | 当前 W | 下一步 W | Context |
+| --- | ---: | ---: | ---: | ---: |
+| A | 0 | 256 | 256 | 1000 |
+| B | 0 | 256 | 256 | 1000 |
+| C | 0 | 256 | 128 | 1000 |
+| D | 1 | 256 | 256 | 1000 |
+| E | 0 | 256 | 256 | 5000 |
+| F | 0 | 256 | 256 | 1000 |
+
+那么逻辑分组是：
+
+```text
+(0, 256, 256, 1000) → [A, B, F]
+(0, 256, 128, 1000) → [C]
+(1, 256, 256, 1000) → [D]
+(0, 256, 256, 5000) → [E]
+```
+
+之后每组再按照 `max_decode_batch_size` 切块。这样做看似保守，却换来了统一的 `decode_nums`、Beam 维度和 Context 长度，使 Dense Pool View、CUDA Graph 和专用 Attention 都可以使用固定 Shape。
 
 ---
 
@@ -365,9 +429,36 @@ model.forward_prefill(
 )
 ```
 
-### 5.1 ContextKV 的布局
+### 5.1 Prefill Batch 的形成条件
 
-[`ContextKV`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_kv/context_kv.py) 的布局是：
+`_run_prefill()` 会先按完整 `input_ids.shape` 分桶。因此 `[1, 1000]` 与 `[1, 5000]` 不会进入同一次 Prefill Forward，即使它们在同一个 Scheduler Tick 被准入。每个桶内部才执行：
+
+```text
+[1, S] + [1, S] + ... → torch.cat(dim=0) → [B, S]
+```
+
+如果配置了 `GRDenseContextKVPool`，Executor 会尝试一次性为这批请求申请连续 Slot：
+
+```text
+Pool: [layers, capacity, max_context_len, kv_heads, head_dim]
+                  └──────── B 个连续 slot ────────┘
+```
+
+申请成功后，模型直接把 Prefill K/V 写入 Pool Slice；失败时才让模型自己分配普通 `ContextKV`。连续 Slot 很重要，因为后续 Decode Batch 能把多个 request-local `[L,1,S,Hkv,D]` View 恢复成零拷贝 `[L,B,S,Hkv,D]` View。
+
+Prefix Cache 是另一条可选路径：
+
+```text
+exact hit  → 直接复用缓存的 PrefillResult
+prefix hit → 只计算 suffix，并物化完整 ContextKV
+miss       → 执行完整 Batched Prefill
+```
+
+默认生产 benchmark 可以关闭 Prefix Cache，以便测量不依赖前缀复用的稳定性能；它不改变后续 Beam Search 语义。
+
+### 5.2 ContextKV 的布局
+
+[`ContextKV`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_kv/context_kv.py) 的布局是：
 
 ```text
 [layers, batch, context_len, kv_heads, head_dim]
@@ -388,7 +479,7 @@ model.forward_prefill(
 短的部分才按 Beam 保存
 ```
 
-### 5.2 Qwen3 Prefill 的逐层过程
+### 5.3 Qwen3 Prefill 的逐层过程
 
 `Qwen3GRModel.forward_prefill()` 执行：
 
@@ -442,7 +533,7 @@ K: [B, S,  8, 128]
 V: [B, S,  8, 128]
 ```
 
-### 5.3 Serving 路径只算最后位置 Logits
+### 5.4 Serving 路径只算最后位置 Logits
 
 生产路径设置：
 
@@ -470,6 +561,15 @@ logits = lm_head(logits_input)
 ```
 
 SID-GR 只需要基于完整用户上下文选择第一层 Semantic ID，没有必要物化所有上下文位置的 Logits。
+
+### 5.5 Prefill CUDA Graph 在哪里介入
+
+Executor 先尝试 `GRPrefillCudaGraphRunner.forward_prefill()`；如果当前 Shape 没有可复用 Graph，再回退到普通 `model.forward_prefill()`。Piecewise Graph 并没有改变 Transformer 语义，只把 Embedding、若干 Layer Chunk 和 Output 投影拆成稳定片段捕获。关键边界仍是：
+
+```text
+输入  [B, S]
+输出  ContextKV + [B, V] last-token logits
+```
 
 ---
 
@@ -517,11 +617,28 @@ parent_beams: [B, W]
 
 初始阶段所有 Beam 都来自同一个 Prompt 根节点；从下一步开始，Beam 才会产生真正的父子重排关系。
 
+Initial TopK 有两条路径：
+
+```text
+纯 Batch 快路径：
+  所有请求 beam_width 相同
+  + 无 item mask
+  + 无 dynamic beam policy
+  + 无 logits processor
+  → 一次 select_initial_topk_batched([B,V])
+
+通用路径：
+  对每个请求应用 processor / item mask / beam policy
+  → request-local Initial TopK
+```
+
+在 `beam_score_mode="logprob"` 下，先对词表维执行 `log_softmax`；在 `"raw_logits"` 下直接使用 Logits。Initial 阶段的 `parent_beams` 全为 0，因为所有候选都来自唯一的 Prompt 根。
+
 ---
 
 ## 7. BeamKV：只保存很短的 Beam Decode 历史
 
-[`BeamKV`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_kv/beam_kv.py) 的布局为：
+[`BeamKV`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_kv/beam_kv.py) 的布局为：
 
 ```text
 [layers, batch, max_decode_steps, max_beam_width, kv_heads, head_dim]
@@ -593,6 +710,59 @@ model.forward_decode_step(
 11. 更新请求状态或完成请求
 ```
 
+### 8.1 request-local 状态怎样重新组合成 Tensor Batch
+
+每个请求持有的是自己的：
+
+```text
+ContextKV: [L, 1, S, Hkv, D]
+BeamKV:    [L, 1, T, Wmax, Hkv, D]
+BeamPath:  Python request-local path
+```
+
+执行一个 Decode Microbatch 时，Executor 会构造临时 `batched_generation`：
+
+```text
+B 个 ContextKV → [L, B, S, Hkv, D]
+B 个 BeamKV    → [L, B, T, Wmax, Hkv, D]
+B 个 BeamPath  → BatchedBeamPath(paths)
+```
+
+组合 KV 有两个分支：
+
+1. 请求占用同一个 Dense Pool 中按顺序连续的 Slot：用 `as_strided` 恢复 Batch View，零拷贝；
+2. Slot 不连续或不是同一 Storage：使用 `torch.cat(dim=1)` 构造临时 Batch Tensor。
+
+模型执行后，`_scatter_batched_beam_kv()` 只把当前 `step`、当前活动 Beam 范围写回 request-local BeamKV。如果临时 Batch 本来就是 Pool 的同一 View，则通过 Tensor View 签名发现源和目标相同，跳过复制。
+
+### 8.2 为什么 Dynamic Beam Width 会触发 History Compaction
+
+外部算子只接收切到当前宽度的：
+
+```text
+BeamKV[:, :, :decode_nums, :active_width]
+```
+
+若 Beam 从 256 缩到 64，某个当前 Beam 的祖先可能仍位于旧 Step 的 Slot 173。此时直接切 `:64` 会丢掉合法祖先。框架会检测：
+
+```text
+任一历史 ancestor_beam >= active_width
+```
+
+若成立，就把每个当前 Beam 的祖先 K/V Gather 到新的紧凑布局：
+
+```text
+历史 step s 的 ancestor KV → compact BeamKV[s, current_query_beam]
+```
+
+紧凑后，`topk_indices` 可以退化为恒等模式：
+
+```text
+step * active_width + current_query_beam
+```
+
+固定 Beam Width 不需要这次 compaction，这也是固定大 Beam Fast Path 更简单、更适合 CUDA Graph 的原因。
+
 ---
 
 ## 9. Qwen3 单步 Decode 的逐层计算
@@ -627,6 +797,28 @@ logits: [B, W, 151936]
 ```
 
 即每个请求、每个当前 Beam 都有一份下一 token 分布。
+
+单层 QKV 的 Shape 是：
+
+```text
+hidden: [B, W, 2048]
+Q:      [B, W, 16, 128]
+K/V:    [B, W,  8, 128]
+```
+
+位置编码使用：
+
+```text
+position = context_len + step
+```
+
+注意执行顺序是“先写当前 Step 的 K/V，再调用 Attention”。因此传给算子的：
+
+```text
+decode_nums = step + 1
+```
+
+表示 Beam 段中已经有多少个有效 token。当前 Query 会同时看到共享 Context 和包含当前输入 token 在内的 Beam 历史；随后 LM Head 预测下一枚 SID token。
 
 ### 9.1 当前 K/V 写入 BeamKV
 
@@ -680,7 +872,7 @@ BeamKV[:, :, 0:t, current_beam]
 
 ### 10.1 GR Decode Attention 的输入契约
 
-[`GRDecodeAttentionInputs`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_kernels/attention/gr_decode_attention.py) 直接接收：
+[`GRDecodeAttentionInputs`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_kernels/attention/gr_decode_attention.py) 直接接收：
 
 ```text
 Q
@@ -712,7 +904,7 @@ Kernel 从接口层面就知道 Batch 和 Beam 是两个不同维度。
 
 ## 11. `topk_indices` 如何恢复正确的 Beam 历史
 
-[`make_batched_topk_indices`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_runtime/batched_topk_indices.py) 构造：
+[`make_batched_topk_indices`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_runtime/batched_topk_indices.py) 构造：
 
 ```text
 topk_indices: [B, 1, Hq, decode_nums, W]
@@ -743,6 +935,32 @@ BeamKV 的扁平索引为：
 decode_step * beam_width + ancestor_beam
 ```
 
+### 11.1 一个宽度为 3 的具体例子
+
+假设 Initial TopK 产生三个 Beam；Decode Step 0 选出的三个新 Beam，其父 Beam 是：
+
+```text
+BeamPath Entry 0 parents = [0, 0, 0]   # Prompt 根
+BeamPath Entry 1 parents = [2, 0, 2]   # Decode Step 0 重排
+```
+
+下一轮计算 `decode_nums=2`。三个当前 Query Beam 的祖先链分别是：
+
+| 当前 Query Beam | 历史 Step 0 Slot | 历史 Step 1 Slot | BeamKV 扁平索引 |
+| ---: | ---: | ---: | --- |
+| 0 | 2 | 0 | `[2, 3]` |
+| 1 | 0 | 1 | `[0, 4]` |
+| 2 | 2 | 2 | `[2, 5]` |
+
+因为 `W=3`：
+
+```text
+Step 0 区间 = [0, 1, 2]
+Step 1 区间 = [3, 4, 5]
+```
+
+所以 Query Beam 0 不能读取 `[0,3]`，而必须读取 `[2,3]`。`topk_indices[..., history_step, query_beam]` 正是在表达这张表。它会沿 Query Head 维扩展；同一个 GQA Group 的 Query Heads 实际共享对应 KV Head 的祖先索引。
+
 所以该方案不需要在每轮 Beam 重排后物理搬运整段历史 KV，而是：
 
 ```text
@@ -767,7 +985,7 @@ ContextKV: [L, B, Sctx, Hkv, D]
 BeamKV:    [L, B, T, W, Hkv, D]
 ```
 
-[`ExistingGRDecodeAttentionBackend`](https://github.com/NVIDIA/recsys-examples/blob/43465aeabf61515e28d74cbb5234ff7c627dcc19/examples/sid-gr-inference/src/gr_inference/gr_kernels/attention/existing_kernel_backend.py) 会选择当前层，并转换为外部 Kernel 所需格式：
+[`ExistingGRDecodeAttentionBackend`](https://github.com/NVIDIA/recsys-examples/blob/bdf16e32694127f8d196cfafc87f90765ab4b8b1/examples/sid-gr-inference/src/gr_inference/gr_kernels/attention/existing_kernel_backend.py) 会选择当前层，并转换为外部 Kernel 所需格式：
 
 ```text
 Q:          [B, 1, W, Hq, D]
@@ -802,6 +1020,120 @@ beam_decode_attn(
 
 这比把每个 Beam 伪装成独立 Sequence 更符合真实数据复用关系。
 
+### 12.1 算子内部不是把两段 KV 简单拼接
+
+从数学上，对某个 Query Beam，Attention 的合法 Key 集合是：
+
+```text
+所有 Context token
++
+该 Beam 父链上的 decode token
+```
+
+实现上不需要真的构造：
+
+```text
+cat(ContextKV, gathered BeamKV)
+```
+
+`corelib/gr_decode_atten/interface.py` 把它分成三个逻辑阶段：
+
+| 阶段 | 计算 | 访问特征 | 主要实现 |
+| --- | --- | --- | --- |
+| K1 Context Attention | `Q × ContextKV` | 长、连续、所有 Beam 共享 | FlashAttention 风格，Tensor Core |
+| K2 Sparse Beam Attention | `Q × BeamKV[topk_indices]` | 极短、按祖先索引 Gather | Decode Kernel，CUDA Core scalar FMA |
+| K3 Combine | 合并两段归一化结果 | 小规模 FP32 | Log-Sum-Exp Merge |
+
+设两段各自的归一化输出和 LSE 为：
+
+```text
+(Octx, LSEctx)
+(Obeam, LSEbeam)
+```
+
+全局 Softmax 的合并为：
+
+```text
+LSE = log(exp(LSEctx) + exp(LSEbeam))
+
+O = exp(LSEctx  - LSE) * Octx
+  + exp(LSEbeam - LSE) * Obeam
+```
+
+因此 K1、K2 可以使用最适合各自数据形态的 Kernel，K3 仍能得到与对完整 Key 集合做一次 Softmax 等价的结果。若长 Context 为提高 SM Occupancy 被切成多个 Split，K3 会把多个 Context Partial 和一个 Beam Partial 一起合并。
+
+### 12.2 Sparse Beam Kernel 怎样使用 `topk_indices`
+
+K2 首先把：
+
+```text
+Q [B,1,W,Hq,D] → [B×W,1,Hq,D]
+```
+
+Grid 的第一维因此是 `B×W`。每个 Block 可以恢复：
+
+```text
+batch_idx = flat_batch_idx // W
+beam_idx  = flat_batch_idx % W
+```
+
+随后从：
+
+```text
+topk_indices[batch, kv_head, :decode_nums, beam]
+```
+
+取出绝对 BeamKV 行号，用 128-bit `cp.async` 把离散 K/V 行 Gather 到 Shared Memory，再对仅有 `decode_nums` 个历史位置做在线 Softmax。GQA 下，同组 Query Heads 共用一个 KV Head 和同一组祖先索引，K/V 不需要为每个 Query Head 重复加载。
+
+### 12.3 Fused 路径与 3-Kernel 路径
+
+接口支持：
+
+```text
+backend="dsl"      → 默认 Fused Context + Beam
+backend="3kernel"  → 显式 K1 + K2 + K3
+```
+
+当前实现按架构选择：
+
+```text
+SM80 / SM90 / SM120：默认使用 Fused 路径
+SM100 / SM110：使用 3-Kernel 路径
+```
+
+在 H100（SM90）常用生产路径上，Context 和 Sparse Beam 工作被放进同一个 Fused Kernel；当 Context 需要 Split-KV 时，再调用 Combine Kernel。`num_splits_heuristic` 会根据：
+
+```text
+B × Hq × ceil(W / tile_m)
+Context KV block 数
+GPU SM 数量
+单个 KV Head 占用字节
+```
+
+选择 Split 数，目标是在不过度增加 Partial/Combine 成本的前提下提高 SM Occupancy。
+
+### 12.4 Framework Wrapper 的责任边界
+
+`GRDecodeAttention` 负责验证：
+
+```text
+Q、ContextKV、BeamKV 的 B/H/D 是否一致
+step 与 active_beam_width 是否越界
+topk_indices 的 B/Hq/decode_nums/W 是否足够
+```
+
+`ExistingGRDecodeAttentionBackend` 负责：
+
+```text
+选择当前 layer
+给 Q 增加 Sq=1 维
+把 [T,W] BeamKV Slice reshape 为 [T×W]
+调用 beam_decode_attn
+去掉不需要的 LSE 返回
+```
+
+它不负责 Beam Search，也不负责生成祖先索引。Beam 父链必须在进入算子前由 Runtime 转为 `topk_indices`；算子只按照 ABI 做高效 Gather 和 Attention。
+
 ---
 
 ## 13. Next TopK 与 BeamPath 更新
@@ -824,7 +1156,34 @@ W_old × V
 previous_beam_score + current_token_score
 ```
 
-然后选择新的 `W_new` 个 Beam：
+代码没有直接对完整 `[B, W_old × V]` 先物化所有累计候选再做一次 TopK，而是做两级筛选：
+
+```text
+local_k = min(W_new, V)
+
+第一层：每个旧 Beam 在 Vocab 内取 local_k
+        [B, W_old, V] → [B, W_old, local_k]
+
+第二层：加上 previous beam score 后展平
+        [B, W_old × local_k] → 每个请求取 W_new
+```
+
+这在数学上是安全的：某个旧 Beam 若连自己的前 `W_new` 个 token 都进不了，来自该 Beam 更靠后的 token 不可能进入全局前 `W_new`。
+
+在 `logprob` 模式下，局部候选分数为：
+
+```text
+top_logits - logsumexp(all_vocab_logits)
+```
+
+再加累计 `previous_scores`；在 `raw_logits` 模式下则直接加 Logit。最终用：
+
+```text
+parent_beam = flat_index // local_k
+token_id    = gathered local_token_ids[flat_index]
+```
+
+得到新的 `W_new` 个 Beam：
 
 ```text
 next_token_ids
@@ -853,6 +1212,41 @@ Entry 2：Decode Step 1 的选择
 - 自定义 Logits Processor。
 
 没有这些动态约束时，Continuous 路径可以使用 Tensor Selection Fast Path，把 Token、Score 和 Parent 信息尽可能保留在 GPU Tensor 中，减少 Python Materialization 和同步开销。
+
+### 13.1 普通路径与 Tensor Selection Fast Path
+
+普通路径每步会把 `token_ids/scores/parent_beams` materialize 成 CPU Tuple，立即追加到每个请求的 `BeamPath`。它支持完整功能，但每步存在 GPU→CPU 同步。
+
+Tensor Selection Fast Path 只有在以下条件全部满足时启用：
+
+```text
+不返回 beam_details
+当前 Beam Width == 下一步 Beam Width
+无 Item Constraint
+无 Dynamic Beam Policy
+无 Logits Processor
+无 Stop Token
+Token / Score / Parent History 都在 CUDA Tensor
+```
+
+此时 `select_next_topk_batched(..., materialize=False)` 返回 GPU Tensor-backed Selection；父链暂存在 Tensor History，直到请求结束才批量回填 `BeamPath` 和构造最终输出。它优化的是 Host 同步和 Python 对象构造，不改变 TopK 公式。
+
+### 13.2 Item Constraint 会怎样影响整个 Batch
+
+约束 Mask 可以是：
+
+```text
+[B, V]       # 每请求统一
+[B, W, V]    # 每个 Beam 不同
+```
+
+非法候选被填成 `-inf`。当前 Batched 实现要求同一个 Decode Microbatch 使用公共 `next_beam_width`，因此会取所有 Batch Row 中合法候选数量的最小值：
+
+```text
+W_effective = min(requested_width, min(valid_candidates_per_row))
+```
+
+这保证 Batch 内每行都能产生同样宽度的 Tensor，但也意味着一个约束更强的请求可能收缩整组请求的有效宽度。Scheduler 已把预期 `next_beam_width` 放入分组键，不过运行时 Item Mask 仍可能进一步缩小它。
 
 ---
 
@@ -944,6 +1338,29 @@ SID-GR 固定短 Decode Shape
 + Request × Beam 的稳定批处理结构
 ```
 
+### 15.1 Decode CUDA Graph 的边界
+
+当前 Graph 捕获的是模型 Decode Forward：
+
+```text
+beam_token_ids
+→ Embedding
+→ 28 层 Qwen3 Decode
+→ LM Head
+→ logits
+```
+
+Beam Selection 仍在 Graph 外执行。也就是说：
+
+```text
+CUDA Graph Replay
+→ logits processor / item mask
+→ logprob + TopK
+→ 更新 Beam Parent State
+```
+
+当实际 Batch 小于 Graph Bucket 时，Executor 会尝试 Padding 到 `1/2/4/8` 等 Bucket。Padding 只有在对应的 ContextKV/BeamKV Pool Window 连续、空闲 Slot 足够且指针签名一致时才安全；否则记录 skip reason 并回退 Eager。Graph Cache 还带 LRU、最大 Entry 数和 Pointer Guard，避免错误复用旧 Pool 地址。
+
 ---
 
 ## 16. 关键 Tensor Shape 总结
@@ -976,6 +1393,10 @@ L   = Layers = 28
 | Decode Q | `q` | `[B, W, 16, 128]` |
 | 短 Beam 缓存 | `BeamKV` | `[28, B, T, W, 8, 128]` |
 | Beam 历史索引 | `topk_indices` | `[B, 1, 16, t+1, W]` |
+| 算子 Context K/V | layer-local context | `[B, S, 8, 128]` |
+| 算子 Beam K/V | flattened beam history | `[B, (t+1)×W, 8, 128]` |
+| 算子输出 | Decode Attention output | `[B, 1, W, 16, 128]` |
+| 算子 LSE | Combined log-sum-exp | `[B, 1, W, 16]` |
 | Decode 输出 | `logits` | `[B, W, 151936]` |
 
 ---
@@ -1035,11 +1456,15 @@ Continuous Scheduler
 8. gr_runtime/generation.py
 9. gr_kv/context_kv.py
 10. gr_kv/beam_kv.py
-11. gr_runtime/batched_topk_indices.py
-12. gr_runtime/engine.py
-13. gr_kernels/attention/gr_decode_attention.py
-14. gr_kernels/attention/existing_kernel_backend.py
-15. gr_serving/beam_metadata.py
+11. gr_runtime/batched_beam_search.py
+12. gr_runtime/batched_topk_indices.py
+13. gr_runtime/beam_kv_compaction.py
+14. gr_runtime/engine.py
+15. gr_kernels/attention/gr_decode_attention.py
+16. gr_kernels/attention/existing_kernel_backend.py
+17. corelib/gr_decode_atten/interface.py
+18. corelib/gr_decode_atten/src/decode/flash_fwd.py
+19. gr_serving/beam_metadata.py
 ```
 
 其中最值得重点精读的函数是：
@@ -1053,7 +1478,10 @@ Qwen3GRModel.forward_prefill
 Qwen3GRModel.forward_decode_step
 Qwen3SingleLayerPrefill.forward_decode
 make_batched_topk_indices
+select_next_topk_batched
 ExistingGRDecodeAttentionBackend.__call__
+BeamDecodeAttn.forward
+FlashAttentionForwardDecode._gather_load_tile
 ```
 
 ---
