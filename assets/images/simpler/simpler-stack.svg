@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#2563eb"/>
+    </marker>
+  </defs>
+  <rect width="1600" height="900" fill="#f8fafc"/>
+  <text x="800" y="70" text-anchor="middle" font-family="Arial, PingFang SC, Microsoft YaHei, sans-serif" font-size="42" font-weight="700" fill="#0f172a">simpler 在 PTO 软件栈中的位置</text>
+  <text x="800" y="112" text-anchor="middle" font-family="Arial, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" fill="#475569">运行时控制面：承接编译器生成的 Task DAG，并将任务调度到 Ascend AIC/AIV</text>
+  <g font-family="Arial, PingFang SC, Microsoft YaHei, sans-serif">
+    <rect x="180" y="165" rx="22" width="1240" height="88" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+    <text x="800" y="205" text-anchor="middle" font-size="28" font-weight="700" fill="#075985">pypto-serving</text>
+    <text x="800" y="234" text-anchor="middle" font-size="18" fill="#0c4a6e">请求、Batch、KV Cache、模型服务与生命周期</text>
+    <rect x="180" y="278" rx="22" width="1240" height="88" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="800" y="318" text-anchor="middle" font-size="28" font-weight="700" fill="#1e3a8a">pypto-lib</text>
+    <text x="800" y="347" text-anchor="middle" font-size="18" fill="#1e40af">Qwen3 / DeepSeek 等模型实现与高性能 Kernel 组合</text>
+    <rect x="180" y="391" rx="22" width="1240" height="88" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+    <text x="800" y="431" text-anchor="middle" font-size="28" font-weight="700" fill="#5b21b6">PyPTO 编译器</text>
+    <text x="800" y="460" text-anchor="middle" font-size="18" fill="#6d28d9">Tensor Graph → Tile Graph → Block / Execution Graph → PTO IR</text>
+    <rect x="130" y="504" rx="26" width="1340" height="164" fill="#ecfeff" stroke="#0891b2" stroke-width="4"/>
+    <text x="800" y="548" text-anchor="middle" font-size="34" font-weight="700" fill="#155e75">simpler Runtime</text>
+    <text x="800" y="582" text-anchor="middle" font-size="20" fill="#0e7490">DAG 提交 · TensorMap 自动依赖 · AICPU Scheduler · AIC/AIV Worker · Ring / Scope · Host↔Device 握手</text>
+    <rect x="190" y="610" rx="14" width="370" height="38" fill="#cffafe"/>
+    <text x="375" y="636" text-anchor="middle" font-size="17" fill="#155e75">L3+：Host Orchestrator / Scheduler</text>
+    <rect x="615" y="610" rx="14" width="370" height="38" fill="#cffafe"/>
+    <text x="800" y="636" text-anchor="middle" font-size="17" fill="#155e75">L2：AICPU Orchestrator / Scheduler</text>
+    <rect x="1040" y="610" rx="14" width="370" height="38" fill="#cffafe"/>
+    <text x="1225" y="636" text-anchor="middle" font-size="17" fill="#155e75">L0：AIC / AIV 执行 PTO Kernel</text>
+    <rect x="180" y="693" rx="22" width="1240" height="82" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+    <text x="800" y="730" text-anchor="middle" font-size="28" font-weight="700" fill="#166534">PTO ISA / PTOAS</text>
+    <text x="800" y="758" text-anchor="middle" font-size="18" fill="#15803d">Tile 计算、搬运、同步、通信指令与后端代码生成</text>
+    <rect x="420" y="802" rx="22" width="760" height="64" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+    <text x="800" y="842" text-anchor="middle" font-size="26" font-weight="700" fill="#334155">Ascend A2 / A3 / A5 Hardware</text>
+  </g>
+  <g stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)">
+    <line x1="800" y1="253" x2="800" y2="272"/>
+    <line x1="800" y1="366" x2="800" y2="385"/>
+    <line x1="800" y1="479" x2="800" y2="498"/>
+    <line x1="800" y1="668" x2="800" y2="687"/>
+    <line x1="800" y1="775" x2="800" y2="796"/>
+  </g>
+</svg>

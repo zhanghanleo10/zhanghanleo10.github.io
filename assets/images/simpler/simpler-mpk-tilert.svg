@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <rect width="1600" height="900" fill="#f8fafc"/>
+  <text x="800" y="68" text-anchor="middle" font-family="Arial, PingFang SC, Microsoft YaHei, sans-serif" font-size="42" font-weight="700" fill="#0f172a">simpler、MPK 与 TileRT：中心抽象不同</text>
+  <text x="800" y="108" text-anchor="middle" font-family="Arial, PingFang SC, Microsoft YaHei, sans-serif" font-size="21" fill="#475569">三者都希望突破 kernel-per-operator，但优化边界与调度位置不同</text>
+  <g font-family="Arial, PingFang SC, Microsoft YaHei, sans-serif">
+    <rect x="70" y="155" rx="24" width="455" height="620" fill="#ecfeff" stroke="#0891b2" stroke-width="3"/>
+    <text x="297" y="205" text-anchor="middle" font-size="34" font-weight="700" fill="#155e75">simpler</text>
+    <text x="297" y="238" text-anchor="middle" font-size="18" fill="#0e7490">Ascend 分层 Task Graph Runtime</text>
+    <rect x="115" y="280" rx="16" width="365" height="85" fill="#cffafe"/>
+    <text x="297" y="315" text-anchor="middle" font-size="21" font-weight="700" fill="#155e75">中心抽象</text>
+    <text x="297" y="345" text-anchor="middle" font-size="18" fill="#0e7490">TensorMap + Task DAG + Resource Shape</text>
+    <rect x="115" y="390" rx="16" width="365" height="135" fill="#ffffff" stroke="#67e8f9"/>
+    <text x="297" y="424" text-anchor="middle" font-size="20" font-weight="700" fill="#155e75">调度位置</text>
+    <text x="297" y="454" text-anchor="middle" font-size="17" fill="#0e7490">L3+：Host C++ Scheduler</text><text x="297" y="483" text-anchor="middle" font-size="17" fill="#0e7490">L2：AICPU Scheduler</text><text x="297" y="512" text-anchor="middle" font-size="17" fill="#0e7490">L0：AIC / AIV Worker</text>
+    <rect x="115" y="550" rx="16" width="365" height="165" fill="#cffafe"/>
+    <text x="297" y="585" text-anchor="middle" font-size="20" font-weight="700" fill="#155e75">优势</text>
+    <text x="297" y="617" text-anchor="middle" font-size="17" fill="#0e7490">动态流式构图、自动依赖</text><text x="297" y="646" text-anchor="middle" font-size="17" fill="#0e7490">AIC/AIV/MIX 异构资源调度</text><text x="297" y="675" text-anchor="middle" font-size="17" fill="#0e7490">Scope/Ring 生命周期与背压</text>
+    <rect x="573" y="155" rx="24" width="455" height="620" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+    <text x="800" y="205" text-anchor="middle" font-size="34" font-weight="700" fill="#1e3a8a">MPK</text>
+    <text x="800" y="238" text-anchor="middle" font-size="18" fill="#1e40af">GPU 内 SM-level Task Runtime</text>
+    <rect x="618" y="280" rx="16" width="365" height="85" fill="#dbeafe"/>
+    <text x="800" y="315" text-anchor="middle" font-size="21" font-weight="700" fill="#1e3a8a">中心抽象</text><text x="800" y="345" text-anchor="middle" font-size="18" fill="#1e40af">tGraph：Task + Event</text>
+    <rect x="618" y="390" rx="16" width="365" height="135" fill="#ffffff" stroke="#93c5fd"/>
+    <text x="800" y="424" text-anchor="middle" font-size="20" font-weight="700" fill="#1e3a8a">调度位置</text><text x="800" y="454" text-anchor="middle" font-size="17" fill="#1e40af">GPU 内 Worker / Scheduler</text><text x="800" y="483" text-anchor="middle" font-size="17" fill="#1e40af">Event Counter 释放后继 Task</text><text x="800" y="512" text-anchor="middle" font-size="17" fill="#1e40af">统一 SM / CTA 任务模型</text>
+    <rect x="618" y="550" rx="16" width="365" height="165" fill="#dbeafe"/>
+    <text x="800" y="585" text-anchor="middle" font-size="20" font-weight="700" fill="#1e3a8a">优势</text><text x="800" y="617" text-anchor="middle" font-size="17" fill="#1e40af">显式事件图，编译期可优化</text><text x="800" y="646" text-anchor="middle" font-size="17" fill="#1e40af">跨算子 Task 流水</text><text x="800" y="675" text-anchor="middle" font-size="17" fill="#1e40af">计算与通信图内统一调度</text>
+    <rect x="1075" y="155" rx="24" width="455" height="620" fill="#f0fdf4" stroke="#16a34a" stroke-width="3"/>
+    <text x="1302" y="205" text-anchor="middle" font-size="34" font-weight="700" fill="#166534">TileRT</text><text x="1302" y="238" text-anchor="middle" font-size="18" fill="#15803d">Whole-model Tile Pipeline Engine</text>
+    <rect x="1120" y="280" rx="16" width="365" height="85" fill="#dcfce7"/><text x="1302" y="315" text-anchor="middle" font-size="21" font-weight="700" fill="#166534">中心抽象</text><text x="1302" y="345" text-anchor="middle" font-size="18" fill="#15803d">静态 Tile Pipeline + 异构 Worker</text>
+    <rect x="1120" y="390" rx="16" width="365" height="135" fill="#ffffff" stroke="#86efac"/><text x="1302" y="424" text-anchor="middle" font-size="20" font-weight="700" fill="#166534">调度位置</text><text x="1302" y="454" text-anchor="middle" font-size="17" fill="#15803d">尽量前移到 AOT 编译期</text><text x="1302" y="483" text-anchor="middle" font-size="17" fill="#15803d">Persistent Engine 持续推进</text><text x="1302" y="512" text-anchor="middle" font-size="17" fill="#15803d">Warp / Block / GPU 角色专门化</text>
+    <rect x="1120" y="550" rx="16" width="365" height="165" fill="#dcfce7"/><text x="1302" y="585" text-anchor="middle" font-size="20" font-weight="700" fill="#166534">优势</text><text x="1302" y="617" text-anchor="middle" font-size="17" fill="#15803d">固定模型与拓扑的极低 TPOT</text><text x="1302" y="646" text-anchor="middle" font-size="17" fill="#15803d">数据驻留与持续预取</text><text x="1302" y="675" text-anchor="middle" font-size="17" fill="#15803d">模型—系统联合特化</text>
+  </g>
+  <rect x="225" y="812" rx="20" width="1150" height="62" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="800" y="851" text-anchor="middle" font-family="Arial, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="700" fill="#334155">可组合方向：PyPTO 负责整图编译，simpler 负责动态 Task 控制面，PTO Kernel 内吸收 TileRT 式静态流水</text>
+</svg>
