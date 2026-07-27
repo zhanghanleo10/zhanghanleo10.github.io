@@ -25,3 +25,22 @@ reading_time: "约 10 分钟"
 ```
 
 正文直接使用 Markdown 编写。提交到 `main` 分支后，GitHub Pages 会重新构建网站。
+
+## Mermaid 图表
+
+需要 Mermaid 的文章在 front matter 中增加：
+
+```yaml
+mermaid: true
+```
+
+正文使用标准 Mermaid fenced code block：
+
+````markdown
+```mermaid
+flowchart LR
+    A["输入"] --> B["处理"] --> C["输出"]
+```
+````
+
+只有声明 `mermaid: true` 的页面会加载 Mermaid 渲染模块。若图表语法错误，页面会保留原始代码块作为回退，浏览器控制台会记录解析错误。

@@ -54,5 +54,8 @@
         <span>© {{ 'now' | date: '%Y' }} · Built with Jekyll & GitHub Pages</span>
       </div>
     </footer>
+    {% if page.mermaid %}
+    <script type="module" src="{{ '/assets/js/mermaid-init.js' | relative_url }}"></script>
+    {% endif %}
   </body>
 </html>
