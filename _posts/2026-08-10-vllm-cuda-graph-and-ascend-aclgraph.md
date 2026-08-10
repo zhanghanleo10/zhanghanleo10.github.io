@@ -14,6 +14,7 @@ tags:
   - 推理优化
 reading_time: "约 35 分钟"
 math: false
+mermaid: true
 ---
 
 > 本文基于 2026-08-10 的 GitHub 默认分支快照：vLLM `a123159f`、vllm-ascend `ac19e1e6`。重点不是介绍 CUDA Graph API，而是回答工程中更关键的问题：vLLM 到底有哪些图模式、一次请求什么时候会落到 Full/Piecewise/Eager、框架和算子分别必须满足什么条件，以及 Ascend ACLGraph 为什么不能简单视为 CUDA Graph 的 API 替换。
