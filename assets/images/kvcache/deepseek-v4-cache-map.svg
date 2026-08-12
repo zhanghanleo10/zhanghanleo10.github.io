@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">DeepSeek V4 三类层的 KV Cache 地图</title>
+  <desc id="desc">所有层都有最近 128 token 的滑动窗口缓存。SWA-only 层没有长历史缓存；C4 层还包含主压缩状态、四倍压缩历史、索引器状态和索引键缓存；C128 层包含主压缩状态和一百二十八倍压缩历史。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7fbff"/>
+      <stop offset="1" stop-color="#eef8f6"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#17324d" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4b6b82"/>
+    </marker>
+    <style>
+      .title{font:700 34px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#172033}
+      .subtitle{font:400 19px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#5b6b7c}
+      .card-title{font:700 27px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#172033}
+      .label{font:600 20px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#26384a}
+      .small{font:400 17px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#5b6b7c}
+      .badge{font:700 16px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#0f5f58}
+      .arrow{stroke:#4b6b82;stroke-width:2.4;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1200" height="760" rx="28" fill="url(#bg)"/>
+  <text x="600" y="58" text-anchor="middle" class="title">DeepSeek V4：三类层，三套不同的历史记忆</text>
+  <text x="600" y="91" text-anchor="middle" class="subtitle">每个新 token 都先进入短期记忆；只有 C4 / C128 层会继续形成压缩后的长期记忆</text>
+
+  <rect x="460" y="122" width="280" height="62" rx="31" fill="#173b57"/>
+  <text x="600" y="161" text-anchor="middle" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, Inter, sans-serif" font-size="22" font-weight="700" fill="#ffffff">新 token 的 512 维 MLA latent</text>
+
+  <path class="arrow" d="M600 184 L600 215 L210 215 L210 247"/>
+  <path class="arrow" d="M600 184 L600 247"/>
+  <path class="arrow" d="M600 184 L600 215 L990 215 L990 247"/>
+
+  <g filter="url(#shadow)">
+    <rect x="45" y="250" width="330" height="394" rx="20" fill="#ffffff" stroke="#d9e5ed"/>
+    <rect x="435" y="250" width="330" height="394" rx="20" fill="#ffffff" stroke="#bcded9"/>
+    <rect x="825" y="250" width="330" height="394" rx="20" fill="#ffffff" stroke="#d7d6f1"/>
+  </g>
+
+  <text x="210" y="296" text-anchor="middle" class="card-title">SWA-only 层</text>
+  <rect x="84" y="327" width="252" height="86" rx="13" fill="#e7f3fb" stroke="#96c6df"/>
+  <text x="210" y="361" text-anchor="middle" class="label">SWA 短期缓存</text>
+  <text x="210" y="390" text-anchor="middle" class="small">最近 128 token · 有界</text>
+  <path d="M114 454 H306" stroke="#c8d5de" stroke-width="2" stroke-dasharray="8 7"/>
+  <text x="210" y="490" text-anchor="middle" class="label">没有长期压缩 cache</text>
+  <text x="210" y="521" text-anchor="middle" class="small">窗口滑走后，旧 token 不再保留</text>
+  <rect x="120" y="567" width="180" height="36" rx="18" fill="#eef3f6"/>
+  <text x="210" y="591" text-anchor="middle" class="badge">只记“最近发生的事”</text>
+
+  <text x="600" y="296" text-anchor="middle" class="card-title">C4 层</text>
+  <rect x="474" y="327" width="252" height="65" rx="13" fill="#e7f3fb" stroke="#96c6df"/>
+  <text x="600" y="356" text-anchor="middle" class="label">SWA：最近 128 token</text>
+  <text x="600" y="381" text-anchor="middle" class="small">每个 token 都写</text>
+  <rect x="474" y="407" width="252" height="65" rx="13" fill="#e9f8f4" stroke="#78c4b8"/>
+  <text x="600" y="436" text-anchor="middle" class="label">主 Compressor State</text>
+  <text x="600" y="461" text-anchor="middle" class="small">滚动聚合 · 每 4 token 结算</text>
+  <rect x="474" y="487" width="252" height="65" rx="13" fill="#dff4ec" stroke="#55ad9d"/>
+  <text x="600" y="516" text-anchor="middle" class="label">C4 压缩历史</text>
+  <text x="600" y="541" text-anchor="middle" class="small">约每 4 token 保存 1 条</text>
+  <rect x="474" y="567" width="118" height="53" rx="12" fill="#fff4dd" stroke="#e4bd65"/>
+  <rect x="608" y="567" width="118" height="53" rx="12" fill="#fff4dd" stroke="#e4bd65"/>
+  <text x="533" y="590" text-anchor="middle" class="small">Indexer</text>
+  <text x="533" y="612" text-anchor="middle" class="small">状态</text>
+  <text x="667" y="590" text-anchor="middle" class="small">Index K</text>
+  <text x="667" y="612" text-anchor="middle" class="small">历史</text>
+
+  <text x="990" y="296" text-anchor="middle" class="card-title">C128 层</text>
+  <rect x="864" y="327" width="252" height="73" rx="13" fill="#e7f3fb" stroke="#96c6df"/>
+  <text x="990" y="358" text-anchor="middle" class="label">SWA：最近 128 token</text>
+  <text x="990" y="385" text-anchor="middle" class="small">每个 token 都写</text>
+  <rect x="864" y="423" width="252" height="73" rx="13" fill="#f0effb" stroke="#aaa4db"/>
+  <text x="990" y="454" text-anchor="middle" class="label">主 Compressor State</text>
+  <text x="990" y="481" text-anchor="middle" class="small">滚动聚合 · 128 token</text>
+  <rect x="864" y="519" width="252" height="73" rx="13" fill="#e7e5f8" stroke="#9088ce"/>
+  <text x="990" y="550" text-anchor="middle" class="label">C128 压缩历史</text>
+  <text x="990" y="577" text-anchor="middle" class="small">约每 128 token 保存 1 条</text>
+  <rect x="900" y="605" width="180" height="26" rx="13" fill="#f0effb"/>
+  <text x="990" y="624" text-anchor="middle" class="badge">极稀疏的全局锚点</text>
+
+  <g transform="translate(120,690)">
+    <rect x="0" y="0" width="22" height="22" rx="5" fill="#e7f3fb" stroke="#96c6df"/>
+    <text x="34" y="17" class="small">短窗：长度有界</text>
+    <rect x="270" y="0" width="22" height="22" rx="5" fill="#e9f8f4" stroke="#78c4b8"/>
+    <text x="304" y="17" class="small">状态：滚动、有界</text>
+    <rect x="560" y="0" width="22" height="22" rx="5" fill="#dff4ec" stroke="#55ad9d"/>
+    <text x="594" y="17" class="small">历史：随上下文增长</text>
+    <rect x="862" y="0" width="22" height="22" rx="5" fill="#fff4dd" stroke="#e4bd65"/>
+    <text x="896" y="17" class="small">索引：只在 C4</text>
+  </g>
+</svg>
