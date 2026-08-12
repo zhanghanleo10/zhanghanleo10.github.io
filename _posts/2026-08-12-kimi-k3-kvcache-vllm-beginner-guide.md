@@ -23,6 +23,18 @@ mermaid: true
 
 如果你更关心“短窗 + 分层压缩”的另一条路线，可以继续阅读姐妹篇：[DeepSeek V4 的 KVCache 组织与管理](/articles/deepseek-v4-kvcache-vllm-beginner-guide/)。
 
+## 先看模型结构：两种输入，进入同一个 Decoder
+
+[![Kimi K3 的多模态输入、93 层 KimiLinear Decoder、KDA 与 MLA 模型结构](/assets/images/kvcache/kimi-k3-model-structure.svg)](/assets/images/kvcache/kimi-k3-model-structure.svg)
+
+*结构图可点击打开原尺寸 SVG；在手机上建议横屏查看。*
+
+上半部分先解决一个常见疑问：Kimi K3 没有用 cross-attention 让文本反复查询视觉塔。图像先经过 MoonViT3D、Patch Merge 和 MM Projector，变成宽度同为 7,168 的视觉 token，再填入文本 token 序列中的 `<|kimi_image_placeholder|>` 位置；两者随后一起进入同一个 93 层 KimiLinear Decoder。vLLM 的多模态外层与融合路径见 [`KimiK3ForConditionalGeneration`](https://github.com/vllm-project/vllm/blob/6accb779a361c723cded3f9422b48d3fe4da0901/vllm/models/kimi_k3/nvidia/model.py#L1529-L1914)。
+
+中下部分把“层类型”拆成两条互不绑定的轴：KDA/MLA 决定 Mixer，Dense/MoE 决定 FFN。93 层按 `[KDA, KDA, KDA, MLA] × 23 + MLA` 串行执行；只有第 1 层使用 Dense MLP，第 2–93 层都使用 MoE。图中的 AttnRes 以 12 层为一个残差聚合块，属于 hidden-state 残差路径，与 KVCache、KDA state 或 MLA cache 都不是一回事。另一个容易误读的点是，K3 配置为 NoPE MLA：代码中历史沿用 `q_pe/k_pe` 命名的共享 64 维分量，在 K3 路径并不执行 RoPE。层内选择与 AttnRes 数据流可对照 [`KimiDecoderLayer`](https://github.com/vllm-project/vllm/blob/6accb779a361c723cded3f9422b48d3fe4da0901/vllm/models/kimi_k3/nvidia/model.py#L763-L1012)。
+
+## 再看缓存全景
+
 ![Kimi K3 的 MLA token cache 与 KDA 状态页](/assets/images/kvcache/kimi-k3-cache-map.svg)
 
 ## 阅读路线

@@ -21,6 +21,18 @@ mermaid: true
 >
 > 本文基于 vLLM [`main@6accb779`](https://github.com/vllm-project/vllm/commit/6accb779a361c723cded3f9422b48d3fe4da0901) 分析。Kimi K3 的对应设计见姐妹篇：[《从零看懂 vLLM 中的 Kimi K3 KVCache》](/articles/kimi-k3-kvcache-vllm-beginner-guide/)。如果想先了解 DeepSeek V4 的 SWA page 读取 kernel，可继续阅读[这篇算子分析](/articles/pto-deepseek-v4-swa-page-run-tload/)。
 
+## 先看模型结构：KVCache 发生在哪里？
+
+[![DeepSeek V4 的 mHC 四流主干、Sparse MLA、MoE 与可选 MTP 模型结构](/assets/images/kvcache/deepseek-v4-model-structure.svg)](/assets/images/kvcache/deepseek-v4-model-structure.svg)
+
+*结构图可点击打开原尺寸 SVG；在手机上建议横屏查看。*
+
+可以先沿左侧从上往下读：token 经过 Embedding 后，在第一个 Decoder Layer 内被 mHC 展开成 4 条 residual streams；主干串行经过 Flash 的 43 层或 Pro 的 61 层 Decoder，再由 mHC Head 收拢、RMSNorm，最后进入 LM Head。右侧则放大了一个 Decoder Layer：**SWA-only、C4、C128 改变的是 Sparse MLA 的远近记忆方式，mHC 与 MoE 骨架不变。**
+
+这里有两个容易画错的边界。第一，mHC 的 4 条流不是 TP=4，也不是 4 个并行模型，而是层间持续混合的 4 条 hidden residual streams；它不能简化成普通 Transformer 的单个 residual Add。第二，MTP 是投机推理时可选的 draft sidecar，不属于 43/61 个 target 主干层。对应实现可对照 [`DeepseekV4DecoderLayer` 与主干 forward](https://github.com/vllm-project/vllm/blob/6accb779a361c723cded3f9422b48d3fe4da0901/vllm/models/deepseek_v4/nvidia/model.py#L817-L1214)，以及[单独的 MTP 模块](https://github.com/vllm-project/vllm/blob/6accb779a361c723cded3f9422b48d3fe4da0901/vllm/models/deepseek_v4/nvidia/mtp.py#L80-L279)。
+
+## 再看缓存全景
+
 ![DeepSeek V4 三类层与各自的 KV Cache 组成](/assets/images/kvcache/deepseek-v4-cache-map.svg)
 
 ## 阅读路线

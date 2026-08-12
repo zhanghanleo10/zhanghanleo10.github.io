@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900" role="img" aria-labelledby="title desc">
+  <title id="title">Kimi K3 在 vLLM 中的多模态模型结构</title>
+  <desc id="desc">图像经 MoonViT3D 与多模态投影器变成和文本同宽的视觉 token，被填入文本序列的 placeholder 位置，随后串行通过 69 层 KDA 与 24 层 MLA 组成的 93 层 KimiLinear Decoder，最后经过 RMSNorm 和 LM Head 输出 logits。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7fbff"/>
+      <stop offset="1" stop-color="#f5f2fc"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#17324d" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#49677d"/>
+    </marker>
+    <style>
+      .title{font:700 34px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#172033}
+      .subtitle{font:400 18px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#56697a}
+      .section{font:700 23px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#172033}
+      .label{font:650 18px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#20364a}
+      .small{font:400 17px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#56697a}
+      .tiny{font:500 15px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#607284}
+      .white{font:700 18px "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",Inter,sans-serif;fill:#fff}
+      .arrow{stroke:#49677d;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+
+  <rect width="1200" height="900" rx="28" fill="url(#bg)"/>
+  <text x="600" y="50" text-anchor="middle" class="title">Kimi K3：视觉 token 与文本 token 共用 93 层 KimiLinear Decoder</text>
+  <text x="600" y="80" text-anchor="middle" class="subtitle">69 层 KDA 与 24 层 NoPE MLA 按顺序交错；它们替换的是 Mixer，而不是整层结构</text>
+
+  <!-- Multimodal input -->
+  <g filter="url(#shadow)">
+    <rect x="43" y="108" width="1114" height="203" rx="22" fill="#ffffff" stroke="#d8e4ec"/>
+  </g>
+  <text x="69" y="140" class="section">多模态输入</text>
+
+  <rect x="70" y="160" width="134" height="48" rx="11" fill="#e7f3fb" stroke="#96c6df"/>
+  <text x="137" y="190" text-anchor="middle" class="label">Text token IDs</text>
+  <path class="arrow" d="M204 184 H228"/>
+  <rect x="230" y="153" width="185" height="62" rx="11" fill="#e9f2f8" stroke="#a9c6d8"/>
+  <text x="322" y="179" text-anchor="middle" class="label">Vocab Embedding</text>
+  <text x="322" y="201" text-anchor="middle" class="tiny">163,840 → 7,168</text>
+
+  <rect x="70" y="236" width="134" height="48" rx="11" fill="#f0eefb" stroke="#aaa4db"/>
+  <text x="137" y="266" text-anchor="middle" class="label">Image</text>
+  <path class="arrow" d="M204 260 H228"/>
+  <rect x="230" y="229" width="185" height="62" rx="11" fill="#eeeafa" stroke="#aaa4db"/>
+  <text x="322" y="255" text-anchor="middle" class="label">MoonViT3D</text>
+  <text x="322" y="277" text-anchor="middle" class="tiny">27 blocks · width 1,024</text>
+  <path class="arrow" d="M415 260 H439"/>
+  <rect x="441" y="229" width="193" height="62" rx="11" fill="#eeeafa" stroke="#aaa4db"/>
+  <text x="538" y="253" text-anchor="middle" class="label">2×2 Patch Merge</text>
+  <text x="538" y="277" text-anchor="middle" class="tiny">+ MM Projector → 7,168</text>
+
+  <path class="arrow" d="M415 184 H687 V210"/>
+  <path class="arrow" d="M634 260 H687 V234"/>
+  <rect x="660" y="184" width="232" height="76" rx="13" fill="#e8f7f2" stroke="#63b7a7"/>
+  <text x="776" y="211" text-anchor="middle" class="label">Placeholder 位置融合</text>
+  <text x="776" y="234" text-anchor="middle" class="small">视觉特征变成“视觉 token”</text>
+  <text x="776" y="253" text-anchor="middle" class="tiny">&lt;|kimi_image_placeholder|&gt;</text>
+  <path class="arrow" d="M892 222 H919"/>
+  <rect x="921" y="184" width="204" height="76" rx="13" fill="#173b57"/>
+  <text x="1023" y="212" text-anchor="middle" class="white">Mixed embeddings</text>
+  <text x="1023" y="238" text-anchor="middle" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, Inter, sans-serif" font-size="15" fill="#dceaf2">同一条 token sequence</text>
+  <text x="776" y="290" text-anchor="middle" class="small">没有 cross-attention：图像先变成与文本同宽的 token，再一起进入 Decoder</text>
+
+  <!-- 93-layer rhythm -->
+  <g filter="url(#shadow)">
+    <rect x="43" y="332" width="1114" height="195" rx="22" fill="#ffffff" stroke="#d8e4ec"/>
+  </g>
+  <text x="69" y="367" class="section">KimiLinear Text Decoder · hidden size 7,168 · 93 层串行执行</text>
+  <text x="1130" y="367" text-anchor="end" class="small">AttnRes：每 12 层一个残差聚合块</text>
+
+  <g transform="translate(72,389)">
+    <rect x="0" y="0" width="188" height="48" rx="10" fill="#eeeafa" stroke="#aaa4db"/>
+    <rect x="198" y="0" width="188" height="48" rx="10" fill="#eeeafa" stroke="#aaa4db"/>
+    <rect x="396" y="0" width="188" height="48" rx="10" fill="#eeeafa" stroke="#aaa4db"/>
+    <rect x="594" y="0" width="188" height="48" rx="10" fill="#ddf3ec" stroke="#63b7a7"/>
+    <text x="94" y="30" text-anchor="middle" class="label">KDA</text>
+    <text x="292" y="30" text-anchor="middle" class="label">KDA</text>
+    <text x="490" y="30" text-anchor="middle" class="label">KDA</text>
+    <text x="688" y="30" text-anchor="middle" class="label">MLA</text>
+    <text x="805" y="31" class="label">× 23</text>
+    <path class="arrow" d="M862 24 H887"/>
+    <rect x="889" y="0" width="154" height="48" rx="10" fill="#ddf3ec" stroke="#63b7a7"/>
+    <text x="966" y="30" text-anchor="middle" class="label">第 93 层 MLA</text>
+  </g>
+  <text x="600" y="462" text-anchor="middle" class="label">69 KDA + 24 MLA　＝　[KDA, KDA, KDA, MLA] × 23 + MLA</text>
+  <rect x="72" y="479" width="1043" height="32" rx="16" fill="#fff4dd" stroke="#e4bd65"/>
+  <text x="594" y="500" text-anchor="middle" class="small">FFN 是另一条正交分类：第 1 层 Dense MLP；第 2–93 层 MoE（896 routed · top-16 + 2 shared）</text>
+
+  <!-- Decoder skeleton -->
+  <g filter="url(#shadow)">
+    <rect x="43" y="550" width="342" height="263" rx="20" fill="#ffffff" stroke="#d8e4ec"/>
+    <rect x="408" y="550" width="354" height="263" rx="20" fill="#ffffff" stroke="#c9c2e7"/>
+    <rect x="785" y="550" width="372" height="263" rx="20" fill="#ffffff" stroke="#add8d0"/>
+  </g>
+  <text x="214" y="584" text-anchor="middle" class="section">共同 Decoder 骨架</text>
+  <rect x="73" y="607" width="282" height="42" rx="10" fill="#e9f2f8" stroke="#a9c6d8"/>
+  <text x="214" y="634" text-anchor="middle" class="label">Pre-Attn AttnRes + RMSNorm</text>
+  <path class="arrow" d="M214 649 V664"/>
+  <rect x="73" y="666" width="282" height="42" rx="10" fill="#e8f5f1" stroke="#73bbae"/>
+  <text x="214" y="693" text-anchor="middle" class="label">Mixer：KDA 或 MLA</text>
+  <path class="arrow" d="M214 708 V723"/>
+  <rect x="73" y="725" width="282" height="42" rx="10" fill="#e9f2f8" stroke="#a9c6d8"/>
+  <text x="214" y="752" text-anchor="middle" class="label">Post-Attn AttnRes + RMSNorm</text>
+  <path class="arrow" d="M214 767 V781"/>
+  <text x="214" y="802" text-anchor="middle" class="small">Dense MLP 或 MoE → 下一层</text>
+
+  <!-- KDA inset -->
+  <text x="585" y="584" text-anchor="middle" class="section">KDA / Gated Delta Mixer</text>
+  <rect x="438" y="605" width="294" height="48" rx="11" fill="#eeeafa" stroke="#aaa4db"/>
+  <text x="585" y="634" text-anchor="middle" class="label">Q / K / V + gates + β 投影</text>
+  <path class="arrow" d="M585 653 V667"/>
+  <rect x="438" y="669" width="294" height="48" rx="11" fill="#e9e6f8" stroke="#9c94d0"/>
+  <text x="585" y="691" text-anchor="middle" class="label">Causal Conv1D · width 4</text>
+  <text x="585" y="711" text-anchor="middle" class="tiny">更新 Conv State</text>
+  <path class="arrow" d="M585 717 V731"/>
+  <rect x="438" y="733" width="294" height="55" rx="11" fill="#e5e1f5" stroke="#8c82c6"/>
+  <text x="585" y="756" text-anchor="middle" class="label">Gated Delta recurrent update</text>
+  <text x="585" y="778" text-anchor="middle" class="tiny">更新 FP32 Recurrent Matrix</text>
+  <text x="585" y="805" text-anchor="middle" class="small">历史被折叠进状态；不保存逐 token KV</text>
+
+  <!-- MLA inset -->
+  <text x="971" y="584" text-anchor="middle" class="section">MLA / NoPE Mixer</text>
+  <rect x="815" y="605" width="312" height="48" rx="11" fill="#e5f5f0" stroke="#63b7a7"/>
+  <text x="971" y="634" text-anchor="middle" class="label">x → q_c 1536 + cKV 512 + shared 64</text>
+  <path class="arrow" d="M971 653 V667"/>
+  <rect x="815" y="669" width="312" height="55" rx="11" fill="#dff3ec" stroke="#63b7a7"/>
+  <text x="971" y="692" text-anchor="middle" class="label">96 个 Query heads</text>
+  <text x="971" y="714" text-anchor="middle" class="tiny">128-d content + 64-d shared component</text>
+  <path class="arrow" d="M971 724 V738"/>
+  <rect x="815" y="740" width="312" height="48" rx="11" fill="#d8efe7" stroke="#55ad9d"/>
+  <text x="971" y="761" text-anchor="middle" class="label">Paged latent cache</text>
+  <text x="971" y="781" text-anchor="middle" class="tiny">每 token：cKV 512 + shared 64 = 576</text>
+  <text x="971" y="805" text-anchor="middle" class="small">K3 为 NoPE：这 64 维不执行 RoPE</text>
+
+  <!-- Output -->
+  <rect x="42" y="831" width="188" height="45" rx="11" fill="#eeeafa" stroke="#aaa4db"/>
+  <text x="136" y="859" text-anchor="middle" class="label">完成 93 层 Decoder</text>
+  <path class="arrow" d="M230 853 H263"/>
+  <rect x="265" y="831" width="190" height="45" rx="11" fill="#e9f8f4" stroke="#75b9ad"/>
+  <text x="360" y="859" text-anchor="middle" class="label">Final RMSNorm</text>
+  <path class="arrow" d="M455 853 H488"/>
+  <rect x="490" y="831" width="220" height="45" rx="11" fill="#173b57"/>
+  <text x="600" y="859" text-anchor="middle" class="white">Parallel LM Head</text>
+  <path class="arrow" d="M710 853 H743"/>
+  <rect x="745" y="831" width="190" height="45" rx="11" fill="#e9f2f8" stroke="#a9c6d8"/>
+  <text x="840" y="859" text-anchor="middle" class="label">Next-token logits</text>
+  <text x="600" y="894" text-anchor="middle" class="tiny">概念图，非按比例 · AttnRes 与 KVCache 无关 · Final RMSNorm 位于 compute_logits() · main@6accb779</text>
+</svg>
