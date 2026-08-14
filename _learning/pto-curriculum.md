@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-13。
+最后更新：2026-08-14。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础阶段。已建立 Tile、布局、有效区、Event 与跨核 Ring ownership 基础；下一步补齐 GlobalTensor 地址映射，再进入 TMOV/TMATMUL、reduce 与真实 GEMM kernel。
+当前阶段：ISA 基础阶段。已建立 Tile、布局、有效区、Event、跨核 Ring ownership 与 GlobalTensor 地址映射基础；下一步以真实 GEMM 串起 GM descriptor、Left/Right/Acc Tile、TMATMUL 与存储，再补齐 TMOV/layout conversion、reduce 和完整 credit 状态机。
 
 ## 已完成章节
 
@@ -29,6 +29,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-11 | Tile 容量、有效区、布局与位置 | capacity shape + valid region + ND/NZ/ZN + TileType | [课程 02]({% post_url 2026-08-11-pto-isa-tile-capacity-valid-layout %}) |
 | 2026-08-12 | Event 与 load-compute-store 流水 | MTE2 → Event → PIPE_V → Event → MTE3 | [课程 03]({% post_url 2026-08-12-pto-isa-event-pipeline %}) |
 | 2026-08-13 | 双向 TPipe 的 Ring ownership | PyPTO workspace → 双 GM ring → TPUSH/TPOP → ready/free credits | [课程 04]({% post_url 2026-08-13-pto-isa-bidirectional-tpipe-ring-ownership %}) |
+| 2026-08-14 | GlobalTensor 五维地址映射 | pointer + 5D shape/stride/layout → ND/DN folding → DMA burst/gap → 2D Tile | [课程 05]({% post_url 2026-08-14-pto-isa-globaltensor-5d-address-mapping %}) |
 
 ## ISA 知识地图
 
@@ -38,8 +39,12 @@ permalink: /learning/pto-curriculum/
 | Valid region | destination 通常定义语义域；是连续前缀，不是任意 mask；区外默认 unspecified | 已讲透基础 |
 | TileType/location | Vec、Mat、Left、Right、Acc 等位置参与指令重载与校验 | 已讲基础 |
 | Layout | BLayout 描述外层次序，SLayout/SFractalSize 描述盒化基块；逻辑 shape 相同不等于物理布局相同 | 已讲基础 |
+| GlobalTensor descriptor | pointer 不拥有 GM；shape 定坐标域，element-stride 定物理距离，layout 定 2D↔5D 解释/特化 | 已讲透 ND/DN 基础 |
+| ND/DN address folding | ND 折叠前四维为 row；DN 以 shape3 为 row、其余相关维折叠为 col；最终地址是 5D index 与 stride 的点积 | 已讲透基础 |
+| GlobalTensor subview | C++ `TASSIGN` 重绑 pointer；IR `partition_view` 是纯逻辑 descriptor；TPipe `subOffset` 是 ring slot 内字节偏移 | 已建立边界 |
 | 对齐 | 未盒化 row-major 行宽通常需要 32 B 对齐；尾块用固定 capacity + dynamic valid 表达 | 已讲基础 |
-| TLOAD/TSTORE | 实际传输范围受 valid region 控制；跨布局、dtype、location 受代际约束 | 已讲 2 次 |
+| TLOAD/TSTORE | 实际传输范围受 valid region 控制；跨布局、dtype、location 受代际约束 | 已讲 3 次 |
+| A2/A3 ND/DN DMA | ND/DN 把语义映射为 nBurst/lenBurst/gmGap；shape、valid shape、32 B 对齐与 burst 上限是 backend contract | 已讲基础，gap 整除待验证 |
 | TADD | 以 destination valid region 为迭代域；输入兼容性仍是调用方 contract | 已讲基础 |
 | Event | 精确表达 producer/consumer pipeline 依赖，不是全局 barrier | 已讲透基础 |
 | Pipe mapping | TLOAD→MTE2、TADD→V、Vec TSTORE→MTE3、TMATMUL→M | 已讲基础 |
@@ -54,7 +59,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [67e230d](https://github.com/hw-native-sys/pto-isa/commit/67e230d5e92fe351303a8b5b7cc16809e4a0532e) | pto_tile.hpp、event.hpp、fifo.hpp、TPush.hpp、TPop.hpp、Tile/Event、TLOAD/TADD/TSTORE、TPUSH/TPOP | ISA 深挖 3 |
+| pto-isa | [25292e9](https://github.com/hw-native-sys/pto-isa/commit/25292e99909a1fc46aaa1313c5c6b628b943ca6a) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、GlobalTensor.md、partition-view.md、add_custom.cpp、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、Tile/Event、TPUSH/TPOP | ISA 深挖 4 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [307d048](https://github.com/hw-native-sys/PTOAS/commit/307d0484a9e7d5e36f01b253d2bebe4d2f45fe81) | TLoadOp::verify、PTOTLoadToTLOAD、dynamic subview tests | 初步 |
 | pypto | [7102058](https://github.com/hw-native-sys/pypto/commit/71020585278b68f56c72c40d5570f07dbb20bc8b) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、ComputeGMPipeWorkspaceElements、PrepareGMSlotBufferLayout | 跨仓深挖 1 |
@@ -66,6 +71,11 @@ permalink: /learning/pto-curriculum/
 - Tile capacity shape 是静态资源/type contract；valid region 是本次运行的真实语义域。
 - Valid region 是左上角连续前缀；区外元素除非指令明示，否则不得假设为零或保持不变。
 - Tile location 与 layout 都参与指令合法性；shape/dtype 相同不足以证明两个 Tile 可互换。
+- GlobalTensor 不拥有 GM；其有效期不得超过底层 allocation，且 stride 单位固定为元素。
+- 五维坐标到 GM 的元素 offset 是 `Σ(ik×stridek)`；layout 负责从 Tile `(row,col)` 恢复五维坐标，不能替代 stride。
+- ND 的 `validRows=shape0×shape1×shape2×shape3`、`validCols=shape4`；DN 的 `validRows=shape3`、`validCols=shape0×shape1×shape2×shape4`。
+- A2/A3 plain ND/DN `TLOAD` 额外受 32 B、`nBurst<4096` 与 backend gap 表达约束；CPU-SIM 数学可执行不等于设备路径合法。
+- `TASSIGN(GlobalTensor)`、IR `partition_view` 与 TPipe `subOffset` 分别属于 pointer rebase、逻辑子视图与 transport slot 字节偏移，单位和 owner 不得混用。
 - Scheduler/CacheManager 拥有 physical block ID；Serving 打包固定形状 shared tensor。
 - SWA 页内连续性允许 page-run；compressed top-k 没有相同保证。
 - gather_row.shapes 是静态盒子，valid_shape 是运行期传输范围；必须同时限制目标 subview 与 GM partition。
@@ -80,13 +90,17 @@ permalink: /learning/pto-curriculum/
 
 ## 待验证推断
 
+- A2/A3 plain ND/DN 中 `gmGap` 通过字节数右移 5 位得到；如果 gap 不是 32 B 整数倍，是否由调用前的公共 verifier 拒绝，当前尚未找到闭合证据。
+- `pto.partition_view` 的 offsets/sizes 如何在 PTOAS/PyPTO lowering 中具体变成 GlobalTensor pointer/shape/stride，尚未跨仓追踪。
 - `TPOP_IMPL(Pipe&, GlobalData&)` 在 A2/A3 `DIR_BOTH` 的 Cube 分支未显式应用 `cons.entryOffset`，是否构成 V2C 直接视图地址错误，尚缺直接调用与设备测试。
 - `SyncPeriod` 的批量 credit 可减少同步消息，但对具体吞吐/等待时间的影响需要 device trace 和对照实验。
 - TPUSH 文档的 A2/A3 local FIFO 表述可能混淆“GM transport backing”与“consumer-local destination”。
 
 ## 尚未解释的知识债
 
-- GlobalTensor 的五维 shape/stride、partition 与二维 Tile 视图映射。
+- NZ/5HD 的 C0 盒化五维地址映射及其与二维 Tile 的关系。
+- GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract。
+- `partition_view` → lowering → GlobalTensor/TLOAD 的跨仓证据链。
 - TMOV、TRESHAPE、transpose 与 ND/NZ/ZN 布局转换的完整合法矩阵。
 - TMATMUL 的 Left/Right/Acc Tile、fractal 与 Cube pipeline。
 - reduce 指令的 valid region、精度提升和跨行/列语义。
@@ -99,8 +113,9 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 深挖 GlobalTensor 五维 shape/stride/partition，补齐 GM→Tile 地址映射与 subOffset 边界。
-2. 用真实 GEMM kernel 串起 GlobalTensor、TLOAD、Left/Right/Acc Tile、TMATMUL 与 TSTORE。
-3. 分析 TMOV/TRESHAPE 和 ND/NZ/ZN 转换，解释 layout conversion 的成本。
+1. 用真实 GEMM kernel 串起 GlobalTensor、TLOAD、Left/Right/Acc Tile、TMATMUL 与 TSTORE。
+2. 分析 TMOV/TRESHAPE 和 ND/NZ/ZN 转换，解释 layout conversion 的成本。
+3. 追踪 `partition_view` 经 PyPTO/PTOAS lowering 成为 GlobalTensor/TLOAD 的跨仓地址 contract。
 4. 补齐默认深度 TPipe 的 credit batching、wrap-around 与 GlobalTensor TPOP 疑点。
 5. 再向 PyPTO/PTOAS 追踪 Tile/Event/TPipe contract 如何在 IR 中表达和 lowering。
+
