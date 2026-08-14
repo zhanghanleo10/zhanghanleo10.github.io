@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 2：Scheduler 请求建档、waiting 状态与物理 batch 形成。
-- 当前主线：一次 offline `LLM.generate()` 请求从 prompt 到 Scheduler 的完整生命周期；已完成前端对象冻结、ADD wire protocol、取消/背压/故障语义，以及 `Request` 的 Scheduler admission。下一章进入 `Scheduler.schedule()` 的 waiting loop。
+- 当前主线：一次 offline `LLM.generate()` 请求从 prompt 到 Scheduler 的完整生命周期；已完成逻辑 admission 与 `Scheduler.schedule()` 首次物理 batch 形成。下一章进入 running request 的 slot 追加与 preemption。
 
 ## 已完成章节
 
@@ -17,6 +17,7 @@
 | 2026-08-10 02 | `SyncMPClient → Msgpack/ZMQ/Tensor IPC → EngineCoreProc.input_queue` | [`51562de5`](https://github.com/vllm-project/vllm/commit/51562de5ab16bacd821d7130187b6bebdd293f93) | [跨进程 wire protocol]({{ '/articles/vllm-enginecore-request-wire-protocol/' | relative_url }}) |
 | 2026-08-10 03 | `ADD/ABORT 双队列 → output buffer/backpressure → EngineDeadError` | [`bd653607`](https://github.com/vllm-project/vllm/commit/bd6536071cec4dcd8cf91c0e2aa04aec83fc1c37) | [取消、背压与故障传播]({{ '/articles/vllm-enginecore-abort-backpressure-failure/' | relative_url }}) |
 | 2026-08-13 04 | `EngineCore.add_request → Request.from_engine_core_request → Scheduler.add_request` | [`98f86b9c`](https://github.com/vllm-project/vllm/commit/98f86b9c02329200a0390aecfe598e27928cbf40) | [Scheduler admission]({{ '/articles/vllm-scheduler-request-admission/' | relative_url }}) |
+| 2026-08-14 05 | `Scheduler.schedule waiting loop → prefix lookup → KVCacheManager.allocate_slots → SchedulerOutput` | [`827a2af8`](https://github.com/vllm-project/vllm/commit/827a2af806c4e4ea7bcc280f57f793e6a5fcc676) | [第一个物理 Batch]({{ '/articles/vllm-scheduler-first-physical-batch/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -64,6 +65,14 @@
 - `Scheduler.finish_requests`
 - `Scheduler._free_request`
 - `EngineCoreRequestType`
+- `Scheduler.schedule`（waiting flow）
+- `Scheduler._get_local_prefix_cache_hit`
+- `KVCacheManager.get_computed_blocks`
+- `KVCacheManager.allocate_slots`
+- `KVCacheManager.record_prefix_cache_stats`
+- `KVCacheBlocks`
+- `NewRequestData.from_request`
+- `SchedulerOutput`
 
 ## 已确认不变量
 
@@ -87,6 +96,11 @@
 18. `Scheduler.requests` 是 canonical registry；`waiting`、`skipped_waiting`、`running` 引用同一 `Request` 对象。
 19. grammar、remote KV、streaming input 等异步依赖未满足时进入 `skipped_waiting`，仍属于活请求。
 20. finished Request 可能因 connector 延迟释放而暂留 registry；存在于 `requests` 不等于仍可调度。
+21. waiting request 的物理 admission 以 `KVCacheManager.allocate_slots()` 成功为界；prefix hit、token budget 与 sequence slot 均不是充分条件。
+22. waiting allocation 失败时，请求不出队、状态不转 RUNNING、token/input budget 不扣减；FCFS 主路径在队首容量失败时停止继续接纳。
+23. 首次入场时 `Request.num_computed_tokens` 只提交本地/外部 cache 已覆盖的进度，本 step 的 `num_scheduled_tokens` 只有在 ModelRunner 输出回到 Scheduler 后才成为已计算进度。
+24. prefix cache 查询统计在成功 allocation 后记录；未调度的重试不计数，避免 cache hit rate 被重试次数放大。
+25. `SchedulerOutput` 传递 Host 侧 request/block/token 计划；设备 tensor 和 slot mapping 属于 ModelRunner 边界。
 
 ## 前置依赖与版本注意
 
@@ -96,7 +110,8 @@
 ## 尚未解释的知识债
 
 - `AsyncMPClient`/DP client 的 engine identity 选择、跨 producer 顺序和线程安全边界。
-- `Scheduler.schedule()` 如何从 waiting queue 计算 prefix hit、token budget、sequence slot 和 KV allocation。
+- hybrid KV groups 下 per-group prefix blocks 如何收敛为统一 `num_computed_tokens`，以及 partial-tail/CoW 的正确性边界。
+- watermark、`scheduler_reserve_full_isl` 与 async KV load `reserved_blocks` 的容量策略和配置取舍。
 - `n>1` parallel sampling 的 parent/child ID 与前端合并。
 - multimodal cache 在线程池下的并发契约，以及 PR #50896 的最终结果。
 - Rust EngineCore client 与 Python `EngineCoreRequest`/aux frame 的双向协议兼容测试。
@@ -109,6 +124,7 @@
 
 ## 下一批候选章节
 
-1. 下一主线：`Scheduler.schedule()` waiting loop、prefix hit、token budget、`max_num_seqs` 与 `KVCacheManager.allocate_slots()`。
-2. 后续：running request、preemption 与 waiting/resume 状态转换。
+1. 下一主线：running request 的 slot 追加、preemption victim 选择与 `PREEMPTED → waiting → resumed` 状态闭环。
+2. 后续：`SchedulerOutput` 到 ModelRunner 的 block table、slot mapping 与设备 input buffer。
 3. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
+
