@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 2：Scheduler 请求建档、waiting 状态与物理 batch 形成。
-- 当前主线：一次 offline `LLM.generate()` 请求从 prompt 到 Scheduler 的完整生命周期；已完成逻辑 admission 与 `Scheduler.schedule()` 首次物理 batch 形成。下一章进入 running request 的 slot 追加与 preemption。
+- 阶段 2：Scheduler 请求建档、物理 batch 形成与资源压力下的状态闭环。
+- 当前主线：一次 offline `LLM.generate()` 请求从 prompt 到 Scheduler 的完整生命周期；已完成 waiting admission、running slot 追加、preemption victim 选择与恢复协议。下一章进入 `SchedulerOutput → ModelRunner` 的 block table 和设备输入边界。
 
 ## 已完成章节
 
@@ -18,6 +18,7 @@
 | 2026-08-10 03 | `ADD/ABORT 双队列 → output buffer/backpressure → EngineDeadError` | [`bd653607`](https://github.com/vllm-project/vllm/commit/bd6536071cec4dcd8cf91c0e2aa04aec83fc1c37) | [取消、背压与故障传播]({{ '/articles/vllm-enginecore-abort-backpressure-failure/' | relative_url }}) |
 | 2026-08-13 04 | `EngineCore.add_request → Request.from_engine_core_request → Scheduler.add_request` | [`98f86b9c`](https://github.com/vllm-project/vllm/commit/98f86b9c02329200a0390aecfe598e27928cbf40) | [Scheduler admission]({{ '/articles/vllm-scheduler-request-admission/' | relative_url }}) |
 | 2026-08-14 05 | `Scheduler.schedule waiting loop → prefix lookup → KVCacheManager.allocate_slots → SchedulerOutput` | [`827a2af8`](https://github.com/vllm-project/vllm/commit/827a2af806c4e4ea7bcc280f57f793e6a5fcc676) | [第一个物理 Batch]({{ '/articles/vllm-scheduler-first-physical-batch/' | relative_url }}) |
+| 2026-08-15 06 | `running slot growth → victim selection → PREEMPTED → prefix lookup → resumed output` | [`615d4cfa`](https://github.com/vllm-project/vllm/commit/615d4cfadeb3d5ea1df248eb59aa128af5dbd441) | [Preemption 与重算闭环]({{ '/articles/vllm-scheduler-preemption-recompute-resume/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -73,6 +74,11 @@
 - `KVCacheBlocks`
 - `NewRequestData.from_request`
 - `SchedulerOutput`
+- `Scheduler.schedule`（running flow 与 preemption rollback）
+- `Scheduler._preempt_request`
+- `Scheduler._update_after_schedule`
+- `Scheduler._make_cached_request_data`
+- `CachedRequestData`
 
 ## 已确认不变量
 
@@ -101,6 +107,12 @@
 23. 首次入场时 `Request.num_computed_tokens` 只提交本地/外部 cache 已覆盖的进度，本 step 的 `num_scheduled_tokens` 只有在 ModelRunner 输出回到 Scheduler 后才成为已计算进度。
 24. prefix cache 查询统计在成功 allocation 后记录；未调度的重试不计数，避免 cache hit rate 被重试次数放大。
 25. `SchedulerOutput` 传递 Host 侧 request/block/token 计划；设备 tensor 和 slot mapping 属于 ModelRunner 边界。
+26. running request 的 KV continuation 仍以 `KVCacheManager.allocate_slots()` 成功为物理边界；返回 `None` 会触发 victim 选择，而不是产生部分 allocation。
+27. FCFS preemption 取 running 队尾；PRIORITY 取数值优先级最低、同优先级到达最晚的 running 请求；两者都不以重算 FLOPs 为目标函数。
+28. victim 若已进入本轮 batch，必须同步撤销 token/input/encoder budget、spec metadata 与新 block 计划，保证 `SchedulerOutput` 不包含已重置请求。
+29. preemption 释放请求对 KV blocks 的所有权并把 `num_computed_tokens` 清零，但保留 token 历史；恢复进度只能由重新确认的 local/external prefix hit 建立。
+30. resumed request 必须替换 Worker/ModelRunner 中的旧 block IDs，不能按普通 cached request 追加；ModelRunner v2 用完整 `NewRequestData`，v1 用 `CachedRequestData.resumed_req_ids` 表达同一不变量。
+31. async preemption 必须隔离旧 step 的 in-flight/stale output；队列状态变化与迟到 model output 共同构成正确性协议。
 
 ## 前置依赖与版本注意
 
@@ -121,10 +133,12 @@
 - `connector.on_new_request()` 抛异常时 queue/registry 的回滚原子性。
 - 运行期间 EngineCore 被硬杀时，在途 `get_output`、后续 `add_request` 与各 DP/Ray manager 的一致故障语义。
 - `ENGINE_CORE_DEAD` 在 5 秒 output-thread join、4 秒 socket linger 与 frontend shutdown 竞争下的交付边界。
+- victim selection 未纳入已计算 token、模型结构或实际重算代价；长短 prompt 混合负载下的浪费、公平性和饥饿边界缺少策略级基准。
+- async scheduling 与 PP/MTP/KVConnector 叠加时 stale output、drop mode 和多次连续 preemption 的端到端顺序性。
+- ModelRunner v1/v2 接收 resumed request 后如何清理旧 block table、重建 slot mapping 与同步设备 input buffer。
 
 ## 下一批候选章节
 
-1. 下一主线：running request 的 slot 追加、preemption victim 选择与 `PREEMPTED → waiting → resumed` 状态闭环。
-2. 后续：`SchedulerOutput` 到 ModelRunner 的 block table、slot mapping 与设备 input buffer。
+1. 下一主线：`SchedulerOutput` 到 ModelRunner 的 block table、slot mapping 与设备 input buffer。
+2. 后续：Worker/ModelRunner 执行返回后 `Scheduler.update_from_output` 如何提交 token、修正 speculative progress 并释放 finished request。
 3. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
-
