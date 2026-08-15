@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-14。
+最后更新：2026-08-15。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础阶段。已建立 Tile、布局、有效区、Event、跨核 Ring ownership 与 GlobalTensor 地址映射基础；下一步以真实 GEMM 串起 GM descriptor、Left/Right/Acc Tile、TMATMUL 与存储，再补齐 TMOV/layout conversion、reduce 和完整 credit 状态机。
+当前阶段：ISA 基础阶段。已建立 Tile、布局、有效区、Event、跨核 Ring ownership、GlobalTensor 地址映射与真实 GEMM 的 Cube 执行闭环；下一步深挖 `TMOV`/Mat→Left/Right fractal conversion，再补齐 reduce、tail tiling 和完整 credit 状态机。
 
 ## 已完成章节
 
@@ -30,6 +30,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-12 | Event 与 load-compute-store 流水 | MTE2 → Event → PIPE_V → Event → MTE3 | [课程 03]({% post_url 2026-08-12-pto-isa-event-pipeline %}) |
 | 2026-08-13 | 双向 TPipe 的 Ring ownership | PyPTO workspace → 双 GM ring → TPUSH/TPOP → ready/free credits | [课程 04]({% post_url 2026-08-13-pto-isa-bidirectional-tpipe-ring-ownership %}) |
 | 2026-08-14 | GlobalTensor 五维地址映射 | pointer + 5D shape/stride/layout → ND/DN folding → DMA burst/gap → 2D Tile | [课程 05]({% post_url 2026-08-14-pto-isa-globaltensor-5d-address-mapping %}) |
+| 2026-08-15 | 真实 GEMM 的 TMATMUL 与 K 分块累加 | GM ND/DN → L1 Mat → L0 Left/Right → fp32 Acc → FIX/TSTORE | [课程 06]({% post_url 2026-08-15-pto-isa-gemm-tmatmul-k-accumulation %}) |
 
 ## ISA 知识地图
 
@@ -52,14 +53,17 @@ permalink: /learning/pto-curriculum/
 | TPipe/TPUSH/TPOP | A2/A3 跨 Cube/Vector Tile 传递包含 GM payload ring 与 ready/free credit | 已讲基础 |
 | DIR_BOTH ownership | C2V/V2C 必须使用两条不重叠 ring；总 footprint=`2×SlotNum×SlotSize` | 已讲透核心缺陷 |
 | Credit batching | 初始 SlotNum 个 credit 免等待；之后按 SyncPeriod 批量 free/wait | 已建立模型，待完整演算 |
-| Double buffering | 既需 producer→consumer，也需 consumer→下一 producer 的 slot 复用依赖 | 已建立问题 |
-| Matrix/Reduce/通信 ISA | 尚未系统覆盖 | 待学习 |
+| Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
+| TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
+| K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
+| Cube pipe chain | TLOAD/MTE2 → TMOV/MTE1 → TMATMUL/M → TSTORE/FIX，含反向复用 event 与末尾 drain | 已讲透一个真实实例 |
+| Reduce/通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [25292e9](https://github.com/hw-native-sys/pto-isa/commit/25292e99909a1fc46aaa1313c5c6b628b943ca6a) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、GlobalTensor.md、partition-view.md、add_custom.cpp、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、Tile/Event、TPUSH/TPOP | ISA 深挖 4 |
+| pto-isa | [f51c92f](https://github.com/hw-native-sys/pto-isa/commit/f51c92f610827daad0ddfb383072e03d514b4ae9) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、TMATMUL.md、GlobalTensor.md、partition-view.md、add_custom.cpp、gemm_basic_custom.cpp、gemm_basic host/test、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TSTORE、Tile/Event、TPUSH/TPOP | ISA 深挖 5 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [307d048](https://github.com/hw-native-sys/PTOAS/commit/307d0484a9e7d5e36f01b253d2bebe4d2f45fe81) | TLoadOp::verify、PTOTLoadToTLOAD、dynamic subview tests | 初步 |
 | pypto | [7102058](https://github.com/hw-native-sys/pypto/commit/71020585278b68f56c72c40d5570f07dbb20bc8b) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、ComputeGMPipeWorkspaceElements、PrepareGMSlotBufferLayout | 跨仓深挖 1 |
@@ -87,6 +91,11 @@ permalink: /learning/pto-curriculum/
 - 两方向独立 flag 只保证逻辑顺序，不保证 payload 物理隔离；producer 与 consumer 必须共享完全相同的方向 base。
 - `pypto` workspace 分配、pipe offset 与 `pto-isa` 地址计算构成跨仓布局 ABI；扩容必须先于启用第二段地址。
 - 一个仍在途的 payload 在 ready 到 free 的生命周期内必须独占其完整物理字节区间。
+- `TMATMUL` 只消费已经位于 L0A/L0B、role/layout 合法的 Left/Right Tile；普通 Mat Tile 必须先经 `TMOV` 转换。
+- K 分块 GEMM 的首 slice 必须初始化 Acc，后续 slice 必须显式累加；fp32 Acc 在全部 K-loop 和 FIX store 完成前保持所有权。
+- L1/L0 ping-pong 既需要 MTE2→MTE1→M 的正向可见性，也需要 M→MTE1→MTE2 的反向 slot 复用依赖。
+- `gemm_basic` 的 B 逻辑 shape 是 `[K,N]`，物理 ABI 是 contiguous `[N,K]` DN；host transpose-copy 与 kernel layout 必须一致。
+- 不同 memory space 可以使用相同数值 offset；`TASSIGN(..., 0x0)` 只在各自 L1/L0A/L0B/L0C 地址域内解释。
 
 ## 待验证推断
 
@@ -95,6 +104,8 @@ permalink: /learning/pto-curriculum/
 - `TPOP_IMPL(Pipe&, GlobalData&)` 在 A2/A3 `DIR_BOTH` 的 Cube 分支未显式应用 `cons.entryOffset`，是否构成 V2C 直接视图地址错误，尚缺直接调用与设备测试。
 - `SyncPeriod` 的批量 credit 可减少同步消息，但对具体吞吐/等待时间的影响需要 device trace 和对照实验。
 - TPUSH 文档的 A2/A3 local FIFO 表述可能混淆“GM transport backing”与“consumer-local destination”。
+- `TMATMUL` 文档与 CPU simulator 声明/检查静态 shape equality，但当前 A2/A3 wrapper 可见检查只覆盖 dtype/location；下层 verifier 是否统一拒绝 mismatch 尚未确认。
+- `gemm_basic` 理论 GM 请求量约 39 MiB、算术强度约 79 FLOP/byte，但 L2 reuse 与 MTE/MMAD overlap 未经本课程设备 trace 验证。
 
 ## 尚未解释的知识债
 
@@ -102,7 +113,10 @@ permalink: /learning/pto-curriculum/
 - GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract。
 - `partition_view` → lowering → GlobalTensor/TLOAD 的跨仓证据链。
 - TMOV、TRESHAPE、transpose 与 ND/NZ/ZN 布局转换的完整合法矩阵。
-- TMATMUL 的 Left/Right/Acc Tile、fractal 与 Cube pipeline。
+- `TMOV` 的 L1 Mat→L0 Left/Right fractal offset、合法 layout 矩阵与代际差异。
+- A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region 与最终 store。
+- `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
+- 非整除 M/N/K tail 下 TMATMUL valid region、padding 与 output ownership。
 - reduce 指令的 valid region、精度提升和跨行/列语义。
 - 默认 SlotNum=4 下 credit batching、ring wrap-around、析构 drain 的完整状态机。
 - A2/A3 GM ring 与 A5 consumer SRAM 的 TPUSH/TPOP 差异。
@@ -113,9 +127,8 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 用真实 GEMM kernel 串起 GlobalTensor、TLOAD、Left/Right/Acc Tile、TMATMUL 与 TSTORE。
-2. 分析 TMOV/TRESHAPE 和 ND/NZ/ZN 转换，解释 layout conversion 的成本。
-3. 追踪 `partition_view` 经 PyPTO/PTOAS lowering 成为 GlobalTensor/TLOAD 的跨仓地址 contract。
-4. 补齐默认深度 TPipe 的 credit batching、wrap-around 与 GlobalTensor TPOP 疑点。
+1. 深挖 `TMOV`：L1 Mat→L0 Left/Right fractal，以及 ND/DN/NZ/ZN layout conversion 的合法矩阵和成本。
+2. 追踪 `partition_view` 经 PyPTO/PTOAS lowering 成为 GlobalTensor/TLOAD 的跨仓地址 contract。
+3. 结合最新 TPipe pending-credit 修复，补齐默认深度下 batching、wrap-around、析构 drain 与连续 dispatch 状态机。
+4. 进入 reduce 指令的 valid region、累加精度和跨行/列语义。
 5. 再向 PyPTO/PTOAS 追踪 Tile/Event/TPipe contract 如何在 IR 中表达和 lowering。
-
