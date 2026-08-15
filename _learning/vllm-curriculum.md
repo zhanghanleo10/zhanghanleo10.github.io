@@ -24,6 +24,14 @@
 
 - [v0.22.1 EngineCore 基类]({{ '/articles/vllm-enginecore-source-walkthrough/' | relative_url }})：旧版本逐函数专题，后续课程会基于当前 `main` 标注漂移。
 - [v0.22.1 EngineCore 派生类]({{ '/articles/vllm-enginecore-subclasses-source-walkthrough/' | relative_url }})：EngineCoreProc/DP/Ray 专题。
+- [vLLM CUDA Graph 源码课程 01–11]({{ '/courses/cuda-graph/' | relative_url }})：固定到 vLLM `v0.22.1`，从 Stream/Event、Capture 与 PyTorch CUDAGraph，推进到 FULL/PIECEWISE Dispatcher、`BatchDescriptor`、Padding、Offloader 多流和 NCCL 一致性。
+
+## CUDA Graph 支线进度
+
+- 已完成：第 1–11 课；每课均含静态契约、破坏性反例、源码映射和验收题。
+- 冻结边界：FULL Graph 覆盖 model backbone forward，不把 Scheduler、Sampler 或整个 BeamSearch 状态机误算入同一张图。
+- 下一课：Physical Beam Geometry 与 Persistent Suffix KV；先区分 `scheduled_token_count`、`physical_row_count`、`logits_row_count`，再拼接 execution plan、session slot/generation 与持久 suffix KV 生命周期。
+- 方法：exact signature 优先；只有证明 padding 语义等价才扩大 bucket；不受支持的拓扑必须显式落到另一张图或 eager。
 
 ## 已覆盖符号
 
