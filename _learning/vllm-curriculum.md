@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 2：Scheduler 请求建档、物理 batch 形成与资源压力下的状态闭环。
-- 当前主线：一次 offline `LLM.generate()` 请求从 prompt 到 Scheduler 的完整生命周期；已完成 waiting admission、running slot 追加、preemption victim 选择与恢复协议。下一章进入 `SchedulerOutput → ModelRunner` 的 block table 和设备输入边界。
+- 阶段 3：Scheduler 执行计划到 Executor/Worker/ModelRunner 设备状态边界。
+- 当前主线：一次 offline `LLM.generate()` 请求已从 prompt 追到可执行的 KV 地址计划；已完成 `SchedulerOutput → RequestState/BlockTables/InputBuffers → slot_mapping`。下一章沿 `ModelRunnerOutput → Scheduler.update_from_output` 追踪 token/spec progress 的提交事务。
 
 ## 已完成章节
 
@@ -19,19 +19,12 @@
 | 2026-08-13 04 | `EngineCore.add_request → Request.from_engine_core_request → Scheduler.add_request` | [`98f86b9c`](https://github.com/vllm-project/vllm/commit/98f86b9c02329200a0390aecfe598e27928cbf40) | [Scheduler admission]({{ '/articles/vllm-scheduler-request-admission/' | relative_url }}) |
 | 2026-08-14 05 | `Scheduler.schedule waiting loop → prefix lookup → KVCacheManager.allocate_slots → SchedulerOutput` | [`827a2af8`](https://github.com/vllm-project/vllm/commit/827a2af806c4e4ea7bcc280f57f793e6a5fcc676) | [第一个物理 Batch]({{ '/articles/vllm-scheduler-first-physical-batch/' | relative_url }}) |
 | 2026-08-15 06 | `running slot growth → victim selection → PREEMPTED → prefix lookup → resumed output` | [`615d4cfa`](https://github.com/vllm-project/vllm/commit/615d4cfadeb3d5ea1df248eb59aa128af5dbd441) | [Preemption 与重算闭环]({{ '/articles/vllm-scheduler-preemption-recompute-resume/' | relative_url }}) |
+| 2026-08-16 07 | `SchedulerOutput → GPUModelRunner v2 → RequestState/BlockTables → slot_mapping` | [`fa9d67f7`](https://github.com/vllm-project/vllm/commit/fa9d67f7828e9bc105912ddf41dc384105732b1e) | [设备状态与 Slot Mapping]({{ '/articles/vllm-scheduler-output-modelrunner-device-state/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
 - [v0.22.1 EngineCore 基类]({{ '/articles/vllm-enginecore-source-walkthrough/' | relative_url }})：旧版本逐函数专题，后续课程会基于当前 `main` 标注漂移。
 - [v0.22.1 EngineCore 派生类]({{ '/articles/vllm-enginecore-subclasses-source-walkthrough/' | relative_url }})：EngineCoreProc/DP/Ray 专题。
-- [vLLM CUDA Graph 源码课程 01–11]({{ '/courses/cuda-graph/' | relative_url }})：固定到 vLLM `v0.22.1`，从 Stream/Event、Capture 与 PyTorch CUDAGraph，推进到 FULL/PIECEWISE Dispatcher、`BatchDescriptor`、Padding、Offloader 多流和 NCCL 一致性。
-
-## CUDA Graph 支线进度
-
-- 已完成：第 1–11 课；每课均含静态契约、破坏性反例、源码映射和验收题。
-- 冻结边界：FULL Graph 覆盖 model backbone forward，不把 Scheduler、Sampler 或整个 BeamSearch 状态机误算入同一张图。
-- 下一课：Physical Beam Geometry 与 Persistent Suffix KV；先区分 `scheduled_token_count`、`physical_row_count`、`logits_row_count`，再拼接 execution plan、session slot/generation 与持久 suffix KV 生命周期。
-- 方法：exact signature 优先；只有证明 padding 语义等价才扩大 bucket；不受支持的拓扑必须显式落到另一张图或 eager。
 
 ## 已覆盖符号
 
@@ -87,6 +80,22 @@
 - `Scheduler._update_after_schedule`
 - `Scheduler._make_cached_request_data`
 - `CachedRequestData`
+- `EngineCore.step`（SchedulerOutput 执行与返回主链）
+- `Executor.execute_model`
+- `WorkerWrapperBase.execute_model`
+- `GPUWorker.execute_model`
+- `GPUModelRunner.finish_requests`
+- `GPUModelRunner.add_requests`
+- `GPUModelRunner.update_requests`
+- `GPUModelRunner.gather_batch_req_state`
+- `GPUModelRunner.prepare_inputs`
+- `GPUModelRunner.prepare_attn`
+- `GPUModelRunner.execute_model`（v2）
+- `RequestState.add_request/remove_request/apply_staged_writes`
+- `BlockTables.append_block_ids/apply_staged_writes`
+- `BlockTables.gather_block_tables/compute_slot_mappings`
+- `InputBuffers`
+- `InputBatch`
 
 ## 已确认不变量
 
@@ -121,6 +130,12 @@
 29. preemption 释放请求对 KV blocks 的所有权并把 `num_computed_tokens` 清零，但保留 token 历史；恢复进度只能由重新确认的 local/external prefix hit 建立。
 30. resumed request 必须替换 Worker/ModelRunner 中的旧 block IDs，不能按普通 cached request 追加；ModelRunner v2 用完整 `NewRequestData`，v1 用 `CachedRequestData.resumed_req_ids` 表达同一不变量。
 31. async preemption 必须隔离旧 step 的 in-flight/stale output；队列状态变化与迟到 model output 共同构成正确性协议。
+32. ModelRunner v2 的 request slot 是固定容量资源：从 `scheduled_new_reqs` 占用，到 `finished_req_ids/preempted_req_ids` 上报后释放；Scheduler admission 必须计入仍持有 Worker slot 的暂停请求。
+33. v2 same-step preempt+resume 必须按 `finish_requests → add_requests` 顺序先 purge 再重建；new/resumed block IDs 用 overwrite，cached continuation 才能 append。
+34. request-slot canonical block table 与 current-batch `input_block_tables` 是两层状态；`idx_mapping` 把稀疏 request slot gather 成紧凑 batch row。
+35. `slot_mapping` 将 position 映射为物理 KV slot；`CP_SIZE=1` 时为 `block_id × block_size + block_offset`，DCP 下还必须按 interleave/rank 将非本地 token 写成 `PAD_SLOT_ID`。
+36. `InputBuffers`、`input_block_tables`、`slot_mappings` 是持久设备 buffer；每 step 更新内容而不重建地址，是 full CUDA Graph 可复用的必要条件，但不是充分条件。
+37. CUDA Graph padding 区必须从 actual token 尾部覆盖为 `PAD_SLOT_ID`，不能保留上一 batch 的有效 slot。
 
 ## 前置依赖与版本注意
 
@@ -143,10 +158,20 @@
 - `ENGINE_CORE_DEAD` 在 5 秒 output-thread join、4 秒 socket linger 与 frontend shutdown 竞争下的交付边界。
 - victim selection 未纳入已计算 token、模型结构或实际重算代价；长短 prompt 混合负载下的浪费、公平性和饥饿边界缺少策略级基准。
 - async scheduling 与 PP/MTP/KVConnector 叠加时 stale output、drop mode 和多次连续 preemption 的端到端顺序性。
-- ModelRunner v1/v2 接收 resumed request 后如何清理旧 block table、重建 slot mapping 与同步设备 input buffer。
+- `_compute_slot_mappings_kernel` 缺少覆盖跨 block 边界、resumed replace、graph padding、DCP interleave 与多 KV group 的直接单测。
+- ModelRunner metadata preparation（staged write、gather、slot mapping）的实际 GPU 时间及其与 full/piecewise graph 边界尚未通过 trace 量化。
+- UVA-backed `all_token_ids` 在长上下文、高并发下的 Host/Device 访问和 page-fault 成本尚未测量。
+- 不同 executor backend 下 `SchedulerOutput` 向各 Worker 传播的一致性、序列化成本与部分 rank 失败语义尚未下钻。
 
 ## 下一批候选章节
 
-1. 下一主线：`SchedulerOutput` 到 ModelRunner 的 block table、slot mapping 与设备 input buffer。
-2. 后续：Worker/ModelRunner 执行返回后 `Scheduler.update_from_output` 如何提交 token、修正 speculative progress 并释放 finished request。
+1. 下一主线：`ModelRunnerOutput → Scheduler.update_from_output` 如何提交 token、修正 speculative progress 并释放 finished request。
+2. 后续：Attention metadata 如何消费 block table、slot mapping、seq lens，并读写真实 KV cache tensor。
 3. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
+
+## 第七篇知识图谱回顾
+
+- 已打通：`LLM.generate → Renderer/InputProcessor → EngineCoreRequest wire → EngineCore queue/failure → Scheduler logical admission → KV physical admission/preemption → Worker device-state materialization`。
+- 已闭合边界：用户请求已经能够被追踪为一次具体的 `input_ids/positions/block_tables/slot_mapping` 设备执行计划。
+- 当前最大盲区：ModelRunner 输出何时成为 Scheduler 可提交 token；async/speculative progress 如何回滚；finished 状态如何同时释放 Scheduler registry、KV ownership 与 Worker slot。
+- 后续路线调整：先完成返回事务，再进入 Attention metadata 和真实 KV cache tensor；暂不提前跳到 Sampling 或 CUDA Graph 优化。
