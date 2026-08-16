@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-15。
+最后更新：2026-08-16。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础阶段。已建立 Tile、布局、有效区、Event、跨核 Ring ownership、GlobalTensor 地址映射与真实 GEMM 的 Cube 执行闭环；下一步深挖 `TMOV`/Mat→Left/Right fractal conversion，再补齐 reduce、tail tiling 和完整 credit 状态机。
+当前阶段：ISA 基础阶段。已打通 `GlobalTensor → TLOAD/MTE2 → L1 Mat → TMOV/MTE1 → L0A/L0B → TMATMUL/M → Acc → TSTORE/FIX`，并完成第七篇知识图谱回顾；下一步聚焦非整除 GEMM tail、compact transfer 与 padding ownership。
 
 ## 已完成章节
 
@@ -31,6 +31,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-13 | 双向 TPipe 的 Ring ownership | PyPTO workspace → 双 GM ring → TPUSH/TPOP → ready/free credits | [课程 04]({% post_url 2026-08-13-pto-isa-bidirectional-tpipe-ring-ownership %}) |
 | 2026-08-14 | GlobalTensor 五维地址映射 | pointer + 5D shape/stride/layout → ND/DN folding → DMA burst/gap → 2D Tile | [课程 05]({% post_url 2026-08-14-pto-isa-globaltensor-5d-address-mapping %}) |
 | 2026-08-15 | 真实 GEMM 的 TMATMUL 与 K 分块累加 | GM ND/DN → L1 Mat → L0 Left/Right → fp32 Acc → FIX/TSTORE | [课程 06]({% post_url 2026-08-15-pto-isa-gemm-tmatmul-k-accumulation %}) |
+| 2026-08-16 | TMOV：L1 Mat 到 L0A/L0B 的角色化重排 | L1 NZ/ZN → MTE1 → L0A ZZ/L0B ZN → TMATMUL | [课程 07]({% post_url 2026-08-16-pto-isa-tmov-l1-to-l0-fractal %}) |
 
 ## ISA 知识地图
 
@@ -57,13 +58,15 @@ permalink: /learning/pto-curriculum/
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
 | Cube pipe chain | TLOAD/MTE2 → TMOV/MTE1 → TMATMUL/M → TSTORE/FIX，含反向复用 event 与末尾 drain | 已讲透一个真实实例 |
+| TMOV Mat→Left/Right（A2/A3） | 保持有效域逻辑值，完成 L1→L0 role transfer；A 的 NZ→ZZ 改外层 block order，B 的 ZN→ZN 保布局搬运 | 已讲透核心路径 |
+| TMOV compact/tail | 默认非 compact 走静态 capacity extent；CompactMode::Normal 把 runtime valid/aligned extent 传给底层 | 已建立边界，待设备量化 |
 | Reduce/通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [f51c92f](https://github.com/hw-native-sys/pto-isa/commit/f51c92f610827daad0ddfb383072e03d514b4ae9) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、TMATMUL.md、GlobalTensor.md、partition-view.md、add_custom.cpp、gemm_basic_custom.cpp、gemm_basic host/test、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TSTORE、Tile/Event、TPUSH/TPOP | ISA 深挖 5 |
+| pto-isa | [f51c92f](https://github.com/hw-native-sys/pto-isa/commit/f51c92f610827daad0ddfb383072e03d514b4ae9) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、TMATMUL.md、GlobalTensor.md、partition-view.md、add_custom.cpp、gemm_basic_custom.cpp、gemm_basic host/test、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TSTORE、Tile/Event、TPUSH/TPOP、TMovToLeft/Right、TExtractToA/B、TileLeft/Right alias、CPU TMOV 与 A2/A3 device ST | ISA 深挖 6 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [307d048](https://github.com/hw-native-sys/PTOAS/commit/307d0484a9e7d5e36f01b253d2bebe4d2f45fe81) | TLoadOp::verify、PTOTLoadToTLOAD、dynamic subview tests | 初步 |
 | pypto | [7102058](https://github.com/hw-native-sys/pypto/commit/71020585278b68f56c72c40d5570f07dbb20bc8b) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、ComputeGMPipeWorkspaceElements、PrepareGMSlotBufferLayout | 跨仓深挖 1 |
@@ -96,6 +99,10 @@ permalink: /learning/pto-curriculum/
 - L1/L0 ping-pong 既需要 MTE2→MTE1→M 的正向可见性，也需要 M→MTE1→MTE2 的反向 slot 复用依赖。
 - `gemm_basic` 的 B 逻辑 shape 是 `[K,N]`，物理 ABI 是 contiguous `[N,K]` DN；host transpose-copy 与 kernel layout 必须一致。
 - 不同 memory space 可以使用相同数值 offset；`TASSIGN(..., 0x0)` 只在各自 L1/L0A/L0B/L0C 地址域内解释。
+- A2/A3 `TMOV(Mat→Left/Right)` 要求 source/destination 静态 shape 相同；它改变 memory location，并按 operand role 选择物理 block routing，不可按同 shape memcpy 删除。
+- A2/A3 half 的 Left/Right fractal 基块为 16×16；`Transpose` 分支表示 inner-fractal orientation mismatch，不等同于数学矩阵转置。
+- 默认非 compact Left/Right 路径按静态 capacity 组织 MTE1；dynamic valid 不自动缩短搬运，且 destination valid 不得超过 source 已初始化区域。
+- CPU-SIM 的逐逻辑元素 TMOV 与 A2/A3 设备 TileLeft alias 不同，只能证明数学语义，不能证明 MTE1 block order。
 
 ## 待验证推断
 
@@ -106,6 +113,8 @@ permalink: /learning/pto-curriculum/
 - TPUSH 文档的 A2/A3 local FIFO 表述可能混淆“GM transport backing”与“consumer-local destination”。
 - `TMATMUL` 文档与 CPU simulator 声明/检查静态 shape equality，但当前 A2/A3 wrapper 可见检查只覆盖 dtype/location；下层 verifier 是否统一拒绝 mismatch 尚未确认。
 - `gemm_basic` 理论 GM 请求量约 39 MiB、算术强度约 79 FLOP/byte，但 L2 reuse 与 MTE/MMAD overlap 未经本课程设备 trace 验证。
+- `gemm_basic` 每个输出 core 的 32 个 K-slice 静态 TMOV payload 为 1.5 MiB、24 core 合计 36 MiB；是否成为 wall-time 瓶颈尚缺 MTE1/M stall device trace。
+- dynamic tail 下 compact 对齐后的真实 transfer extent、发射开销以及 invalid capacity 的硬件读取范围仍需 isolated device test。
 
 ## 尚未解释的知识债
 
@@ -113,7 +122,6 @@ permalink: /learning/pto-curriculum/
 - GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract。
 - `partition_view` → lowering → GlobalTensor/TLOAD 的跨仓证据链。
 - TMOV、TRESHAPE、transpose 与 ND/NZ/ZN 布局转换的完整合法矩阵。
-- `TMOV` 的 L1 Mat→L0 Left/Right fractal offset、合法 layout 矩阵与代际差异。
 - A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region 与最终 store。
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
 - 非整除 M/N/K tail 下 TMATMUL valid region、padding 与 output ownership。
@@ -127,8 +135,8 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 深挖 `TMOV`：L1 Mat→L0 Left/Right fractal，以及 ND/DN/NZ/ZN layout conversion 的合法矩阵和成本。
+1. 深挖非整除 GEMM tail：`TileLeftCompact/TileRightCompact`、valid/C0 对齐、padding ownership 与额外 MTE1 流量。
 2. 追踪 `partition_view` 经 PyPTO/PTOAS lowering 成为 GlobalTensor/TLOAD 的跨仓地址 contract。
 3. 结合最新 TPipe pending-credit 修复，补齐默认深度下 batching、wrap-around、析构 drain 与连续 dispatch 状态机。
 4. 进入 reduce 指令的 valid region、累加精度和跨行/列语义。
-5. 再向 PyPTO/PTOAS 追踪 Tile/Event/TPipe contract 如何在 IR 中表达和 lowering。
+5. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
