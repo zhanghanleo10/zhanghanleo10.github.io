@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-16。
+最后更新：2026-08-17。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础阶段。已打通 `GlobalTensor → TLOAD/MTE2 → L1 Mat → TMOV/MTE1 → L0A/L0B → TMATMUL/M → Acc → TSTORE/FIX`，并完成第七篇知识图谱回顾；下一步聚焦非整除 GEMM tail、compact transfer 与 padding ownership。
+当前阶段：ISA 基础阶段。已打通 `GlobalTensor → TLOAD/MTE2 → L1 Mat → TMOV/MTE1 → L0A/L0B → TMATMUL/M → Acc → TSTORE/FIX`，并补齐非整除 GEMM tail 的 `capacity → aligned envelope → semantic valid` 三层 contract；下一步向上追踪 `partition_view → GlobalTensor descriptor → TLOAD` 的 PyPTO/PTOAS lowering。
 
 ## 已完成章节
 
@@ -32,6 +32,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-14 | GlobalTensor 五维地址映射 | pointer + 5D shape/stride/layout → ND/DN folding → DMA burst/gap → 2D Tile | [课程 05]({% post_url 2026-08-14-pto-isa-globaltensor-5d-address-mapping %}) |
 | 2026-08-15 | 真实 GEMM 的 TMATMUL 与 K 分块累加 | GM ND/DN → L1 Mat → L0 Left/Right → fp32 Acc → FIX/TSTORE | [课程 06]({% post_url 2026-08-15-pto-isa-gemm-tmatmul-k-accumulation %}) |
 | 2026-08-16 | TMOV：L1 Mat 到 L0A/L0B 的角色化重排 | L1 NZ/ZN → MTE1 → L0A ZZ/L0B ZN → TMATMUL | [课程 07]({% post_url 2026-08-16-pto-isa-tmov-l1-to-l0-fractal %}) |
+| 2026-08-17 | 非整除 GEMM tail：Compact 搬运与 padding ownership | base Mat → aligned envelope → Compact Left/Right → `mad(m,k,n)` → valid output | [课程 08]({% post_url 2026-08-17-pto-isa-compact-tail-padding-ownership %}) |
 
 ## ISA 知识地图
 
@@ -59,14 +60,15 @@ permalink: /learning/pto-curriculum/
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
 | Cube pipe chain | TLOAD/MTE2 → TMOV/MTE1 → TMATMUL/M → TSTORE/FIX，含反向复用 event 与末尾 drain | 已讲透一个真实实例 |
 | TMOV Mat→Left/Right（A2/A3） | 保持有效域逻辑值，完成 L1→L0 role transfer；A 的 NZ→ZZ 改外层 block order，B 的 ZN→ZN 保布局搬运 | 已讲透核心路径 |
-| TMOV compact/tail | 默认非 compact 走静态 capacity extent；CompactMode::Normal 把 runtime valid/aligned extent 传给底层 | 已建立边界，待设备量化 |
+| TMOV compact/tail | `CompactMode::Normal` 从 valid 推导 fractal/C0 对齐的 MTE1 envelope；不缩小 allocation，也不保证 padding 为零 | 已讲透 A2/A3 核心路径 |
+| Tail GEMM ownership | source capacity 覆盖 envelope；TEXTRACT 写 envelope；`mad(m,k,n)` 与 TSTORE 把语义重新收紧到 valid | 已讲透一个真实 int8 case |
 | Reduce/通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [f51c92f](https://github.com/hw-native-sys/pto-isa/commit/f51c92f610827daad0ddfb383072e03d514b4ae9) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、TMATMUL.md、GlobalTensor.md、partition-view.md、add_custom.cpp、gemm_basic_custom.cpp、gemm_basic host/test、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TSTORE、Tile/Event、TPUSH/TPOP、TMovToLeft/Right、TExtractToA/B、TileLeft/Right alias、CPU TMOV 与 A2/A3 device ST | ISA 深挖 6 |
+| pto-isa | [f51c92f](https://github.com/hw-native-sys/pto-isa/commit/f51c92f610827daad0ddfb383072e03d514b4ae9) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、textract_common.hpp、TMATMUL.md、GlobalTensor.md、partition-view.md、add_custom.cpp、gemm_basic_custom.cpp、gemm_basic host/test、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TSTORE、Tile/Event、TPUSH/TPOP、TMovToLeft/Right、TExtractToA/B、TExtractToA/BCompact、TileLeft/Right/AccCompact、SetKAligned/GetKDirectionAlign、CPU TMOV 与 A2/A3 TEXTRACT device ST | ISA 深挖 7 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [307d048](https://github.com/hw-native-sys/PTOAS/commit/307d0484a9e7d5e36f01b253d2bebe4d2f45fe81) | TLoadOp::verify、PTOTLoadToTLOAD、dynamic subview tests | 初步 |
 | pypto | [7102058](https://github.com/hw-native-sys/pypto/commit/71020585278b68f56c72c40d5570f07dbb20bc8b) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、ComputeGMPipeWorkspaceElements、PrepareGMSlotBufferLayout | 跨仓深挖 1 |
@@ -103,6 +105,10 @@ permalink: /learning/pto-curriculum/
 - A2/A3 half 的 Left/Right fractal 基块为 16×16；`Transpose` 分支表示 inner-fractal orientation mismatch，不等同于数学矩阵转置。
 - 默认非 compact Left/Right 路径按静态 capacity 组织 MTE1；dynamic valid 不自动缩短搬运，且 destination valid 不得超过 source 已初始化区域。
 - CPU-SIM 的逐逻辑元素 TMOV 与 A2/A3 设备 TileLeft alias 不同，只能证明数学语义，不能证明 MTE1 block order。
+- Compact tail 必须满足 `capacity ≥ aligned envelope ≥ semantic valid`；MTE1 可多搬对齐 padding，但不得据此缩小 L0 allocation。
+- `PadValue::Null` 不承诺 invalid envelope 为零；GEMM 的数学边界必须由 `mad(m,k,n)` 与有效区 TSTORE 重新收紧。
+- Compact 只改变 L1→L0 MTE1 extent；若 GM→L1 仍加载完整 base matrix，不能由此推出 HBM/MTE2 或端到端收益。
+- `KAligned` 属于 caller-owned Tile 状态；进入读取该字段的 float Compact/TMATMUL 路径前必须有确定初始化。
 
 ## 待验证推断
 
@@ -114,7 +120,8 @@ permalink: /learning/pto-curriculum/
 - `TMATMUL` 文档与 CPU simulator 声明/检查静态 shape equality，但当前 A2/A3 wrapper 可见检查只覆盖 dtype/location；下层 verifier 是否统一拒绝 mismatch 尚未确认。
 - `gemm_basic` 理论 GM 请求量约 39 MiB、算术强度约 79 FLOP/byte，但 L2 reuse 与 MTE/MMAD overlap 未经本课程设备 trace 验证。
 - `gemm_basic` 每个输出 core 的 32 个 K-slice 静态 TMOV payload 为 1.5 MiB、24 core 合计 36 MiB；是否成为 wall-time 瓶颈尚缺 MTE1/M stall device trace。
-- dynamic tail 下 compact 对齐后的真实 transfer extent、发射开销以及 invalid capacity 的硬件读取范围仍需 isolated device test。
+- Compact 的 aligned request envelope 已由源码闭合，但真实 MTE1 transaction、周期、stall 与端到端收益仍需 isolated device trace。
+- `Tile::isKAligned_` 当前未见显式默认初始化，而 A2/A3 float Compact/TMATMUL 会读取它；这是否已在所有生成路径被 caller 初始化尚未复现确认。
 
 ## 尚未解释的知识债
 
@@ -122,9 +129,8 @@ permalink: /learning/pto-curriculum/
 - GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract。
 - `partition_view` → lowering → GlobalTensor/TLOAD 的跨仓证据链。
 - TMOV、TRESHAPE、transpose 与 ND/NZ/ZN 布局转换的完整合法矩阵。
-- A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region 与最终 store。
+- A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region、padding 读取与最终 store；缺少 poison-padding 边界测试。
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
-- 非整除 M/N/K tail 下 TMATMUL valid region、padding 与 output ownership。
 - reduce 指令的 valid region、精度提升和跨行/列语义。
 - 默认 SlotNum=4 下 credit batching、ring wrap-around、析构 drain 的完整状态机。
 - A2/A3 GM ring 与 A5 consumer SRAM 的 TPUSH/TPOP 差异。
@@ -135,8 +141,8 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 深挖非整除 GEMM tail：`TileLeftCompact/TileRightCompact`、valid/C0 对齐、padding ownership 与额外 MTE1 流量。
-2. 追踪 `partition_view` 经 PyPTO/PTOAS lowering 成为 GlobalTensor/TLOAD 的跨仓地址 contract。
-3. 结合最新 TPipe pending-credit 修复，补齐默认深度下 batching、wrap-around、析构 drain 与连续 dispatch 状态机。
-4. 进入 reduce 指令的 valid region、累加精度和跨行/列语义。
-5. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
+1. 追踪 `partition_view` 经 PyPTO/PTOAS lowering 成为 GlobalTensor/TLOAD 的跨仓地址 contract。
+2. 结合最新 TPipe pending-credit 修复，补齐默认深度下 batching、wrap-around、析构 drain 与连续 dispatch 状态机。
+3. 进入 reduce 指令的 valid region、累加精度和跨行/列语义。
+4. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
+5. 用 device trace 量化 Compact 与普通 TMOV 的 MTE1 请求、stall 和端到端收益。
