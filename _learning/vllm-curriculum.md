@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 3：Scheduler 执行计划到 Executor/Worker/ModelRunner 设备状态边界。
-- 当前主线：一次 offline `LLM.generate()` 请求已从 prompt 追到可执行的 KV 地址计划；已完成 `SchedulerOutput → RequestState/BlockTables/InputBuffers → slot_mapping`。下一章沿 `ModelRunnerOutput → Scheduler.update_from_output` 追踪 token/spec progress 的提交事务。
+- 阶段 3：Scheduler、Executor/Worker/ModelRunner 的双向状态事务。
+- 当前主线：一次 offline `LLM.generate()` 请求已从 prompt 追到设备执行，并闭合 `ModelRunnerOutput → Scheduler.update_from_output → EngineCoreOutput` 返回事务。下一章进入 Attention metadata 与真实 KV cache tensor。
 
 ## 已完成章节
 
@@ -20,6 +20,7 @@
 | 2026-08-14 05 | `Scheduler.schedule waiting loop → prefix lookup → KVCacheManager.allocate_slots → SchedulerOutput` | [`827a2af8`](https://github.com/vllm-project/vllm/commit/827a2af806c4e4ea7bcc280f57f793e6a5fcc676) | [第一个物理 Batch]({{ '/articles/vllm-scheduler-first-physical-batch/' | relative_url }}) |
 | 2026-08-15 06 | `running slot growth → victim selection → PREEMPTED → prefix lookup → resumed output` | [`615d4cfa`](https://github.com/vllm-project/vllm/commit/615d4cfadeb3d5ea1df248eb59aa128af5dbd441) | [Preemption 与重算闭环]({{ '/articles/vllm-scheduler-preemption-recompute-resume/' | relative_url }}) |
 | 2026-08-16 07 | `SchedulerOutput → GPUModelRunner v2 → RequestState/BlockTables → slot_mapping` | [`fa9d67f7`](https://github.com/vllm-project/vllm/commit/fa9d67f7828e9bc105912ddf41dc384105732b1e) | [设备状态与 Slot Mapping]({{ '/articles/vllm-scheduler-output-modelrunner-device-state/' | relative_url }}) |
+| 2026-08-17 08 | `GPUModelRunner.sample_tokens → AsyncOutput → Scheduler.update_from_output → finish/free` | [`dc9ae4b8`](https://github.com/vllm-project/vllm/commit/dc9ae4b8ac2331991ad7091812ef82ece4f8fdc2) | [ModelRunnerOutput 返回事务]({{ '/articles/vllm-modelrunner-output-commit-transaction/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -96,6 +97,18 @@
 - `BlockTables.gather_block_tables/compute_slot_mappings`
 - `InputBuffers`
 - `InputBatch`
+- `SamplerOutput`
+- `AsyncOutput.__init__/get_output`
+- `ModelRunnerOutput`
+- `GPUModelRunner.sample_tokens`
+- `Scheduler._update_after_schedule`
+- `Scheduler.update_from_output`
+- `Scheduler._update_request_with_output`
+- `AsyncScheduler._update_request_with_output`
+- `check_stop`
+- `Scheduler._handle_stopped_request`
+- `Scheduler.finish_requests`
+- `Scheduler._free_request/_free_blocks/_free_request_blocks`
 
 ## 已确认不变量
 
@@ -136,6 +149,13 @@
 35. `slot_mapping` 将 position 映射为物理 KV slot；`CP_SIZE=1` 时为 `block_id × block_size + block_offset`，DCP 下还必须按 interleave/rank 将非本地 token 写成 `PAD_SLOT_ID`。
 36. `InputBuffers`、`input_block_tables`、`slot_mappings` 是持久设备 buffer；每 step 更新内容而不重建地址，是 full CUDA Graph 可复用的必要条件，但不是充分条件。
 37. CUDA Graph padding 区必须从 actual token 尾部覆盖为 `PAD_SLOT_ID`，不能保留上一 batch 的有效 slot。
+38. `Scheduler._update_after_schedule()` 会乐观增加 `num_computed_tokens` 与 `num_in_flight_tokens`；设备返回是对该乐观状态的 commit/rollback，而不是首次记录执行进度。
+39. `AsyncOutput` 必须在 copy stream 完成前持有源 GPU tensor，并以 Event 作为 D2H 完成边界；`ModelRunnerOutput.sampled_token_ids` 进入 Scheduler 前已按每请求真实长度裁掉 padding。
+40. speculative rejection 只回滚未接受 draft 对应的 computed progress；stale output 的 rejection 属于旧 request generation，不得再次作用于 preemption 后重置的计数。
+41. 普通 async preemption 可按序交付迟到 token但不得污染重置计数；same-step resume/reset 或 connector handoff 的 `drop_stale_output` 必须丢弃旧 token，避免同一 position 被提交两次。
+42. stop 判断必须逐 token 发生；spec batch 中途命中 EOS/stop/length 时，后续 token、logprobs 和 sampling mask 都必须按最终保留长度裁剪。
+43. 前端收到 `finish_reason`、Scheduler 释放 KV ownership、connector 异步 job 释放额外引用、下一 SchedulerOutput 让 Worker purge request slot，是不同但有序的生命周期边界。
+44. 异步消费者若寿命超过 Request，必须拥有 job/generation 级 identity 和资源引用；`req_id` 可在 preemption/resume 后复用，不能单独充当 ABA-safe 的工作单元身份。
 
 ## 前置依赖与版本注意
 
@@ -157,16 +177,19 @@
 - 运行期间 EngineCore 被硬杀时，在途 `get_output`、后续 `add_request` 与各 DP/Ray manager 的一致故障语义。
 - `ENGINE_CORE_DEAD` 在 5 秒 output-thread join、4 秒 socket linger 与 frontend shutdown 竞争下的交付边界。
 - victim selection 未纳入已计算 token、模型结构或实际重算代价；长短 prompt 混合负载下的浪费、公平性和饥饿边界缺少策略级基准。
-- async scheduling 与 PP/MTP/KVConnector 叠加时 stale output、drop mode 和多次连续 preemption 的端到端顺序性。
+- async scheduling 的 stale/drop 基本协议已有源码与 fake-runner 测试；真实 PP×MTP×KVConnector 组合的故障注入、跨 rank 顺序和资源归零仍未覆盖。
 - `_compute_slot_mappings_kernel` 缺少覆盖跨 block 边界、resumed replace、graph padding、DCP interleave 与多 KV group 的直接单测。
 - ModelRunner metadata preparation（staged write、gather、slot mapping）的实际 GPU 时间及其与 full/piecewise graph 边界尚未通过 trace 量化。
 - UVA-backed `all_token_ids` 在长上下文、高并发下的 Host/Device 访问和 page-fault 成本尚未测量。
 - 不同 executor backend 下 `SchedulerOutput` 向各 Worker 传播的一致性、序列化成本与部分 rank 失败语义尚未下钻。
+- `Scheduler.update_from_output()` 每请求 Host commit loop 在 1K request batch 下的 CPU/P99 成本尚未 trace。
+- 除 Mooncake store 外，各 KV/EC connector 的后台 job 是否都具备 generation-safe identity、独立资源引用和 Engine liveness hook，尚未系统审计。
+- 缺少一条同时断言 `EngineCoreOutput` 终态唯一、Scheduler registry 删除、KV/connector ref 归零与 Worker slot purge 的跨层 finish transaction 测试。
 
 ## 下一批候选章节
 
-1. 下一主线：`ModelRunnerOutput → Scheduler.update_from_output` 如何提交 token、修正 speculative progress 并释放 finished request。
-2. 后续：Attention metadata 如何消费 block table、slot mapping、seq lens，并读写真实 KV cache tensor。
+1. 下一主线：Attention metadata 如何消费 block table、slot mapping、seq lens，并读写真实 KV cache tensor。
+2. 后续：Sampling 的 logits processor、RNG、logprobs 与 sampler kernel；再进入分布式和 CUDA Graph。
 3. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
 ## 第七篇知识图谱回顾
