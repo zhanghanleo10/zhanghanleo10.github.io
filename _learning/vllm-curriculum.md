@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 3：Scheduler、Executor/Worker/ModelRunner 的双向状态事务。
-- 当前主线：一次 offline `LLM.generate()` 请求已从 prompt 追到设备执行，并闭合 `ModelRunnerOutput → Scheduler.update_from_output → EngineCoreOutput` 返回事务。下一章进入 Attention metadata 与真实 KV cache tensor。
+- 阶段 4：Attention metadata、KV cache tensor 与 backend 执行契约。
+- 当前主线：请求已从 Scheduler 的 block 计划追到设备侧 KV scatter write 与 paged attention read；下一章进入 Sampling 的 logits processor、RNG、logprobs 与 sampler kernel。
 
 ## 已完成章节
 
@@ -21,6 +21,7 @@
 | 2026-08-15 06 | `running slot growth → victim selection → PREEMPTED → prefix lookup → resumed output` | [`615d4cfa`](https://github.com/vllm-project/vllm/commit/615d4cfadeb3d5ea1df248eb59aa128af5dbd441) | [Preemption 与重算闭环]({{ '/articles/vllm-scheduler-preemption-recompute-resume/' | relative_url }}) |
 | 2026-08-16 07 | `SchedulerOutput → GPUModelRunner v2 → RequestState/BlockTables → slot_mapping` | [`fa9d67f7`](https://github.com/vllm-project/vllm/commit/fa9d67f7828e9bc105912ddf41dc384105732b1e) | [设备状态与 Slot Mapping]({{ '/articles/vllm-scheduler-output-modelrunner-device-state/' | relative_url }}) |
 | 2026-08-17 08 | `GPUModelRunner.sample_tokens → AsyncOutput → Scheduler.update_from_output → finish/free` | [`dc9ae4b8`](https://github.com/vllm-project/vllm/commit/dc9ae4b8ac2331991ad7091812ef82ece4f8fdc2) | [ModelRunnerOutput 返回事务]({{ '/articles/vllm-modelrunner-output-commit-transaction/' | relative_url }}) |
+| 2026-08-18 09 | `BlockTables → Attention metadata → KV cache update → paged read` | [`c296851a`](https://github.com/vllm-project/vllm/commit/c296851a7d173fa89d2eefbca0243be42ae9b5e0) | [Attention 的三张地址表]({{ '/articles/vllm-attention-kv-write-paged-read-metadata/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -109,6 +110,17 @@
 - `Scheduler._handle_stopped_request`
 - `Scheduler.finish_requests`
 - `Scheduler._free_request/_free_blocks/_free_request_blocks`
+- `CommonAttentionMetadata`
+- `build_attn_metadata`
+- `DefaultModelState.prepare_attn`
+- `FlashAttentionMetadataBuilder.build`
+- `Attention.forward`
+- `get_attention_context`
+- `unified_kv_cache_update`
+- `unified_attention_with_output`
+- `FlashAttentionImpl.do_kv_cache_update`
+- `FlashAttentionImpl.forward`
+- `reshape_and_cache_flash`
 
 ## 已确认不变量
 
@@ -156,6 +168,10 @@
 42. stop 判断必须逐 token 发生；spec batch 中途命中 EOS/stop/length 时，后续 token、logprobs 和 sampling mask 都必须按最终保留长度裁剪。
 43. 前端收到 `finish_reason`、Scheduler 释放 KV ownership、connector 异步 job 释放额外引用、下一 SchedulerOutput 让 Worker purge request slot，是不同但有序的生命周期边界。
 44. 异步消费者若寿命超过 Request，必须拥有 job/generation 级 identity 和资源引用；`req_id` 可在 preemption/resume 后复用，不能单独充当 ABA-safe 的工作单元身份。
+45. Attention metadata 包含三个独立索引空间：`query_start_loc` 划分 packed query，`slot_mapping` 路由当前 K/V 写入，`block_table + seq_lens` 定义历史 KV 的 paged read 与有效边界。
+46. split cache update backend 必须保证当前 K/V write 在 causal attention read 前可见；compiled/graph 模式依赖显式 dummy data dependency 保留隐藏副作用顺序。
+47. graph padding 对 cache 必须无副作用：padding slot 为 `PAD_SLOT_ID`，padded block-table rows 不能残留上一 step 的有效物理页。
+48. 写侧 slot metadata 与读侧 block table/seq lens 必须来自同一次 KV allocation；任一跨 request alias 都可能成为无异常的静默 KV 污染。
 
 ## 前置依赖与版本注意
 
@@ -185,12 +201,17 @@
 - `Scheduler.update_from_output()` 每请求 Host commit loop 在 1K request batch 下的 CPU/P99 成本尚未 trace。
 - 除 Mooncake store 外，各 KV/EC connector 的后台 job 是否都具备 generation-safe identity、独立资源引用和 Engine liveness hook，尚未系统审计。
 - 缺少一条同时断言 `EngineCoreOutput` 终态唯一、Scheduler registry 删除、KV/connector ref 归零与 Worker slot purge 的跨层 finish transaction 测试。
+- 缺少在 `torch.compile`/full CUDA Graph capture+replay 下直接断言 KV update 先于 paged read 的 CI guard。
+- 缺少重复 slot、跨 request slot alias、缩 batch 后 stale padding slot 的负向测试。
+- FlashAttention 等 backend 的 split/fused cache update、NHD/HND cache layout 与公共 metadata contract 尚未形成统一一致性测试。
+- 多 KV cache group 与 DCP interleave 下，写侧 slot 与读侧 block table 对同一 allocation 的一致性尚未系统覆盖。
 
 ## 下一批候选章节
 
-1. 下一主线：Attention metadata 如何消费 block table、slot mapping、seq lens，并读写真实 KV cache tensor。
-2. 后续：Sampling 的 logits processor、RNG、logprobs 与 sampler kernel；再进入分布式和 CUDA Graph。
-3. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
+1. 下一主线：Sampling 的 logits processor、RNG、logprobs 与 sampler kernel。
+2. 后续：分布式 attention/采样聚合与 CUDA Graph/torch.compile 的形状、地址和副作用契约。
+3. Attention 回访：多 KV group、DCP 与 backend cache layout 的一致性测试。
+4. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
 ## 第七篇知识图谱回顾
 
