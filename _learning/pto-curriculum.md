@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-18。
+最后更新：2026-08-19。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础向上层生成链过渡。已打通 `PyPTO TileLoadOp → pto.partition_view → PTOAS rank-5 canonicalization → GlobalTensor descriptor → TLOAD/MTE2 → L1 Mat → TMOV/MTE1 → L0A/L0B → TMATMUL/M → Acc → TSTORE/FIX`，并补齐逻辑窗口、descriptor 地址与 Tile valid 的跨仓 contract；下一步回到 TPipe pending-credit，闭合默认深度下的 batching、wrap-around、连续 dispatch 与 drain 状态机。
+当前阶段：ISA 基础与上层生成链交替推进。已打通 `PyPTO TileLoadOp → pto.partition_view → GlobalTensor → TLOAD → TMOV → TMATMUL`，并闭合 A2/A3 `TPUSH/TPOP` 的逐 entry ready、批量 free credit、ring wrap-around、析构 drain 与连续 dispatch 状态机；下一步进入 reduce 指令的行/列语义、valid region 与累加精度。
 
 ## 已完成章节
 
@@ -34,6 +34,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-16 | TMOV：L1 Mat 到 L0A/L0B 的角色化重排 | L1 NZ/ZN → MTE1 → L0A ZZ/L0B ZN → TMATMUL | [课程 07]({% post_url 2026-08-16-pto-isa-tmov-l1-to-l0-fractal %}) |
 | 2026-08-17 | 非整除 GEMM tail：Compact 搬运与 padding ownership | base Mat → aligned envelope → Compact Left/Right → `mad(m,k,n)` → valid output | [课程 08]({% post_url 2026-08-17-pto-isa-compact-tail-padding-ownership %}) |
 | 2026-08-18 | partition_view 到 GlobalTensor/TLOAD | logical offsets/sizes → rank-5 view → `base+Σ(offset×stride)` → TLOAD | [课程 09]({% post_url 2026-08-18-pto-partition-view-globaltensor-tload-lowering %}) |
+| 2026-08-19 | TPipe pending-credit 与连续 dispatch | TMATMUL → TPUSH → GM ring wrap → TPOP → batched free → destructor drain | [课程 10]({% post_url 2026-08-19-pto-isa-tpipe-credit-drain-continuous-dispatch %}) |
 
 ## ISA 知识地图
 
@@ -56,7 +57,8 @@ permalink: /learning/pto-curriculum/
 | Event ID 生命周期 | Record 后必须有 Wait；ID 有限并按 pipe pair 管理 | 已讲基础 |
 | TPipe/TPUSH/TPOP | A2/A3 跨 Cube/Vector Tile 传递包含 GM payload ring 与 ready/free credit | 已讲基础 |
 | DIR_BOTH ownership | C2V/V2C 必须使用两条不重叠 ring；总 footprint=`2×SlotNum×SlotSize` | 已讲透核心缺陷 |
-| Credit batching | 初始 SlotNum 个 credit 免等待；之后按 SyncPeriod 批量 free/wait | 已建立模型，待完整演算 |
+| Credit batching | 初始 SlotNum 个 entries 免等待；之后 consumer 每 SyncPeriod 个 pop 发一个 credit，producer 每 SyncPeriod 个 wrap 前消费一个 | 已讲透 depth=8/40 entries |
+| TPipe drain | pending=`consumer notified - producer steady waited`；析构精确消费余额，使同一 FlagID 在下一 dispatch 前回到零 credit | 已讲透正常完成路径 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -70,7 +72,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [f51c92f](https://github.com/hw-native-sys/pto-isa/commit/f51c92f610827daad0ddfb383072e03d514b4ae9) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、textract_common.hpp、TMATMUL.md、GlobalTensor.md、partition-view.md、add_custom.cpp、gemm_basic_custom.cpp、gemm_basic host/test、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TSTORE、Tile/Event、TPUSH/TPOP、TMovToLeft/Right、TExtractToA/B、TExtractToA/BCompact、TileLeft/Right/AccCompact、SetKAligned/GetKDirectionAlign、CPU TMOV 与 A2/A3 TEXTRACT device ST | ISA 深挖 7 |
+| pto-isa | [60081f3](https://github.com/hw-native-sys/pto-isa/commit/60081f369280edf3f5eb2cdd5b06cb769ab2d8c9) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、textract_common.hpp、TPush.hpp、TPop.hpp、TPUSH/TPOP/TFREE docs、TMATMUL.md、GlobalTensor.md、partition-view.md、add_custom.cpp、gemm_basic_custom.cpp、tpushpop_cv_nosplit kernel/host/golden、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TSTORE、Tile/Event、TPUSH/TPOP、shouldWaitFree/shouldNotifyFree/countPendingFreeCredits、TMovToLeft/Right、TExtract Compact、TileLeft/Right/AccCompact | ISA 深挖 8 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [fe5594a](https://github.com/hw-native-sys/PTOAS/commit/fe5594af84793c48487d4309d8092c3b6b44a0e9) | TLoadOp::verify、PTOCanonicalizeIR、PTOMakeTensorViewToEmitC、PTOPartitionViewToEmitC/static、PTOTLoadToTLOAD、issue157/issue995/DN layout tests | 跨仓深挖 1 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
@@ -116,6 +118,10 @@ permalink: /learning/pto-curriculum/
 - partition offsets 与 strides 都以元素计；PTOAS 通过 signed 64-bit `Σ(offset×stride)` rebase pointer，result shape 取 partition sizes，stride/layout 继承 source。
 - 低 rank TensorView/PartitionTensorView right-align 到 rank 5 只是 descriptor 规范化；左补 shape=1、offset=0、size=1，不构成 transpose 或数据搬运。
 - final `TLOAD(dst, src)` 信任已经物化的 GlobalTensor descriptor，不重新计算 bounds/stride；动态 OOB、整数宽度和 layout 合法性必须在更早阶段守住。
+- A2/A3 TPipe 的 data-ready 是逐 entry 的 record/wait；free-space 才按 `SyncPeriod=(SlotNum<=2?SlotNum:SlotNum/2)` 批量通知与消费，两条同步通道不能合并记账。
+- free credit 代表一批按序释放的 `SyncPeriod` 个 slots；producer 只有在 `tileIndex>=SlotNum` 且位于周期边界时才能消费，保证首次 wrap 前不覆盖在途 payload。
+- 正常完成时必须满足 `notifiedFree = steadyWaited + destructorDrained`；析构后同一 FlagID 的 credit 余额必须为零，否则多 drain 会死锁、少 drain 会污染下一 dispatch。
+- `countPendingFreeCredits(prod.tileIndex)` 隐含所有 produced entries 已被 consumer pop/free；它是正常退出 drain，不是 producer/consumer 数量不匹配时的 cancellation protocol。
 
 ## 待验证推断
 
@@ -142,7 +148,9 @@ permalink: /learning/pto-curriculum/
 - A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region、padding 读取与最终 store；缺少 poison-padding 边界测试。
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
 - reduce 指令的 valid region、精度提升和跨行/列语义。
-- 默认 SlotNum=4 下 credit batching、ring wrap-around、析构 drain 的完整状态机。
+- producer/consumer 数量不匹配或 early-exit 时的 TPipe cancellation、flag 清理与超时协议。
+- V2C、DIR_BOTH、同一 kernel 内顺序复用同 FlagID、ACL Graph replay 下的 pending-credit 回归。
+- A2/A3 与 A5 在 ready/free credit、local SRAM/GM ring 与析构语义上的逐点差异。
 - A2/A3 GM ring 与 A5 consumer SRAM 的 TPUSH/TPOP 差异。
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
@@ -151,8 +159,8 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 结合最新 TPipe pending-credit 修复，补齐默认深度下 batching、wrap-around、析构 drain 与连续 dispatch 状态机。
-2. 进入 reduce 指令的 valid region、累加精度和跨行/列语义。
-3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
+1. 进入 reduce 指令的 valid region、累加精度和跨行/列语义。
+2. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
+3. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
-5. 用 device trace 量化 Compact 与普通 TMOV 的 MTE1 请求、stall 和端到端收益。
+5. 用 device trace 量化 credit batching、Compact 与普通 TMOV 的同步/搬运 stall 和端到端收益。
