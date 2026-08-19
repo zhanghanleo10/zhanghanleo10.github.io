@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 4：Attention metadata、KV cache tensor 与 backend 执行契约。
-- 当前主线：请求已从 Scheduler 的 block 计划追到设备侧 KV scatter write 与 paged attention read；下一章进入 Sampling 的 logits processor、RNG、logprobs 与 sampler kernel。
+- 阶段 5：Sampling 的持久请求状态、logits 变换、RNG 与输出契约。
+- 当前主线：已从 Attention hidden states 追到 GPU v2 Sampler、Gumbel-max、raw/processed logprobs 与 Scheduler 延迟提交；下一章进入 last PP rank sampling 与跨 rank 输出收敛。
 
 ## 已完成章节
 
@@ -22,6 +22,7 @@
 | 2026-08-16 07 | `SchedulerOutput → GPUModelRunner v2 → RequestState/BlockTables → slot_mapping` | [`fa9d67f7`](https://github.com/vllm-project/vllm/commit/fa9d67f7828e9bc105912ddf41dc384105732b1e) | [设备状态与 Slot Mapping]({{ '/articles/vllm-scheduler-output-modelrunner-device-state/' | relative_url }}) |
 | 2026-08-17 08 | `GPUModelRunner.sample_tokens → AsyncOutput → Scheduler.update_from_output → finish/free` | [`dc9ae4b8`](https://github.com/vllm-project/vllm/commit/dc9ae4b8ac2331991ad7091812ef82ece4f8fdc2) | [ModelRunnerOutput 返回事务]({{ '/articles/vllm-modelrunner-output-commit-transaction/' | relative_url }}) |
 | 2026-08-18 09 | `BlockTables → Attention metadata → KV cache update → paged read` | [`c296851a`](https://github.com/vllm-project/vllm/commit/c296851a7d173fa89d2eefbca0243be42ae9b5e0) | [Attention 的三张地址表]({{ '/articles/vllm-attention-kv-write-paged-read-metadata/' | relative_url }}) |
+| 2026-08-19 10 | `compute_logits → logits processors → Gumbel-max → logprobs → AsyncOutput` | [`f1178f3a`](https://github.com/vllm-project/vllm/commit/f1178f3a06fa30a0cc282376924210cedad08c44) | [一次 GPU Sampling 事务]({{ '/articles/vllm-gpu-sampling-logits-gumbel-logprobs/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -121,6 +122,15 @@
 - `FlashAttentionImpl.do_kv_cache_update`
 - `FlashAttentionImpl.forward`
 - `reshape_and_cache_flash`
+- `GPUModelRunner.sample`
+- `Sampler.add_request/apply_staged_writes`
+- `Sampler.__call__`
+- `Sampler.apply_sampling_params`
+- `Sampler.sample`
+- `SamplingStates`
+- `gumbel_sample`
+- `gumbel_block_argmax`
+- `compute_topk_scores`
 
 ## 已确认不变量
 
@@ -172,6 +182,11 @@
 46. split cache update backend 必须保证当前 K/V write 在 causal attention read 前可见；compiled/graph 模式依赖显式 dummy data dependency 保留隐藏副作用顺序。
 47. graph padding 对 cache 必须无副作用：padding slot 为 `PAD_SLOT_ID`，padded block-table rows 不能残留上一 step 的有效物理页。
 48. 写侧 slot metadata 与读侧 block table/seq lens 必须来自同一次 KV allocation；任一跨 request alias 都可能成为无异常的静默 KV 污染。
+49. GPU v2 Sampler 的 temperature/top-k/top-p/min-p/seed 与 processor 子状态以稳定 request slot 为 owner；紧凑 batch 必须经 `idx_mapping/expanded_idx_mapping` 访问，不能以 row index 直接索引持久状态。
+50. logits processor 的执行顺序属于采样语义：约束/bias/penalty/bad words/thinking budget 先于 temperature、min-p、top-k/top-p；被 mask 为 `-inf` 的 token 在后续变换和 Gumbel-max 中必须保持不可选。
+51. native Gumbel 随机流由 request seed、logical token position 与 vocab lane 共同确定；`temperature=0` 必须跳过噪声并返回精确 argmax，batch row 重排不得成为显式 seed 的随机输入。
+52. FlashInfer 等加速路径只有在能满足当前 mixed-batch 语义时才能使用；greedy、显式 per-request seed 或 processed logprobs 会触发 native fallback。
+53. raw 与 processed logprobs 是不同的外部观察语义；`SamplerOutput` 的 GPU token 只有经过 AsyncOutput D2H 与 Scheduler commit 后才成为请求历史。
 
 ## 前置依赖与版本注意
 
@@ -205,11 +220,16 @@
 - 缺少重复 slot、跨 request slot alias、缩 batch 后 stale padding slot 的负向测试。
 - FlashAttention 等 backend 的 split/fused cache update、NHD/HND cache layout 与公共 metadata contract 尚未形成统一一致性测试。
 - 多 KV cache group 与 DCP interleave 下，写侧 slot 与读侧 block table 对同一 allocation 的一致性尚未系统覆盖。
+- 缺少显式 seed 请求跨 batch row 重排、request-slot 复用、preemption/resume 与 graph replay 的端到端 token-sequence 兼容测试。
+- 现有 Gumbel 统计测试不保证 RNG 实现升级后的 seeded sequence 兼容；若合入 PR #51367 一类 RNG 变更，需要明确版本承诺与迁移策略。
+- mixed batch 中任一请求需要 processor 就可能触发整批 FP32 logits copy；不同 processor mix、词表规模与并发度下的吞吐/P99 台阶尚未量化。
+- native 与 FlashInfer sampling 在错误语义、分布、GPU backend 和 raw/processed logprobs 模式上的 parity 尚未建立完整 golden fixtures。
+- speculative rejection 如何推进或回滚 RNG logical position，以及 stale output 对随机流的影响尚未下钻。
 
 ## 下一批候选章节
 
-1. 下一主线：Sampling 的 logits processor、RNG、logprobs 与 sampler kernel。
-2. 后续：分布式 attention/采样聚合与 CUDA Graph/torch.compile 的形状、地址和副作用契约。
+1. 下一主线：last PP rank sampling、`SamplerOutput` 广播与跨 rank 状态收敛。
+2. 后续：分布式 attention/采样聚合与 CUDA Graph/torch.compile 的形状、地址、RNG 和副作用契约。
 3. Attention 回访：多 KV group、DCP 与 backend cache layout 的一致性测试。
 4. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
