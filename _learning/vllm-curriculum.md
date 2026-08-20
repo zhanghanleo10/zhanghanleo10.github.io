@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 5：Sampling 的持久请求状态、logits 变换、RNG 与输出契约。
-- 当前主线：已从 Attention hidden states 追到 GPU v2 Sampler、Gumbel-max、raw/processed logprobs 与 Scheduler 延迟提交；下一章进入 last PP rank sampling 与跨 rank 输出收敛。
+- 阶段 6：Sampling 向分布式执行过渡，聚焦 PP stage、设备侧 token relay 与唯一 EngineCore 提交边界。
+- 当前主线：已从 last PP rank 的 final hidden states 追到 LM Head/Sampler、PPHandler side-stream broadcast、generation-safe 延迟消费与 canonical ModelRunnerOutput；下一章进入 TP × PP Executor DAG 和故障传播。
 
 ## 已完成章节
 
@@ -23,6 +23,7 @@
 | 2026-08-17 08 | `GPUModelRunner.sample_tokens → AsyncOutput → Scheduler.update_from_output → finish/free` | [`dc9ae4b8`](https://github.com/vllm-project/vllm/commit/dc9ae4b8ac2331991ad7091812ef82ece4f8fdc2) | [ModelRunnerOutput 返回事务]({{ '/articles/vllm-modelrunner-output-commit-transaction/' | relative_url }}) |
 | 2026-08-18 09 | `BlockTables → Attention metadata → KV cache update → paged read` | [`c296851a`](https://github.com/vllm-project/vllm/commit/c296851a7d173fa89d2eefbca0243be42ae9b5e0) | [Attention 的三张地址表]({{ '/articles/vllm-attention-kv-write-paged-read-metadata/' | relative_url }}) |
 | 2026-08-19 10 | `compute_logits → logits processors → Gumbel-max → logprobs → AsyncOutput` | [`f1178f3a`](https://github.com/vllm-project/vllm/commit/f1178f3a06fa30a0cc282376924210cedad08c44) | [一次 GPU Sampling 事务]({{ '/articles/vllm-gpu-sampling-logits-gumbel-logprobs/' | relative_url }}) |
+| 2026-08-20 11 | `last PP rank sampling → PPHandler broadcast → generation filter → canonical output rank` | [`bf2866f8`](https://github.com/vllm-project/vllm/commit/bf2866f8bf5bb20628e2b93835be3c281a9b4ca4) | [PP Token 广播与状态收敛]({{ '/articles/vllm-pipeline-parallel-sampling-broadcast-state-convergence/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -131,6 +132,14 @@
 - `gumbel_sample`
 - `gumbel_block_argmax`
 - `compute_topk_scores`
+- `GPUModelRunner.execute_model/sample_tokens`（ModelRunner V2 PP path）
+- `PPHandler`
+- `PendingRecv`
+- `compute_need_sampled_mask`
+- `GPUModelRunner.update_pp_decode_requests`
+- `GPUModelRunner.postprocess_sampled`
+- `GPUWorker.execute_model`（PP IntermediateTensors send/recv）
+- `MultiprocExecutor._get_output_rank`
 
 ## 已确认不变量
 
@@ -187,6 +196,10 @@
 51. native Gumbel 随机流由 request seed、logical token position 与 vocab lane 共同确定；`temperature=0` 必须跳过噪声并返回精确 argmax，batch row 重排不得成为显式 seed 的随机输入。
 52. FlashInfer 等加速路径只有在能满足当前 mixed-batch 语义时才能使用；greedy、显式 per-request seed 或 processed logprobs 会触发 native fallback。
 53. raw 与 processed logprobs 是不同的外部观察语义；`SamplerOutput` 的 GPU token 只有经过 AsyncOutput D2H 与 Scheduler commit 后才成为请求历史。
+54. PP 非末 stage 只产生 `IntermediateTensors`；final hidden states、LM Head、logits 与 sampling 由 last PP stage 持有。
+55. `PPHandler` 不广播整个 `SamplerOutput`；只广播设备状态收敛所需的 sampled IDs、`num_sampled` 与 `num_rejected`，而 EngineCore 只从 last-PP/TP0 output rank 接收 canonical `ModelRunnerOutput`。
+56. deferred sampled output 必须以 request-slot generation 过滤；相同 `idx_mapping` 在 free/reuse 后不是同一生命周期，失配 row 必须映射为 `-1`。
+57. sampled-token collective 必须在所有 PP ranks 上保持 skip 决策、调用顺序、shape/dtype 和 stream lifetime 对称；任一失配可能成为 collective hang 而非普通 Python 异常。
 
 ## 前置依赖与版本注意
 
@@ -225,13 +238,17 @@
 - mixed batch 中任一请求需要 processor 就可能触发整批 FP32 logits copy；不同 processor mix、词表规模与并发度下的吞吐/P99 台阶尚未量化。
 - native 与 FlashInfer sampling 在错误语义、分布、GPU backend 和 raw/processed logprobs 模式上的 parity 尚未建立完整 golden fixtures。
 - speculative rejection 如何推进或回滚 RNG logical position，以及 stale output 对随机流的影响尚未下钻。
+- `PPHandler` 缺少 generation filter、collective skip 对称与 stream/event 生命周期的直接单测；现有 PP×DP E2E 主要验证长度和存活性。
+- 开放 PR #46994 指出的 spec sampled width 与 draft-token relay 问题、PR #52179 指出的 sync cadence 问题尚未合入；需要基于最终 post-image 重做 contract。
+- Ray compiled DAG、Multiproc collective RPC 与 external launcher 的 PP output-rank、部分 rank 失败及 connector aggregation 语义尚未逐点对照。
 
 ## 下一批候选章节
 
-1. 下一主线：last PP rank sampling、`SamplerOutput` 广播与跨 rank 状态收敛。
-2. 后续：分布式 attention/采样聚合与 CUDA Graph/torch.compile 的形状、地址、RNG 和副作用契约。
-3. Attention 回访：多 KV group、DCP 与 backend cache layout 的一致性测试。
-4. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
+1. 下一主线：`TP × PP Executor DAG`——SchedulerOutput fan-out、IntermediateTensors stage chain、唯一 output rank 与故障传播。
+2. 后续：CUDA Graph/torch.compile 在分布式 forward、sampling 与 side-stream collective 下的形状、地址、RNG 和副作用契约。
+3. PP 回访：spec sampled width、draft-token relay、sync/async cadence 与 generation-safe CI。
+4. Attention 回访：多 KV group、DCP 与 backend cache layout 的一致性测试。
+5. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
 ## 第七篇知识图谱回顾
 
