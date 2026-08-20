@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-19。
+最后更新：2026-08-20。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础与上层生成链交替推进。已打通 `PyPTO TileLoadOp → pto.partition_view → GlobalTensor → TLOAD → TMOV → TMATMUL`，并闭合 A2/A3 `TPUSH/TPOP` 的逐 entry ready、批量 free credit、ring wrap-around、析构 drain 与连续 dispatch 状态机；下一步进入 reduce 指令的行/列语义、valid region 与累加精度。
+当前阶段：ISA 基础与上层生成链交替推进。已打通 `PyPTO TileLoadOp → pto.partition_view → GlobalTensor → TLOAD → TMOV → TMATMUL`，闭合 A2/A3 `TPUSH/TPOP` credit 状态机，并进入 Vector Reduce：已确认 `TROWSUM [R,C]→[R,1]`、`TCOLSUM [R,C]→[1,C]` 的 valid-prefix、scratch ownership 与 binary/sequential 累加契约；下一步进入多 Tile Row Softmax 的 partial max/sum 合并。
 
 ## 已完成章节
 
@@ -35,6 +35,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-17 | 非整除 GEMM tail：Compact 搬运与 padding ownership | base Mat → aligned envelope → Compact Left/Right → `mad(m,k,n)` → valid output | [课程 08]({% post_url 2026-08-17-pto-isa-compact-tail-padding-ownership %}) |
 | 2026-08-18 | partition_view 到 GlobalTensor/TLOAD | logical offsets/sizes → rank-5 view → `base+Σ(offset×stride)` → TLOAD | [课程 09]({% post_url 2026-08-18-pto-partition-view-globaltensor-tload-lowering %}) |
 | 2026-08-19 | TPipe pending-credit 与连续 dispatch | TMATMUL → TPUSH → GM ring wrap → TPOP → batched free → destructor drain | [课程 10]({% post_url 2026-08-19-pto-isa-tpipe-credit-drain-continuous-dispatch %}) |
+| 2026-08-20 | Row/Column Reduce 的语义与 scratch | valid `R×C` → `TROWSUM R×1` / `TCOLSUM 1×C` → binary/sequential → semantic store | [课程 11]({% post_url 2026-08-20-pto-isa-trowsum-tcolsum-valid-region-precision %}) |
 
 ## ISA 知识地图
 
@@ -66,13 +67,14 @@ permalink: /learning/pto-curriculum/
 | TMOV Mat→Left/Right（A2/A3） | 保持有效域逻辑值，完成 L1→L0 role transfer；A 的 NZ→ZZ 改外层 block order，B 的 ZN→ZN 保布局搬运 | 已讲透核心路径 |
 | TMOV compact/tail | `CompactMode::Normal` 从 valid 推导 fractal/C0 对齐的 MTE1 envelope；不缩小 allocation，也不保证 padding 为零 | 已讲透 A2/A3 核心路径 |
 | Tail GEMM ownership | source capacity 覆盖 envelope；TEXTRACT 写 envelope；`mad(m,k,n)` 与 TSTORE 把语义重新收紧到 valid | 已讲透一个真实 int8 case |
-| Reduce/通信 ISA | 尚未系统覆盖 | 待学习 |
+| Row/Column Reduce | `TROWSUM` 只定义 `R×1`、`TCOLSUM` 只定义 `1×C`；valid prefix 控制数学域，A2/A3 scratch 与 A5 register path 资源需求不同，binary/sequential 改变依赖深度与浮点顺序 | 已讲透 sum 基础 |
+| 通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [60081f3](https://github.com/hw-native-sys/pto-isa/commit/60081f369280edf3f5eb2cdd5b06cb769ab2d8c9) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、textract_common.hpp、TPush.hpp、TPop.hpp、TPUSH/TPOP/TFREE docs、TMATMUL.md、GlobalTensor.md、partition-view.md、add_custom.cpp、gemm_basic_custom.cpp、tpushpop_cv_nosplit kernel/host/golden、Shape/Stride/GlobalTensor、ND/DN folding、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TSTORE、Tile/Event、TPUSH/TPOP、shouldWaitFree/shouldNotifyFree/countPendingFreeCredits、TMovToLeft/Right、TExtract Compact、TileLeft/Right/AccCompact | ISA 深挖 8 |
+| pto-isa | [f71e7dd](https://github.com/hw-native-sys/pto-isa/commit/f71e7dde08e27719e35dd2648bb1b4ec0cdc928e) | pto_tile.hpp、tile_offsets.hpp、TLoad.hpp、TMatmul.hpp、TRowSum.hpp、TRowReduceOps.hpp、TColSum.hpp、TPush.hpp、TPop.hpp、TROWSUM/TCOLSUM/TPUSH/TPOP/TFREE docs、row-softmax tutorial、gemm_basic、trowsum/tcolsum/tmuls_trowsum tests、Shape/Stride/GlobalTensor、TASSIGN、TLOAD、TMOV、TMATMUL/TMATMUL_ACC、TROWSUM、TCOLSUM、TSTORE、Tile/Event、TPUSH/TPOP、binary/sequential reduce、A2/A3/A5 scratch 差异 | ISA 深挖 9 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [fe5594a](https://github.com/hw-native-sys/PTOAS/commit/fe5594af84793c48487d4309d8092c3b6b44a0e9) | TLoadOp::verify、PTOCanonicalizeIR、PTOMakeTensorViewToEmitC、PTOPartitionViewToEmitC/static、PTOTLoadToTLOAD、issue157/issue995/DN layout tests | 跨仓深挖 1 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
@@ -122,6 +124,11 @@ permalink: /learning/pto-curriculum/
 - free credit 代表一批按序释放的 `SyncPeriod` 个 slots；producer 只有在 `tileIndex>=SlotNum` 且位于周期边界时才能消费，保证首次 wrap 前不覆盖在途 payload。
 - 正常完成时必须满足 `notifiedFree = steadyWaited + destructorDrained`；析构后同一 FlagID 的 credit 余额必须为零，否则多 drain 会死锁、少 drain 会污染下一 dispatch。
 - `countPendingFreeCredits(prod.tileIndex)` 隐含所有 produced entries 已被 consumer pop/free；它是正常退出 drain，不是 producer/consumer 数量不匹配时的 cancellation protocol。
+- `TROWSUM` 只读取 source 的 `validRow×validCol` 前缀并只定义目标第 0 列的 `validRow` 个值；目标 capacity 的其他元素 unspecified。
+- `TCOLSUM` 只读取 source valid prefix 并只定义目标第 0 行的 `validCol` 个值；binary 与 sequential 路径数学等价但依赖链、scratch traffic 和浮点累加顺序不同。
+- Reduce scratch 在指令完成前由该调用独占且不得与活跃 src/dst 别名；A2/A3 `TROWSUM` 使用 tmp，A5 当前仅为公共 ABI 保留同一 operand。
+- 完整输出 allocation 的初始化属于调用方或测试 harness 责任；已合入 `TMULS→TROWSUM` 测试修复通过 memset 非语义区，而不是改变 reduce 的数学定义。
+- sum 的 accumulator dtype 与顺序属于数值 contract；当前设备主路径通常同 dtype，CPU widening 能力不能自动外推到 A2/A3/A5。
 
 ## 待验证推断
 
@@ -138,6 +145,9 @@ permalink: /learning/pto-curriculum/
 - `gemm_basic` 每个输出 core 的 32 个 K-slice 静态 TMOV payload 为 1.5 MiB、24 core 合计 36 MiB；是否成为 wall-time 瓶颈尚缺 MTE1/M stall device trace。
 - Compact 的 aligned request envelope 已由源码闭合，但真实 MTE1 transaction、周期、stall 与端到端收益仍需 isolated device trace。
 - `Tile::isKAligned_` 当前未见显式默认初始化，而 A2/A3 float Compact/TMATMUL 会读取它；这是否已在所有生成路径被 caller 初始化尚未复现确认。
+- CPU `TROWSUM` 允许 `half/bfloat16→float`，而当前设备文档/检查通常要求同 dtype；这是有意 parity 还是 simulator 超集尚未确认。
+- A2/A3/A5 对同一浮点输入的 tree/sequential/repeat 分组误差 envelope 与 bitwise 稳定性尚未量化。
+- `TCOLSUM` binary 相比 sequential 的真实性能 crossover 取决于 validRow、validCol、tmp traffic 与 barrier，缺少 device trace。
 
 ## 尚未解释的知识债
 
@@ -147,7 +157,8 @@ permalink: /learning/pto-curriculum/
 - TMOV、TRESHAPE、transpose 与 ND/NZ/ZN 布局转换的完整合法矩阵。
 - A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region、padding 读取与最终 store；缺少 poison-padding 边界测试。
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
-- reduce 指令的 valid region、精度提升和跨行/列语义。
+- 多 Tile Row Softmax 的 partial max/sum 合并、全局归一化和数值稳定性。
+- Reduce 的 accumulator widening、整数 overflow、poison-padding 与 CPU/A2A3/A5 parity contract。
 - producer/consumer 数量不匹配或 early-exit 时的 TPipe cancellation、flag 清理与超时协议。
 - V2C、DIR_BOTH、同一 kernel 内顺序复用同 FlagID、ACL Graph replay 下的 pending-credit 回归。
 - A2/A3 与 A5 在 ready/free credit、local SRAM/GM ring 与析构语义上的逐点差异。
@@ -159,8 +170,9 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 进入 reduce 指令的 valid region、累加精度和跨行/列语义。
+1. 沿 `TROWMAX → TROWEXPAND → TEXP → TROWSUM → TDIV` 进入多 Tile Row Softmax，解释 partial max/sum 的全局合并。
 2. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
-3. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
-4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
-5. 用 device trace 量化 credit batching、Compact 与普通 TMOV 的同步/搬运 stall 和端到端收益。
+3. 为 Reduce 增加 poison-padding、overflow、binary/sequential 与 CPU/A2A3/A5 parity CI contract。
+4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
+5. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
+6. 用 device trace 量化 reduce tree、credit batching、Compact 与普通 TMOV 的同步/搬运 stall 和端到端收益。
