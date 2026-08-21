@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 6：Sampling 向分布式执行过渡，聚焦 PP stage、设备侧 token relay 与唯一 EngineCore 提交边界。
-- 当前主线：已从 last PP rank 的 final hidden states 追到 LM Head/Sampler、PPHandler side-stream broadcast、generation-safe 延迟消费与 canonical ModelRunnerOutput；下一章进入 TP × PP Executor DAG 和故障传播。
+- 阶段 7：分布式执行，聚焦 TP × PP 控制面、stage 数据链、canonical output 与 fail-closed 故障传播。
+- 当前主线：已打通 Multiproc/Ray V2 的 SchedulerOutput fan-out、TP collective、PP lane P2P、唯一模型提交与 connector sideband 聚合；下一章进入分布式 CUDA Graph/torch.compile 的跨 rank capture/replay 契约。
 
 ## 已完成章节
 
@@ -24,6 +24,7 @@
 | 2026-08-18 09 | `BlockTables → Attention metadata → KV cache update → paged read` | [`c296851a`](https://github.com/vllm-project/vllm/commit/c296851a7d173fa89d2eefbca0243be42ae9b5e0) | [Attention 的三张地址表]({{ '/articles/vllm-attention-kv-write-paged-read-metadata/' | relative_url }}) |
 | 2026-08-19 10 | `compute_logits → logits processors → Gumbel-max → logprobs → AsyncOutput` | [`f1178f3a`](https://github.com/vllm-project/vllm/commit/f1178f3a06fa30a0cc282376924210cedad08c44) | [一次 GPU Sampling 事务]({{ '/articles/vllm-gpu-sampling-logits-gumbel-logprobs/' | relative_url }}) |
 | 2026-08-20 11 | `last PP rank sampling → PPHandler broadcast → generation filter → canonical output rank` | [`bf2866f8`](https://github.com/vllm-project/vllm/commit/bf2866f8bf5bb20628e2b93835be3c281a9b4ca4) | [PP Token 广播与状态收敛]({{ '/articles/vllm-pipeline-parallel-sampling-broadcast-state-convergence/' | relative_url }}) |
+| 2026-08-21 12 | `SchedulerOutput fan-out → TP/PP data plane → canonical output/failure` | [`d29f7f5c`](https://github.com/vllm-project/vllm/commit/d29f7f5c9294be8e489dac34d45a939b95a06336) | [TP × PP Executor DAG]({{ '/articles/vllm-tp-pp-executor-dag-control-data-failure/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -141,6 +142,16 @@
 - `GPUWorker.execute_model`（PP IntermediateTensors send/recv）
 - `MultiprocExecutor._get_output_rank`
 
+- `Executor.get_class/execute_model/collective_rpc`
+- `MultiprocExecutor.execute_model/sample_tokens/collective_rpc/_get_output_rank`
+- `FutureWrapper`
+- `WorkerProc.worker_busy_loop/enqueue_output/handle_output`
+- `GPUWorker.execute_model`
+- `AsyncIntermediateTensors`
+- `RayDistributedExecutor._execute_dag/_compiled_ray_dag`
+- `RayWorkerWrapper.execute_model_ray`
+- `RayExecutorV2`
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -200,6 +211,11 @@
 55. `PPHandler` 不广播整个 `SamplerOutput`；只广播设备状态收敛所需的 sampled IDs、`num_sampled` 与 `num_rejected`，而 EngineCore 只从 last-PP/TP0 output rank 接收 canonical `ModelRunnerOutput`。
 56. deferred sampled output 必须以 request-slot generation 过滤；相同 `idx_mapping` 在 free/reuse 后不是同一生命周期，失配 row 必须映射为 `-1`。
 57. sampled-token collective 必须在所有 PP ranks 上保持 skip 决策、调用顺序、shape/dtype 和 stream lifetime 对称；任一失配可能成为 collective hang 而非普通 Python 异常。
+58. Multiproc 与 Ray V2 把同一 `SchedulerOutput` 控制计划按同一 RPC 顺序投递给所有 TP/PP workers；所有 layer owner 必须据此更新本地 request/KV state。
+59. PP hidden-state 数据沿相同 TP lane 从前一 stage 异步发送到后一 stage；发送 buffer 在 handle 完成前不得复用，TP collective 与 PP P2P 共同构成不可拆分的 step。
+60. `PCP=1` 时 canonical output rank 是 last PP stage 的 TP0；唯一的是 Scheduler 的模型 token commit，KV/EC connector sideband 仍可从多 rank 聚合。
+61. 非输出 rank 的 Python 异常不保证直接进入 unique-reply RPC；故障可见性还依赖 collective 传播、execute timeout 或 worker process liveness monitor。
+62. 任一 rank 部分失败后，未知完成度的 forward/KV side effect 不能作为部分成功提交；当前系统采用 Executor/Engine fail-stop，而非单-rank step recovery。
 
 ## 前置依赖与版本注意
 
@@ -225,7 +241,7 @@
 - `_compute_slot_mappings_kernel` 缺少覆盖跨 block 边界、resumed replace、graph padding、DCP interleave 与多 KV group 的直接单测。
 - ModelRunner metadata preparation（staged write、gather、slot mapping）的实际 GPU 时间及其与 full/piecewise graph 边界尚未通过 trace 量化。
 - UVA-backed `all_token_ids` 在长上下文、高并发下的 Host/Device 访问和 page-fault 成本尚未测量。
-- 不同 executor backend 下 `SchedulerOutput` 向各 Worker 传播的一致性、序列化成本与部分 rank 失败语义尚未下钻。
+- Multiproc/Ray V2 的控制面与 PP 数据面职责已下钻；其 fan-out 序列化成本、跨节点 MQ 流量和 batch-queue 峰值内存仍未量化。
 - `Scheduler.update_from_output()` 每请求 Host commit loop 在 1K request batch 下的 CPU/P99 成本尚未 trace。
 - 除 Mooncake store 外，各 KV/EC connector 的后台 job 是否都具备 generation-safe identity、独立资源引用和 Engine liveness hook，尚未系统审计。
 - 缺少一条同时断言 `EngineCoreOutput` 终态唯一、Scheduler registry 删除、KV/connector ref 归零与 Worker slot purge 的跨层 finish transaction 测试。
@@ -240,12 +256,12 @@
 - speculative rejection 如何推进或回滚 RNG logical position，以及 stale output 对随机流的影响尚未下钻。
 - `PPHandler` 缺少 generation filter、collective skip 对称与 stream/event 生命周期的直接单测；现有 PP×DP E2E 主要验证长度和存活性。
 - 开放 PR #46994 指出的 spec sampled width 与 draft-token relay 问题、PR #52179 指出的 sync cadence 问题尚未合入；需要基于最终 post-image 重做 contract。
-- Ray compiled DAG、Multiproc collective RPC 与 external launcher 的 PP output-rank、部分 rank 失败及 connector aggregation 语义尚未逐点对照。
+- Multiproc、Ray V2、legacy Ray 的主路径已对照；仍缺 `TP>1 × PP>1` 故障注入、非输出 rank exception aggregation、external launcher output ownership 与各 backend connector sideband 的统一 contract。
 
 ## 下一批候选章节
 
-1. 下一主线：`TP × PP Executor DAG`——SchedulerOutput fan-out、IntermediateTensors stage chain、唯一 output rank 与故障传播。
-2. 后续：CUDA Graph/torch.compile 在分布式 forward、sampling 与 side-stream collective 下的形状、地址、RNG 和副作用契约。
+1. 下一主线：分布式 CUDA Graph/`torch.compile`——跨 rank shape/address、collective order、graph key 与 replay 对称性。
+2. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
 3. PP 回访：spec sampled width、draft-token relay、sync/async cadence 与 generation-safe CI。
 4. Attention 回访：多 KV group、DCP 与 backend cache layout 的一致性测试。
 5. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
