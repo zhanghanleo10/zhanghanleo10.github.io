@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-21。
+最后更新：2026-08-22。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础与真实 kernel 状态机交替推进。已打通 `PyPTO TileLoadOp → pto.partition_view → GlobalTensor → TLOAD → TMOV → TMATMUL`，闭合 A2/A3 `TPUSH/TPOP` credit，并从单 Tile Reduce 进入真实 FlashAttention online softmax：已确认跨 Tile `global_max/global_sum/alpha/runningO` 的重标定公式、P/PV/alpha tile identity 与整除 Tile contract；下一步解剖 `compute_qk → compute_p → compute_pv → compute_gu` 四阶段 TPipe pipeline。
+当前阶段：ISA 基础与真实 kernel 状态机交替推进。已打通 `PyPTO TileLoadOp → pto.partition_view → GlobalTensor → TLOAD → TMOV → TMATMUL`，闭合 A2/A3 `TPUSH/TPOP` credit，并把 Online Softmax 放入真实四阶段 FlashAttention pipeline：已确认 Cube/Vector 两个串行资源域、QK/P/PV 三条 GM FIFO、prologue/steady/epilogue 计数，以及 `QK_PRELOAD == EXP_RING` 的 sideband 生命周期；下一步证明 generated PTOAS C++ 中哪些 `PIPE_V` barrier 可以安全删除。
 
 ## 已完成章节
 
@@ -37,6 +37,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-19 | TPipe pending-credit 与连续 dispatch | TMATMUL → TPUSH → GM ring wrap → TPOP → batched free → destructor drain | [课程 10]({% post_url 2026-08-19-pto-isa-tpipe-credit-drain-continuous-dispatch %}) |
 | 2026-08-20 | Row/Column Reduce 的语义与 scratch | valid `R×C` → `TROWSUM R×1` / `TCOLSUM 1×C` → binary/sequential → semantic store | [课程 11]({% post_url 2026-08-20-pto-isa-trowsum-tcolsum-valid-region-precision %}) |
 | 2026-08-21 | 多 Tile Online Softmax | QK Tile → running max/sum → alpha 重标定 → P@V → running O / global sum | [课程 12]({% post_url 2026-08-21-pto-online-softmax-running-max-sum %}) |
+| 2026-08-22 | 四阶段 FlashAttention Pipeline | Cube QK/PV ↔ 三条 GM FIFO ↔ Vector P/GU → preload/exp-ring reuse | [课程 13]({% post_url 2026-08-22-pto-flashattention-four-stage-pipeline-preload-exp-ring %}) |
 
 ## ISA 知识地图
 
@@ -70,13 +71,14 @@ permalink: /learning/pto-curriculum/
 | Tail GEMM ownership | source capacity 覆盖 envelope；TEXTRACT 写 envelope；`mad(m,k,n)` 与 TSTORE 把语义重新收紧到 valid | 已讲透一个真实 int8 case |
 | Row/Column Reduce | `TROWSUM` 只定义 `R×1`、`TCOLSUM` 只定义 `1×C`；valid prefix 控制数学域，A2/A3 scratch 与 A5 register path 资源需求不同，binary/sequential 改变依赖深度与浮点顺序 | 已讲透 sum 基础 |
 | Online Row Softmax | 每行维护 `global_max/global_sum`；新 Tile 以 `alpha=exp((old_max-new_max)×scale)` 同时重标定旧 denominator 与 running output numerator；P/PV/alpha 必须保持同一 tile identity | 已讲透真实 FA recurrence |
+| Four-stage FA pipeline | Cube 内 QK/PV 串行交错、Vector 内 P/GU drain-first；三条 8-slot GM FIFO 传 payload，`EXP_RING==QK_PRELOAD` 保存 sideband alpha，三段计数保证每 Tile 四阶段各一次 | 已讲透 A3 non-causal DSL 主路径 |
 | 通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [ec75fcf](https://github.com/hw-native-sys/pto-isa/commit/ec75fcfd23c59b9dfb8f22e6531d9fa3dd8b5769) | 既有 Tile/DMA/GEMM/TPipe/Reduce 覆盖；新增 `pto_macro_fa_softmax` init/not-init、`compute_p/compute_gu`、`pto_macro_fa_gu/_last`、`m2_global_max/l2_global_sum/l1_exp_max_ififo/runningOTile`、TFA golden/intermediate tests | ISA 深挖 10 |
+| pto-isa | [3186c38](https://github.com/hw-native-sys/pto-isa/commit/3186c381bd49e1164092e67ff1b3564302754e76) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `fa_builder.py` 的 `emit_qk_pv_interleaved`、`vec_unit_body`、QK/P/PV pipes、`QK_PRELOAD/EXP_RING/S1_TILE`、`run.py` case1..case8 与 barrier pattern docs | ISA 深挖 11 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [fe5594a](https://github.com/hw-native-sys/PTOAS/commit/fe5594af84793c48487d4309d8092c3b6b44a0e9) | TLoadOp::verify、PTOCanonicalizeIR、PTOMakeTensorViewToEmitC、PTOPartitionViewToEmitC/static、PTOTLoadToTLOAD、issue157/issue995/DN layout tests | 跨仓深挖 1 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
@@ -136,6 +138,10 @@ permalink: /learning/pto-curriculum/
 - `m2_global_max/l2_global_sum` 跨 S1 Tile 持有，`l1_exp_max_ififo[slot]` 活到匹配 GU 消费，`runningOTile` 活到最终除 global sum 并 store；这些 buffer 不得提前复用。
 - P、PV 与 alpha 必须共享同一 `tile_id`/ring-slot identity；TPipe ready/free 只解决可见性与回收，不替代 sideband identity。
 - 当前 FA 主循环以 `S1/Tile_S1` 取 Tile 数；单指令支持 valid tail 不等于整个 kernel 支持非整除 S1。
+- 四阶段 FA 只有两个可并行资源域：Cube 上 QK/PV 同域串行，Vector 上 P/GU 同域串行；跨域由 QK C2V、P V2C、PV C2V 三条 FIFO 解耦。
+- `EXP_RING==QK_PRELOAD` 是当前调度的 hard invariant；steady state 必须先 `GU(t)` 消费 `alpha[t%ring]`，再由 `P(t+preload)` 复用同一槽。
+- 对 N 个 KV Tile，prologue 产生 preload 个 QK/P，steady 处理 `N-preload` 个旧 GU/新 P 对，epilogue drain 最后 preload 个 PV/GU；每个 Tile 四阶段恰好一次。
+- 默认 `S1_TILE=256` 时 QK/P/PV 三类 8-slot GM ring 每 block 合计 2 MiB；这属于 transport backing，不能与 192 KiB Vector UB 预算混算。
 
 ## 待验证推断
 
@@ -158,6 +164,8 @@ permalink: /learning/pto-curriculum/
 - `pto_macro_fa_softmax` 公共形参把会被更新的 `new_global_max` 标为 `__in__`；该方向标注目前是否参与 IR alias/dependency 推导尚未确认。
 - fp32 `p/global_sum` 与 cast 后 fp16 P→PV 路径的端到端误差 envelope，以及不同 Tile_S1/preload 对误差的影响尚未量化。
 - TFA 数据生成器注释了 S1=8192 case，而 C++ 仍声明对应测试；默认 CI 是否提供其他 golden 来源尚未闭合。
+- `QK_PRELOAD=3/4 × S1_TILE=256/512 × KV_SPLIT` 的组合正确性、FIFO stall 与 exp-ring wrap 尚缺系统矩阵；现有 case1..case8 不能替代故障注入。
+- `gu` barrier 删除依赖 `wait_flag(PIPE_MTE2, PIPE_V)` 的当前生成形状；PTOAS emitter 改变后，op-pattern patch 是否仍是充分证明需重新审计。
 
 ## 尚未解释的知识债
 
@@ -167,7 +175,7 @@ permalink: /learning/pto-curriculum/
 - TMOV、TRESHAPE、transpose 与 ND/NZ/ZN 布局转换的完整合法矩阵。
 - A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region、padding 读取与最终 store；缺少 poison-padding 边界测试。
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
-- Online Softmax recurrence 已闭合；尚欠 S1 tail、全 mask 行、P fp16 与 sum fp32 误差上界、state direction annotation 和 ring identity 故障注入。
+- Online Softmax recurrence 与四阶段正常完成路径已闭合；尚欠 S1 tail、全 mask 行、P fp16/sum fp32 误差上界、exp-ring poison/wrap、stage delay 和 early-exit cancellation 注入。
 - Reduce 的 accumulator widening、整数 overflow、poison-padding 与 CPU/A2A3/A5 parity contract。
 - producer/consumer 数量不匹配或 early-exit 时的 TPipe cancellation、flag 清理与超时协议。
 - V2C、DIR_BOTH、同一 kernel 内顺序复用同 FlagID、ACL Graph replay 下的 pending-credit 回归。
@@ -180,9 +188,9 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：解剖 FlashAttention `compute_qk → compute_p → compute_pv → compute_gu` 四阶段 TPipe pipeline，量化 preload、ring 与 UB footprint。
-2. 为 Online Softmax 增加 max 上升/下降、全 mask、non-divisible S1、ring wrap 与 CPU/A2A3 parity CI contract。
+1. 主线：证明 generated PTOAS C++ 的 `PIPE_V` barrier 删除边界，区分 MTE wait、直接 Tile dependency 与不安全的文本补丁；并在课程 14 后追加第二次七章知识图谱回顾。
+2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
 4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
 5. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
-6. 用 device trace 量化 online softmax、reduce tree、credit batching与 Compact 的同步/搬运 stall。
+6. 用 device trace 量化 QK/PV 与 P/GU overlap、reduce tree、credit batching和 Compact 的同步/搬运 stall。
