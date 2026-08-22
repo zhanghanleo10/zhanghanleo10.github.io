@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 7：分布式执行，聚焦 TP × PP 控制面、stage 数据链、canonical output 与 fail-closed 故障传播。
-- 当前主线：已打通 Multiproc/Ray V2 的 SchedulerOutput fan-out、TP collective、PP lane P2P、唯一模型提交与 connector sideband 聚合；下一章进入分布式 CUDA Graph/torch.compile 的跨 rank capture/replay 契约。
+- 阶段 8：CUDA Graph/torch.compile，聚焦 graph key、动态 batch 归一化、固定地址与跨 rank replay 契约。
+- 当前主线：已打通 local graph dispatch、DP mode/token envelope 共识、rank-local capture/replay 与 eager fallback；下一章进入 torch.compile 的切图边界。
 
 ## 已完成章节
 
@@ -25,6 +25,7 @@
 | 2026-08-19 10 | `compute_logits → logits processors → Gumbel-max → logprobs → AsyncOutput` | [`f1178f3a`](https://github.com/vllm-project/vllm/commit/f1178f3a06fa30a0cc282376924210cedad08c44) | [一次 GPU Sampling 事务]({{ '/articles/vllm-gpu-sampling-logits-gumbel-logprobs/' | relative_url }}) |
 | 2026-08-20 11 | `last PP rank sampling → PPHandler broadcast → generation filter → canonical output rank` | [`bf2866f8`](https://github.com/vllm-project/vllm/commit/bf2866f8bf5bb20628e2b93835be3c281a9b4ca4) | [PP Token 广播与状态收敛]({{ '/articles/vllm-pipeline-parallel-sampling-broadcast-state-convergence/' | relative_url }}) |
 | 2026-08-21 12 | `SchedulerOutput fan-out → TP/PP data plane → canonical output/failure` | [`d29f7f5c`](https://github.com/vllm-project/vllm/commit/d29f7f5c9294be8e489dac34d45a939b95a06336) | [TP × PP Executor DAG]({{ '/articles/vllm-tp-pp-executor-dag-control-data-failure/' | relative_url }}) |
+| 2026-08-22 13 | `local dispatch → DP mode/token consensus → ForwardContext → capture/replay` | [`8bdc70ec`](https://github.com/vllm-project/vllm/commit/8bdc70ec7b379279ec0152343239c2d50aced687) | [分布式 CUDA Graph Key 契约]({{ '/articles/vllm-distributed-cudagraph-key-padding-address-contract/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -151,6 +152,14 @@
 - `RayDistributedExecutor._execute_dag/_compiled_ray_dag`
 - `RayWorkerWrapper.execute_model_ray`
 - `RayExecutorV2`
+- `BatchDescriptor`
+- `CudagraphDispatcher.initialize_cudagraph_keys/dispatch/get_capture_descs`
+- `GPUModelRunner._prepare_inputs`（CUDA Graph dispatch 与 DP re-dispatch）
+- `coordinate_batch_across_dp`
+- `_run_ar/_post_process_cudagraph_mode/_post_process_dp_padding`
+- `ForwardContext/set_forward_context`
+- `CUDAGraphWrapper/CUDAGraphEntry`
+- `GPUModelRunner.capture_model`
 
 ## 已确认不变量
 
@@ -216,6 +225,11 @@
 60. `PCP=1` 时 canonical output rank 是 last PP stage 的 TP0；唯一的是 Scheduler 的模型 token commit，KV/EC connector sideband 仍可从多 rank 聚合。
 61. 非输出 rank 的 Python 异常不保证直接进入 unique-reply RPC；故障可见性还依赖 collective 传播、execute timeout 或 worker process liveness monitor。
 62. 任一 rank 部分失败后，未知完成度的 forward/KV side effect 不能作为部分成功提交；当前系统采用 Executor/Engine fail-stop，而非单-rank step recovery。
+63. `BatchDescriptor` 是 graph replay 的最小显式 key：FULL 通常保留精确 `num_reqs/uniform`，PIECEWISE 可放宽这些字段；任何影响命令序列的状态都不能被错误省略。
+64. DP ranks 的 runtime CUDA Graph mode 取最小值（`NONE < PIECEWISE < FULL`）；只要一个 rank 不能录图，全部 rank 必须采用兼容的更弱路径。
+65. 同步 mode 非 NONE 时，DP graph token envelope 取各 rank 本地 padded token 数的最大值；ModelRunner 必须用该 mode 与 token 数重新 dispatch，并验证 descriptor 一致。
+66. graph key 一致不是充分条件：持久输入 `data_ptr`、workspace 地址、collective 参与者/顺序和 padding 无副作用语义也必须稳定。
+67. `CUDAGraphEntry` 是 rank-local 长寿命资源，与 compiled module/runner 同寿命而非 request 同寿命；未知 shape 应在 dispatch 层回退 eager，不能在 capture 关闭后偷偷新录图。
 
 ## 前置依赖与版本注意
 
@@ -257,10 +271,13 @@
 - `PPHandler` 缺少 generation filter、collective skip 对称与 stream/event 生命周期的直接单测；现有 PP×DP E2E 主要验证长度和存活性。
 - 开放 PR #46994 指出的 spec sampled width 与 draft-token relay 问题、PR #52179 指出的 sync cadence 问题尚未合入；需要基于最终 post-image 重做 contract。
 - Multiproc、Ray V2、legacy Ray 的主路径已对照；仍缺 `TP>1 × PP>1` 故障注入、非输出 rank exception aggregation、external launcher output ownership 与各 backend connector sideband 的统一 contract。
+- `_post_process_cudagraph_mode` 缺少 DP mixed-mode 直接单测；尚无 `DP=2 × TP=2` 下 FULL/PIECEWISE/NONE 收敛与 collective trace 对称性的 CI guard。
+- production 路径通常不检查 graph replay 输入 `data_ptr`；stale 地址、workspace resize 与多 stream 共享 graph pool 的 fail-fast 边界尚未建立。
+- CUDA Graph padding 的额外 FLOPs、DP all-reduce 同步点、capture pool 显存与 P99 收益缺少按 prefill/decode 分层的实测。
 
 ## 下一批候选章节
 
-1. 下一主线：分布式 CUDA Graph/`torch.compile`——跨 rank shape/address、collective order、graph key 与 replay 对称性。
+1. 下一主线：`torch.compile` 切图边界——`splitting_ops → PiecewiseBackend → attention/custom op → CUDAGraphWrapper`。
 2. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
 3. PP 回访：spec sampled width、draft-token relay、sync/async cadence 与 generation-safe CI。
 4. Attention 回访：多 KV group、DCP 与 backend cache layout 的一致性测试。
