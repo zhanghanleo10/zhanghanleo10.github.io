@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 8：CUDA Graph/torch.compile，聚焦 graph key、动态 batch 归一化、固定地址与跨 rank replay 契约。
-- 当前主线：已打通 local graph dispatch、DP mode/token envelope 共识、rank-local capture/replay 与 eager fallback；下一章进入 torch.compile 的切图边界。
+- 阶段 9：Serving，聚焦异步请求流、streaming、断连取消、错误传播与 EngineCore client 生命周期。
+- 当前主线：CUDA Graph/torch.compile 基础链已闭合：runtime graph key、固定地址、FX/Inductor partition、shape range 与 subgraph replay；下一章进入 Serving 入口。
 
 ## 已完成章节
 
@@ -26,6 +26,7 @@
 | 2026-08-20 11 | `last PP rank sampling → PPHandler broadcast → generation filter → canonical output rank` | [`bf2866f8`](https://github.com/vllm-project/vllm/commit/bf2866f8bf5bb20628e2b93835be3c281a9b4ca4) | [PP Token 广播与状态收敛]({{ '/articles/vllm-pipeline-parallel-sampling-broadcast-state-convergence/' | relative_url }}) |
 | 2026-08-21 12 | `SchedulerOutput fan-out → TP/PP data plane → canonical output/failure` | [`d29f7f5c`](https://github.com/vllm-project/vllm/commit/d29f7f5c9294be8e489dac34d45a939b95a06336) | [TP × PP Executor DAG]({{ '/articles/vllm-tp-pp-executor-dag-control-data-failure/' | relative_url }}) |
 | 2026-08-22 13 | `local dispatch → DP mode/token consensus → ForwardContext → capture/replay` | [`8bdc70ec`](https://github.com/vllm-project/vllm/commit/8bdc70ec7b379279ec0152343239c2d50aced687) | [分布式 CUDA Graph Key 契约]({{ '/articles/vllm-distributed-cudagraph-key-padding-address-contract/' | relative_url }}) |
+| 2026-08-23 14 | `Dynamo full graph → FX partition → PiecewiseBackend/RangeEntry → CUDAGraphWrapper` | [`30b34171`](https://github.com/vllm-project/vllm/commit/30b34171b113887e0e08d7f6d06e2e5a5c33b9d2) | [torch.compile 切图边界]({{ '/articles/vllm-torch-compile-piecewise-splitting-boundaries/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -161,6 +162,20 @@
 - `CUDAGraphWrapper/CUDAGraphEntry`
 - `GPUModelRunner.capture_model`
 
+- `TorchCompileWithNoGuardsWrapper.__init__/__call__`
+- `support_torch_compile`
+- `VllmBackend.__call__`
+- `split_graph`
+- `SplitItem`
+- `should_split`
+- `PiecewiseCompileInterpreter.call_module`
+- `PiecewiseBackend.__init__/__call__`
+- `RangeEntry`
+- `wrap_with_cudagraph_if_needed`
+- `generate_execution_code/compile_execution_fn`
+- `CompilationConfig.set_splitting_ops_for_v1`
+- `Attention.forward`（custom-op output allocation/mutation boundary）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -231,6 +246,15 @@
 66. graph key 一致不是充分条件：持久输入 `data_ptr`、workspace 地址、collective 参与者/顺序和 padding 无副作用语义也必须稳定。
 67. `CUDAGraphEntry` 是 rank-local 长寿命资源，与 compiled module/runner 同寿命而非 request 同寿命；未知 shape 应在 dispatch 层回退 eager，不能在 capture 关闭后偷偷新录图。
 
+68. `torch.compile(fullgraph=True)` 只保证 Dynamo 得到完整 FX graph；vLLM backend 仍可在其后按 `splitting_ops` 主动 partition。
+69. FX-level split 必须使用 `keep_original_order=True`；KV update 与 attention 还需 dummy tensor dependency 保留隐藏写读顺序。
+70. splitting region 不进入 `PiecewiseBackend`；attention 之间的 non-splitting regions 才被 Inductor 编译并包成 PIECEWISE `CUDAGraphWrapper`。
+71. attention output 在 custom op 外分配，custom op 通过 mutation schema 原地写入；allocation、mutation 与后继消费的 partition ownership 必须一致。
+72. `RangeEntry` 选择 Inductor runnable，`BatchDescriptor` 选择 CUDA Graph replay；两层 shape 路由解决不同问题，不能互相替代。
+73. `PiecewiseBackend` 在构造期编译或加载全部 range；运行时 shape 越界必须失败，不能临时扩张编译/capture 集合。
+74. splitting ops 的默认集合不仅含 attention，还在 FX early-partition 路径加入 KV-cache update，以隔离 string layer identity 并保住重复 layer artifact 复用。
+75. tuple/getitem、`torch.Size` 和 empty allocation 不能任意穿越 AOT submodule 边界；splitter 必须重写或合并这些节点，同时保持 mutation 语义。
+
 ## 前置依赖与版本注意
 
 - 本课程以每章记录的 `main` commit 为准，不把 v0.22.1 专题中的实现自动视为当前事实。
@@ -274,13 +298,16 @@
 - `_post_process_cudagraph_mode` 缺少 DP mixed-mode 直接单测；尚无 `DP=2 × TP=2` 下 FULL/PIECEWISE/NONE 收敛与 collective trace 对称性的 CI guard。
 - production 路径通常不检查 graph replay 输入 `data_ptr`；stale 地址、workspace resize 与多 stream 共享 graph pool 的 fail-fast 边界尚未建立。
 - CUDA Graph padding 的额外 FLOPs、DP all-reduce 同步点、capture pool 显存与 P99 收益缺少按 prefill/decode 分层的实测。
+- 缺少真实 decoder layer partition topology golden；operator rename、新 custom op 或条件分支可能改变 split 拓扑而 CI 不报错。
+- 缺少 attention output alias/poison 测试，以及 KV update→attention 在 AOT cache load、TP collective 与 CUDA Graph replay组合下的顺序 guard。
+- FX early partition 与 Inductor late partition 的 cold start、artifact 复用、graph pool 显存和线上 P99 尚无同模型对照。
 
 ## 下一批候选章节
 
-1. 下一主线：`torch.compile` 切图边界——`splitting_ops → PiecewiseBackend → attention/custom op → CUDAGraphWrapper`。
-2. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
-3. PP 回访：spec sampled width、draft-token relay、sync/async cadence 与 generation-safe CI。
-4. Attention 回访：多 KV group、DCP 与 backend cache layout 的一致性测试。
+1. 下一主线：Serving 入口的并发与取消——`OpenAIServing → AsyncLLM.generate → EngineCoreClient → disconnect/abort`。
+2. Streaming：output handler、队列 backpressure、disconnect race 与终态唯一性。
+3. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
+4. Compile 回访：真实模型 partition topology golden 与 FX/Inductor partition 对照。
 5. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
 ## 第七篇知识图谱回顾
@@ -289,3 +316,12 @@
 - 已闭合边界：用户请求已经能够被追踪为一次具体的 `input_ids/positions/block_tables/slot_mapping` 设备执行计划。
 - 当前最大盲区：ModelRunner 输出何时成为 Scheduler 可提交 token；async/speculative progress 如何回滚；finished 状态如何同时释放 Scheduler registry、KV ownership 与 Worker slot。
 - 后续路线调整：先完成返回事务，再进入 Attention metadata 和真实 KV cache tensor；暂不提前跳到 Sampling 或 CUDA Graph 优化。
+
+
+## 第二次七章知识图谱回顾（第 08–14 章）
+
+- 已打通：`ModelRunnerOutput commit/rollback → Attention KV write/read → Sampling → PP state convergence → TP×PP Executor DAG → distributed graph key → torch.compile partition/replay`。
+- 已闭合：Scheduler 与设备执行的返回事务、跨 rank 控制/数据面、CUDA Graph key 和 FX mutation ordering 已能串成同一正确性协议。
+- 当前最大盲区：内部 fail-stop、取消和 finished 状态如何穿过异步 Serving 协程，形成唯一且可观察的 HTTP/streaming 终态。
+- 后续路线调整：进入 Serving；随后以跨层测试、性能与故障注入回收 graph、connector、backpressure 和 finish transaction 知识债。
+
