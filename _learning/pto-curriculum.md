@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-22。
+最后更新：2026-08-23。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础与真实 kernel 状态机交替推进。已打通 `PyPTO TileLoadOp → pto.partition_view → GlobalTensor → TLOAD → TMOV → TMATMUL`，闭合 A2/A3 `TPUSH/TPOP` credit，并把 Online Softmax 放入真实四阶段 FlashAttention pipeline：已确认 Cube/Vector 两个串行资源域、QK/P/PV 三条 GM FIFO、prologue/steady/epilogue 计数，以及 `QK_PRELOAD == EXP_RING` 的 sideband 生命周期；下一步证明 generated PTOAS C++ 中哪些 `PIPE_V` barrier 可以安全删除。
+当前阶段：ISA 基础与真实 kernel 状态机交替推进。课程 14 已把 PTOAS `InsertSync` 生成的 `PIPE_V` barrier 与 pto-isa 的生成后 patch 串起来，并确认当前 `gu` matcher 的实际接受语言比文档更宽、softmax matcher 在解析失败时会 fail-open。下一步进入 PTOAS `InsertSync` 的完整对象生命周期，建立通用的同步生成语义。
 
 ## 已完成章节
 
@@ -38,6 +38,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-20 | Row/Column Reduce 的语义与 scratch | valid `R×C` → `TROWSUM R×1` / `TCOLSUM 1×C` → binary/sequential → semantic store | [课程 11]({% post_url 2026-08-20-pto-isa-trowsum-tcolsum-valid-region-precision %}) |
 | 2026-08-21 | 多 Tile Online Softmax | QK Tile → running max/sum → alpha 重标定 → P@V → running O / global sum | [课程 12]({% post_url 2026-08-21-pto-online-softmax-running-max-sum %}) |
 | 2026-08-22 | 四阶段 FlashAttention Pipeline | Cube QK/PV ↔ 三条 GM FIFO ↔ Vector P/GU → preload/exp-ring reuse | [课程 13]({% post_url 2026-08-22-pto-flashattention-four-stage-pipeline-preload-exp-ring %}) |
+| 2026-08-23 | `PIPE_V` Barrier 删除证明边界 | `InsertSync → generated C++ → gu/softmax matcher → fail-closed audit` | [课程 14]({% post_url 2026-08-23-pto-pipe-v-barrier-removal-proof-boundaries %}) |
 
 ## ISA 知识地图
 
@@ -72,15 +73,16 @@ permalink: /learning/pto-curriculum/
 | Row/Column Reduce | `TROWSUM` 只定义 `R×1`、`TCOLSUM` 只定义 `1×C`；valid prefix 控制数学域，A2/A3 scratch 与 A5 register path 资源需求不同，binary/sequential 改变依赖深度与浮点顺序 | 已讲透 sum 基础 |
 | Online Row Softmax | 每行维护 `global_max/global_sum`；新 Tile 以 `alpha=exp((old_max-new_max)×scale)` 同时重标定旧 denominator 与 running output numerator；P/PV/alpha 必须保持同一 tile identity | 已讲透真实 FA recurrence |
 | Four-stage FA pipeline | Cube 内 QK/PV 串行交错、Vector 内 P/GU drain-first；三条 8-slot GM FIFO 传 payload，`EXP_RING==QK_PRELOAD` 保存 sideband alpha，三段计数保证每 Tile 四阶段各一次 | 已讲透 A3 non-causal DSL 主路径 |
+| `PIPE_V` barrier 证明 | PTOAS 依据 alias/dependency 插入同步；pto-isa 再按生成文本删减。当前 `gu` matcher 不强制存在 MTE2→V wait，softmax parser 失败会被当作无依赖 | 已讲透 patch 边界，硬件时序待 trace |
 | 通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [3186c38](https://github.com/hw-native-sys/pto-isa/commit/3186c381bd49e1164092e67ff1b3564302754e76) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `fa_builder.py` 的 `emit_qk_pv_interleaved`、`vec_unit_body`、QK/P/PV pipes、`QK_PRELOAD/EXP_RING/S1_TILE`、`run.py` case1..case8 与 barrier pattern docs | ISA 深挖 11 |
+| pto-isa | [3186c38](https://github.com/hw-native-sys/pto-isa/commit/3186c381bd49e1164092e67ff1b3564302754e76) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `compile.sh`、`patch_vec_barriers.py`、barrier pattern reference、`run.py` case1..case8 | ISA 深挖 12 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [fe5594a](https://github.com/hw-native-sys/PTOAS/commit/fe5594af84793c48487d4309d8092c3b6b44a0e9) | TLoadOp::verify、PTOCanonicalizeIR、PTOMakeTensorViewToEmitC、PTOPartitionViewToEmitC/static、PTOTLoadToTLOAD、issue157/issue995/DN layout tests | 跨仓深挖 1 |
+| PTOAS | [e32488c](https://github.com/hw-native-sys/PTOAS/commit/e32488c9327a6f5e0fbbb71fb90fabdc669b3de7) | `InsertSyncAnalysis` 设计、`BaseMemInfo`、`--enable-insert-sync` pass chain、intra-pipe barrier sample、`issue646_pipev_repeat_prune` | 跨仓深挖 2 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -142,6 +144,11 @@ permalink: /learning/pto-curriculum/
 - `EXP_RING==QK_PRELOAD` 是当前调度的 hard invariant；steady state 必须先 `GU(t)` 消费 `alpha[t%ring]`，再由 `P(t+preload)` 复用同一槽。
 - 对 N 个 KV Tile，prologue 产生 preload 个 QK/P，steady 处理 `N-preload` 个旧 GU/新 P 对，epilogue drain 最后 preload 个 PV/GU；每个 Tile 四阶段恰好一次。
 - 默认 `S1_TILE=256` 时 QK/P/PV 三类 8-slot GM ring 每 block 合计 2 MiB；这属于 transport backing，不能与 192 KiB Vector UB 预算混算。
+- PTOAS `InsertSyncAnalysis` 以 root buffer/view alias 和地址区间识别 RAW/WAR/WAW；同 pipe 依赖生成 barrier，跨 pipe 依赖生成 set/wait，控制流与零次循环必须保守处理。
+- `PIPE_V` 删除只能在依赖证明成功后进行；解析未知、调用签名变化或变量身份无法恢复时必须 fail-closed 保留 barrier。
+- 当前 `gu` matcher 实际允许 `TROWEXPANDMUL → barrier → TADD` 中不存在任何 `wait_flag(PIPE_MTE2, PIPE_V)`；这比文档声称的目标 pattern 更宽。
+- 当前 softmax matcher 只识别 `vN` Tile 名并假设第一个 Tile operand 是 destination；解析失败返回空访问集，进而可能把真实依赖误判为无依赖。
+- 最终输出数值测试与端到端 latency 不能证明删 barrier 后不存在低概率调度 race，也不能把多项调优的总收益归因给同步删除。
 
 ## 待验证推断
 
@@ -165,7 +172,9 @@ permalink: /learning/pto-curriculum/
 - fp32 `p/global_sum` 与 cast 后 fp16 P→PV 路径的端到端误差 envelope，以及不同 Tile_S1/preload 对误差的影响尚未量化。
 - TFA 数据生成器注释了 S1=8192 case，而 C++ 仍声明对应测试；默认 CI 是否提供其他 golden 来源尚未闭合。
 - `QK_PRELOAD=3/4 × S1_TILE=256/512 × KV_SPLIT` 的组合正确性、FIFO stall 与 exp-ring wrap 尚缺系统矩阵；现有 case1..case8 不能替代故障注入。
-- `gu` barrier 删除依赖 `wait_flag(PIPE_MTE2, PIPE_V)` 的当前生成形状；PTOAS emitter 改变后，op-pattern patch 是否仍是充分证明需重新审计。
+- 文档把 `gu` barrier 删除与 MTE2→V wait 绑定，但当前 matcher 不要求 wait；无 wait 的 pattern 在真实设备上是否安全需要指令级依赖审计与设备 trace。
+- PTOAS emitter、变量命名或 wrapper 签名变化时，当前 `vN`/destination-first 文本解析 contract 是否仍成立，尚无版本化 golden 证明。
+- PR #136 的性能改善同时包含 pipeline 参数、共享缓冲与 barrier patch；各项收益尚无隔离实验，不能据总 latency 推断 barrier 删除收益。
 
 ## 尚未解释的知识债
 
@@ -184,13 +193,25 @@ permalink: /learning/pto-curriculum/
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
+- `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
+- 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
 
 ## 下一批候选主线
 
-1. 主线：证明 generated PTOAS C++ 的 `PIPE_V` barrier 删除边界，区分 MTE wait、直接 Tile dependency 与不安全的文本补丁；并在课程 14 后追加第二次七章知识图谱回顾。
+1. 主线：追踪 PTOAS `InsertSync` 的完整对象生命周期：`BaseMemInfo → RAW/WAR/WAW → barrier/set/wait → event ID → SyncCodegen`，并解释控制流与 fallback。
 2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
 4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
 5. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
 6. 用 device trace 量化 QK/PV 与 P/GU overlap、reduce tree、credit batching和 Compact 的同步/搬运 stall。
+
+## 第二次七章知识图谱回顾（课程 08–14）
+
+- **资源盒子到有效语义**：课程 08 用 Compact tail 固化 `capacity ≥ aligned envelope ≥ valid`，明确 padding ownership 与语义边界。
+- **上层视图到物理地址**：课程 09 把 `partition_view` 变成 `base + Σ(offset×stride)`，让 Tile valid 与 GlobalTensor descriptor 共用一个有效域。
+- **跨核传输到生命周期闭合**：课程 10 证明 ready/free credit、ring wrap 与 destructor drain 是同一 ownership 账本。
+- **局部算子到跨 Tile 数学状态**：课程 11–12 从 Reduce 轴语义推进到 Online Softmax 的 running max/sum/output recurrence。
+- **数学状态到真实 pipeline**：课程 13 把 QK、P、PV、GU 放进 Cube/Vector 两域与三条 GM FIFO，闭合 preload/steady/epilogue。
+- **pipeline 到同步证明**：课程 14 追到 PTOAS InsertSync 与生成后 barrier patch，确认“匹配文本”不能替代“证明依赖不存在”。
+- **当前最大缺口**：ISA 主线已经覆盖 Tile、地址、搬运、GEMM、Reduce、Online Softmax、TPipe 与同步删减；尚缺通用 PTOAS 同步对象生命周期、控制流合并、event ID 分配，以及设备级 race/性能归因证据。
