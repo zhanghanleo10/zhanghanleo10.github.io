@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：Serving，聚焦异步请求流、streaming、断连取消、错误传播与 EngineCore client 生命周期。
-- 当前主线：CUDA Graph/torch.compile 基础链已闭合：runtime graph key、固定地址、FX/Inductor partition、shape range 与 subgraph replay；下一章进入 Serving 入口。
+- 当前主线：Serving 入口取消链已闭合：HTTP disconnect、async generator close、前端 tombstone、跨进程 ABORT 与 KV fence；下一章进入输出流与慢消费者。
 
 ## 已完成章节
 
@@ -27,6 +27,7 @@
 | 2026-08-21 12 | `SchedulerOutput fan-out → TP/PP data plane → canonical output/failure` | [`d29f7f5c`](https://github.com/vllm-project/vllm/commit/d29f7f5c9294be8e489dac34d45a939b95a06336) | [TP × PP Executor DAG]({{ '/articles/vllm-tp-pp-executor-dag-control-data-failure/' | relative_url }}) |
 | 2026-08-22 13 | `local dispatch → DP mode/token consensus → ForwardContext → capture/replay` | [`8bdc70ec`](https://github.com/vllm-project/vllm/commit/8bdc70ec7b379279ec0152343239c2d50aced687) | [分布式 CUDA Graph Key 契约]({{ '/articles/vllm-distributed-cudagraph-key-padding-address-contract/' | relative_url }}) |
 | 2026-08-23 14 | `Dynamo full graph → FX partition → PiecewiseBackend/RangeEntry → CUDAGraphWrapper` | [`30b34171`](https://github.com/vllm-project/vllm/commit/30b34171b113887e0e08d7f6d06e2e5a5c33b9d2) | [torch.compile 切图边界]({{ '/articles/vllm-torch-compile-piecewise-splitting-boundaries/' | relative_url }}) |
+| 2026-08-24 15 | `HTTP disconnect → AsyncLLM.generate → OutputProcessor tombstone → EngineCore ABORT → KV fence` | [`a7195188`](https://github.com/vllm-project/vllm/commit/a7195188a4b45dec40030467ec6b69b4f1283c8e) | [Serving 断连取消]({{ '/articles/vllm-serving-disconnect-abort-lifecycle/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -176,6 +177,19 @@
 - `CompilationConfig.set_splitting_ops_for_v1`
 - `Attention.forward`（custom-op output allocation/mutation boundary）
 
+- `completion.api_router.create_completion`
+- `with_cancellation/listen_for_disconnect`
+- `OpenAIServingCompletion._create_completion/completion_stream_generator`
+- `merge_async_iterators`
+- `AsyncLLM.add_request/_add_request/generate/abort`
+- `RequestOutputCollector`
+- `OutputProcessor.abort_requests/process_outputs`
+- `InputProcessor.assign_request_id`（Serving internal ID 生命周期）
+- `AsyncMPClient.abort_requests_async`
+- `EngineCoreProc.process_input_sockets`（ABORT 双队列）
+- `EngineCore._process_aborts_queue`
+- `Scheduler.finish_requests/_free_request/_free_request_blocks/_drain_deferred_frees`（取消释放路径）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -254,6 +268,12 @@
 73. `PiecewiseBackend` 在构造期编译或加载全部 range；运行时 shape 越界必须失败，不能临时扩张编译/capture 集合。
 74. splitting ops 的默认集合不仅含 attention，还在 FX early-partition 路径加入 KV-cache update，以隔离 string layer identity 并保住重复 layer artifact 复用。
 75. tuple/getitem、`torch.Size` 和 empty allocation 不能任意穿越 AOT submodule 边界；splitter 必须重写或合并这些节点，同时保持 mutation 语义。
+76. Streaming response 返回前由 `with_cancellation` 监听 `http.disconnect`；返回后由 `StreamingResponse` 关闭 stream iterator，取消必须沿 `completion_stream_generator → merge_async_iterators → AsyncLLM.generate` 传播。
+77. `AsyncLLM.generate` 捕获 `CancelledError/GeneratorExit` 时必须以 collector 的 internal request ID 调用 `abort(internal=True)`；external ID 只用于公开 fan-out/批量身份。
+78. Serving abort 先从 `OutputProcessor.request_states` 删除本地状态，再发远端 ABORT；迟到 `EngineCoreOutput` 因无 state 被忽略，不能重新进入已取消 stream。
+79. ABORT 的 eager queue 保证执行期间到达的取消先于 `update_from_output`，ordered input queue 保证 ADD/ABORT 相对顺序；双路径正确性依赖 Scheduler finish 幂等。
+80. 显式 external abort 可向仍存活消费者产生 `finish_reason=abort` 的 final output；disconnect 路径消费者已取消，二者共享 cleanup 机制但外部可观察语义不同。
+81. 请求 terminal 与 KV block 物理复用分离：在途 GPU 写未越过 `processed_step_seq` 时，blocks 必须进入 `deferred_frees`，不能因 Host tombstone 提前复用。
 
 ## 前置依赖与版本注意
 
@@ -301,11 +321,15 @@
 - 缺少真实 decoder layer partition topology golden；operator rename、新 custom op 或条件分支可能改变 split 拓扑而 CI 不报错。
 - 缺少 attention output alias/poison 测试，以及 KV update→attention 在 AOT cache load、TP collective 与 CUDA Graph replay组合下的顺序 guard。
 - FX early partition 与 Inductor late partition 的 cold start、artifact 复用、graph pool 显存和线上 P99 尚无同模型对照。
+- 缺少从真实 ASGI socket disconnect 到 `AsyncLLM.generate` abort、Scheduler terminal、KV/connector ref 归零的跨层测试；当前 mid-stream 测试通过提前退出 async iterator 模拟取消。
+- 多 prompt × `n>1` 断连是否完整关闭所有 iterator/child、ADD 尚未被 Core 消费时的快速取消、API 进程硬杀后的孤儿请求回收尚未系统覆盖。
+- `RequestOutputCollector` 的 DELTA coalescing 不是严格有界背压；慢消费者、长输出与取消风暴下的 Host 内存、ZMQ backlog 和 P99 尚未量化。
+- connector 延迟释放与 GPU in-flight deferred fence 同时存在时，缺少断言所有引用和 blocks 最终归零的故障注入。
 
 ## 下一批候选章节
 
-1. 下一主线：Serving 入口的并发与取消——`OpenAIServing → AsyncLLM.generate → EngineCoreClient → disconnect/abort`。
-2. Streaming：output handler、队列 backpressure、disconnect race 与终态唯一性。
+1. 下一主线：Streaming 输出方向——`EngineCoreOutputs → output_handler → RequestOutputCollector → SSE`，聚焦 chunk coalescing、慢消费者内存与错误传播。
+2. Serving 取消回访：真实 ASGI disconnect、`n>1` child fan-out、API 进程硬死与取消风暴。
 3. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
 4. Compile 回访：真实模型 partition topology golden 与 FX/Inductor partition 对照。
 5. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
