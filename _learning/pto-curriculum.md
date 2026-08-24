@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-23。
+最后更新：2026-08-24。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础与真实 kernel 状态机交替推进。课程 14 已把 PTOAS `InsertSync` 生成的 `PIPE_V` barrier 与 pto-isa 的生成后 patch 串起来，并确认当前 `gu` matcher 的实际接受语言比文档更宽、softmax matcher 在解析失败时会 fail-open。下一步进入 PTOAS `InsertSync` 的完整对象生命周期，建立通用的同步生成语义。
+当前阶段：ISA 基础与真实 kernel 状态机交替推进。课程 15 已闭合 PTOAS `InsertSync` 的通用对象链：`BaseMemInfo → RAW/WAR/WAW → barrier/set/wait → event ID → SyncCodegen`，并明确 zero-trip 控制流、slot-keyed dynamic event 与 `PIPE_ALL` fallback 的正确性边界。下一步研究 PlanMemory 物理地址复用与异步 MTE3 在途读取之间的跨 root WAR。
 
 ## 已完成章节
 
@@ -39,6 +39,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-21 | 多 Tile Online Softmax | QK Tile → running max/sum → alpha 重标定 → P@V → running O / global sum | [课程 12]({% post_url 2026-08-21-pto-online-softmax-running-max-sum %}) |
 | 2026-08-22 | 四阶段 FlashAttention Pipeline | Cube QK/PV ↔ 三条 GM FIFO ↔ Vector P/GU → preload/exp-ring reuse | [课程 13]({% post_url 2026-08-22-pto-flashattention-four-stage-pipeline-preload-exp-ring %}) |
 | 2026-08-23 | `PIPE_V` Barrier 删除证明边界 | `InsertSync → generated C++ → gu/softmax matcher → fail-closed audit` | [课程 14]({% post_url 2026-08-23-pto-pipe-v-barrier-removal-proof-boundaries %}) |
+| 2026-08-24 | InsertSync 同步对象生命周期 | `BaseMemInfo → RAW/WAR/WAW → SyncOperation → event ID → SyncCodegen` | [课程 15]({% post_url 2026-08-24-ptoas-insertsync-dependency-event-lifecycle %}) |
 
 ## ISA 知识地图
 
@@ -74,6 +75,9 @@ permalink: /learning/pto-curriculum/
 | Online Row Softmax | 每行维护 `global_max/global_sum`；新 Tile 以 `alpha=exp((old_max-new_max)×scale)` 同时重标定旧 denominator 与 running output numerator；P/PV/alpha 必须保持同一 tile identity | 已讲透真实 FA recurrence |
 | Four-stage FA pipeline | Cube 内 QK/PV 串行交错、Vector 内 P/GU drain-first；三条 8-slot GM FIFO 传 payload，`EXP_RING==QK_PRELOAD` 保存 sideband alpha，三段计数保证每 Tile 四阶段各一次 | 已讲透 A3 non-causal DSL 主路径 |
 | `PIPE_V` barrier 证明 | PTOAS 依据 alias/dependency 插入同步；pto-isa 再按生成文本删减。当前 `gu` matcher 不强制存在 MTE2→V wait，softmax parser 失败会被当作无依赖 | 已讲透 patch 边界，硬件时序待 trace |
+| BaseMemInfo/alias | root、scope、候选地址、字节包络与 unknown-range 共同描述可能访问范围；已知本地物理区间可跨 SSA root 比较 | 已讲透 InsertSync 基础 |
+| RAW/WAR/WAW 生成 | `now.use×front.def`、`now.def×front.use`、`now.def×front.def`；同 pipe 变 barrier，跨 pipe 变 set/wait | 已讲透线性与控制流基础 |
+| Event ID 分配 | 每个有向 pipe pair 独立维护 8-ID 生命周期池；slot-keyed event 逐 lane 绑定，分配失败降级原位置 `PIPE_ALL` | 已讲透 compiler contract |
 | 通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
@@ -82,7 +86,7 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [3186c38](https://github.com/hw-native-sys/pto-isa/commit/3186c381bd49e1164092e67ff1b3564302754e76) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `compile.sh`、`patch_vec_barriers.py`、barrier pattern reference、`run.py` case1..case8 | ISA 深挖 12 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [e32488c](https://github.com/hw-native-sys/PTOAS/commit/e32488c9327a6f5e0fbbb71fb90fabdc669b3de7) | `InsertSyncAnalysis` 设计、`BaseMemInfo`、`--enable-insert-sync` pass chain、intra-pipe barrier sample、`issue646_pipev_repeat_prune` | 跨仓深挖 2 |
+| PTOAS | [e32488c](https://github.com/hw-native-sys/PTOAS/commit/e32488c9327a6f5e0fbbb71fb90fabdc669b3de7) | `PTOIRTranslator`、`BaseMemInfo`/`MemoryDependentAnalyzer`、`InsertSyncAnalysis`、`SyncOperation`、`MoveSyncState`、`RemoveRedundantSync`、`SyncEventIdAllocation`、`SyncCodegen`；zero-trip 与 multi-tile regressions | 跨仓深挖 3 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -149,6 +153,12 @@ permalink: /learning/pto-curriculum/
 - 当前 `gu` matcher 实际允许 `TROWEXPANDMUL → barrier → TADD` 中不存在任何 `wait_flag(PIPE_MTE2, PIPE_V)`；这比文档声称的目标 pattern 更宽。
 - 当前 softmax matcher 只识别 `vN` Tile 名并假设第一个 Tile operand 是 destination；解析失败返回空访问集，进而可能把真实依赖误判为无依赖。
 - 最终输出数值测试与端到端 latency 不能证明删 barrier 后不存在低概率调度 race，也不能把多项调优的总收益归因给同步删除。
+- `BaseMemInfo` 是 compiler 侧访问证据，不拥有运行时内存；依赖判断必须同时考虑 address space、root/view、候选地址区间、字节包络与 unknown-range。
+- `InsertSyncAnalysis` 的 RAW/WAR/WAW 分别来自 `now.use×front.def`、`now.def×front.use`、`now.def×front.def`；同 pipe 生成 barrier，跨 pipe 生成共享 `kSyncIndex` 的 set/wait。
+- loop body 可能 zero-trip，body 内 `alreadySync` 不能提升到外层；if/else 只有两条路径都覆盖时才能提升同步事实。
+- slot-keyed dynamic event 只排序 `slotSSAExpr % slotCount` 对应的 lane，不能作为另一个 region 或整个 pipe pair 的覆盖证据。
+- 普通 event ID 池按有向 `(srcPipe,dstPipe)` 隔离且每池 8 个 ID；event 生命周期冲突无法消解时必须在原程序点降级 `PIPE_ALL`。
+- `SyncOperation` 从 analysis 创建，经 motion/remove 更新挂载位置与 tombstone，再由 allocator 填 `eventIds`，最终由 `SyncCodegen` 物化为静态或动态 flag/barrier；pass 结束后分析对象统一释放。
 
 ## 待验证推断
 
@@ -175,6 +185,9 @@ permalink: /learning/pto-curriculum/
 - 文档把 `gu` barrier 删除与 MTE2→V wait 绑定，但当前 matcher 不要求 wait；无 wait 的 pattern 在真实设备上是否安全需要指令级依赖审计与设备 trace。
 - PTOAS emitter、变量命名或 wrapper 签名变化时，当前 `vN`/destination-first 文本解析 contract 是否仍成立，尚无版本化 golden 证明。
 - PR #136 的性能改善同时包含 pipeline 参数、共享缓冲与 barrier patch；各项收益尚无隔离实验，不能据总 latency 推断 barrier 删除收益。
+- 开放 PR #948 提议补强 local address provenance、overflow 与 inexact subview envelope；这些结论尚未合入当前 `e32488c` 基线，不能写成现有保证。
+- `syncFinder` 从 may-zero loop 传播而 `alreadySync` 不传播的状态机仍缺 must/may 形式化证明；当前主要依赖回归测试守边界。
+- 8-ID event pool 在深层 loop/branch、多 region multi-buffer 压力下的 `widen/reallocate→PIPE_ALL` 触发频率与设备 stall 尚未量化。
 
 ## 尚未解释的知识债
 
@@ -196,10 +209,12 @@ permalink: /learning/pto-curriculum/
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
+- PlanMemory 把不同 allocation SSA root 复用到同一物理 UB 后，SSA liveness 与异步 pipe 完成时刻分离；跨 root RAW/WAR/WAW、地址 overflow 与动态 subview 必须形成统一 alias contract。
+- Event ID exhaustion、dynamic lane 异常退出/early-exit、zero-trip 嵌套控制流需要真机 race/stall 与死锁故障注入，FileCheck topology 不能替代。
 
 ## 下一批候选主线
 
-1. 主线：追踪 PTOAS `InsertSync` 的完整对象生命周期：`BaseMemInfo → RAW/WAR/WAW → barrier/set/wait → event ID → SyncCodegen`，并解释控制流与 fallback。
+1. 主线：追踪 PTOAS PlanMemory 复用与 InsertSync 跨 root physical alias：allocation SSA 已死但 MTE3 仍异步读取时，如何生成 `MTE3→V` WAR event。
 2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
 4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
@@ -214,4 +229,4 @@ permalink: /learning/pto-curriculum/
 - **局部算子到跨 Tile 数学状态**：课程 11–12 从 Reduce 轴语义推进到 Online Softmax 的 running max/sum/output recurrence。
 - **数学状态到真实 pipeline**：课程 13 把 QK、P、PV、GU 放进 Cube/Vector 两域与三条 GM FIFO，闭合 preload/steady/epilogue。
 - **pipeline 到同步证明**：课程 14 追到 PTOAS InsertSync 与生成后 barrier patch，确认“匹配文本”不能替代“证明依赖不存在”。
-- **当前最大缺口**：ISA 主线已经覆盖 Tile、地址、搬运、GEMM、Reduce、Online Softmax、TPipe 与同步删减；尚缺通用 PTOAS 同步对象生命周期、控制流合并、event ID 分配，以及设备级 race/性能归因证据。
+- **当前最大缺口**：课程 15 已补齐通用 PTOAS 同步对象生命周期、控制流合并与 event ID 分配；剩余最大缺口转为 PlanMemory 跨 root 物理 alias、地址 provenance/overflow，以及设备级 race/性能归因证据。
