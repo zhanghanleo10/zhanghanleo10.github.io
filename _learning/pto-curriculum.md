@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-25。
+最后更新：2026-08-26。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 基础与真实 kernel 状态机交替推进。课程 16 已闭合 `MemLivenessAnalysis → legacy PlanMemory → alloc_tile addr → BaseMemInfo → cross-root WAR → MTE3→V event`，明确 SSA last use、指令发射与设备访问完成是三个不同时间点。下一步对照 modern planner 的 touching-lifetime 与 target-hazard no-reuse gates。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 17 已闭合 modern PlanMemory 的 `writer-defined lifetime → touching → A3 target hazard → semantic gate → reuse cost → addr materialization`，并把 allocator 的 op 内 no-alias 证明与 InsertSync 的跨 op physical ownership handoff 分开。下一步研究 branch-exclusive phi family 与 loop-carried no-exemption。
 
 ## 已完成章节
 
@@ -41,6 +41,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-23 | `PIPE_V` Barrier 删除证明边界 | `InsertSync → generated C++ → gu/softmax matcher → fail-closed audit` | [课程 14]({% post_url 2026-08-23-pto-pipe-v-barrier-removal-proof-boundaries %}) |
 | 2026-08-24 | InsertSync 同步对象生命周期 | `BaseMemInfo → RAW/WAR/WAW → SyncOperation → event ID → SyncCodegen` | [课程 15]({% post_url 2026-08-24-ptoas-insertsync-dependency-event-lifecycle %}) |
 | 2026-08-25 | PlanMemory 物理复用与 async WAR | `BufferLife → physical addr reuse → cross-root alias → MTE3→V event` | [课程 16]({% post_url 2026-08-25-ptoas-planmemory-physical-reuse-async-war %}) |
+| 2026-08-26 | Modern PlanMemory touching 与 A3 target hazard | `writer-defined birth → touching → load/split-TPOP facts → no-reuse gate → InsertSync boundary` | [课程 17]({% post_url 2026-08-26-ptoas-modern-memplan-touching-target-hazard %}) |
 
 ## ISA 知识地图
 
@@ -80,6 +81,7 @@ permalink: /learning/pto-curriculum/
 | RAW/WAR/WAW 生成 | `now.use×front.def`、`now.def×front.use`、`now.def×front.def`；同 pipe 变 barrier，跨 pipe 变 set/wait | 已讲透线性与控制流基础 |
 | Event ID 分配 | 每个有向 pipe pair 独立维护 8-ID 生命周期池；slot-keyed event 逐 lane 绑定，分配失败降级原位置 `PIPE_ALL` | 已讲透 compiler contract |
 | PlanMemory physical reuse | SSA `BufferLife` 只决定规划复用资格；异步 reader 的物理 ownership 必须由 materialized address 上的跨 root WAR event 延长到设备完成 | 已讲透 legacy level2 主路径 |
+| Modern PlanMemory touching gate | `freeIndex==allocIndex` 仅通过 strict-lifetime gate；A3 的 load-derived + split-TPOP + same-writer 组合由 target gate 禁止共址，semantic gate 继续约束通用 inplace | 已讲透 hard-gate 边界，target 设备证据待补 |
 | 通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
@@ -88,7 +90,7 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [3186c38](https://github.com/hw-native-sys/pto-isa/commit/3186c381bd49e1164092e67ff1b3564302754e76) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `compile.sh`、`patch_vec_barriers.py`、barrier pattern reference、`run.py` case1..case8 | ISA 深挖 12 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [203785c](https://github.com/hw-native-sys/PTOAS/commit/203785cf791f932acec3f9de0e6977387cd666d6) | 既有 InsertSync 对象链；新增 `MemLivenessAnalysis`、`BufferLife`、legacy `MemPlan`、planned `alloc_tile addr`、cross-root physical alias、`plan_memory_reused_tstore_sync*` regressions | 跨仓深挖 4 |
+| PTOAS | [e19aff7](https://github.com/hw-native-sys/PTOAS/commit/e19aff7dda7a05cbf4e3ba449a036dc13f3134cf) | 既有 InsertSync/legacy reuse；新增 modern `RootInfo` writer-defined lifetime、`ConflictFacts`、A3 load/split-TPOP target gate、semantic no-alias、reuse cost 与 first-writer/lifetime/cost regressions | 跨仓深挖 5 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -111,6 +113,10 @@ permalink: /learning/pto-curriculum/
 - PlanMemory 的 SSA last use 只释放地址规划资格，不证明异步 pipe 已完成；重叠字节的旧 readers 完成前，新 writer 不得获得 physical ownership。
 - level1/level2 的跨 root reuse contract 要求 PlanMemory 先物化地址，再由已启用的 InsertSync 或等价方案覆盖物理 RAW/WAR/WAW；PlanMemory 单独成功不是完整正确性证明。
 - 已知本地物理范围以同 address space 的半开区间比较：端点相接不 alias，不同 SSA root 仍可 alias。
+- modern PlanMemory 的 `freeIndex == allocIndex` 是 touching，只免除 strict lifetime overlap；是否共址还必须通过 target-specific 与 semantic no-alias hard gates。
+- A3 target gate 只拒绝 `loadDerivedRoot + split-TPOP-derived operand + same DPS writer index` 的组合；它不是“所有 TPOP 永不复用”的全局规则。
+- reuse cost 只在 hard gate 通过后选择 group/fresh address；容量压力可改变性能偏好，但不能放松正确性 gate。
+- allocator 负责 op 内 storage alias 合法性；InsertSync 负责可由同步边表达的跨 op physical ownership handoff，二者不可互相替代。
 - CPU-SIM 可验证数学语义，但不能单独证明真机跨 pipeline event 正确。
 - simpler 负责 task 依赖与运行时序，不解释 KV 分页或 ISA 内部 Tile 语义。
 - A2/A3 `DIR_BOTH` 的 C2V/V2C 是两条独立 GM ring；V2C base=`GM_SLOT_BUFFER+SlotNum×SlotSize`。
@@ -190,7 +196,9 @@ permalink: /learning/pto-curriculum/
 - 文档把 `gu` barrier 删除与 MTE2→V wait 绑定，但当前 matcher 不要求 wait；无 wait 的 pattern 在真实设备上是否安全需要指令级依赖审计与设备 trace。
 - PTOAS emitter、变量命名或 wrapper 签名变化时，当前 `vN`/destination-first 文本解析 contract 是否仍成立，尚无版本化 golden 证明。
 - PR #136 的性能改善同时包含 pipeline 参数、共享缓冲与 barrier patch；各项收益尚无隔离实验，不能据总 latency 推断 barrier 删除收益。
-- 开放 PR #948 提议补强 local address provenance、overflow 与 inexact subview envelope；截至 2026-08-25 仍未合入当前 `203785cf` 基线，不能写成现有保证。
+- 开放 PR #948 提议补强 local address provenance、overflow 与 inexact subview envelope；截至 2026-08-26 仍未作为当前 `e19aff7d` 基线的既有保证。
+- modern memplan 设计文档计划了 `plan_memory_five_gates_lifetime_touching.pto` 与 `plan_memory_five_gates_target_hazard.pto`，但当前主干树没有这两个 direct lit；target gate 的 split/alias-view 正负例与 A3 真机 race 仍待补。
+- A3 target hazard 的软件判定已闭合，但公开材料没有给出队列、端口或 writeback 级微架构时序；具体硬件成因只能标记为推断。
 - `syncFinder` 从 may-zero loop 传播而 `alreadySync` 不传播的状态机仍缺 must/may 形式化证明；当前主要依赖回归测试守边界。
 - 8-ID event pool 在深层 loop/branch、多 region multi-buffer 压力下的 `widen/reallocate→PIPE_ALL` 触发频率与设备 stall 尚未量化。
 
@@ -214,12 +222,12 @@ permalink: /learning/pto-curriculum/
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
-- PlanMemory 跨 root physical WAR 的 legacy level2 主路径已闭合；仍缺地址 overflow、动态 subview/reinterpret provenance、跨 pass reuse/sync verifier，以及 legacy/modern 的 UB peak、event 数和 device stall 对照。
+- PlanMemory 跨 root physical WAR 与 modern touching/target gate 的职责边界已闭合；仍缺地址 overflow、动态 subview/reinterpret provenance、target-hazard direct lit、跨 pass reuse/sync verifier，以及 legacy/modern 的 UB peak、event 数和 device stall 对照。
 - Event ID exhaustion、dynamic lane 异常退出/early-exit、zero-trip 嵌套控制流需要真机 race/stall 与死锁故障注入，FileCheck topology 不能替代。
 
 ## 下一批候选主线
 
-1. 主线：对照 legacy 与 modern PlanMemory，只研究 touching lifetime 与 target hazard no-reuse gates，判断它们与 InsertSync physical WAR 是互补还是重复。
+1. 主线：研究 modern PlanMemory 的 branch-exclusive phi family、alias closure 与 loop-carried no-exemption，验证互斥复用的证明边界。
 2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
 4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
@@ -234,4 +242,4 @@ permalink: /learning/pto-curriculum/
 - **局部算子到跨 Tile 数学状态**：课程 11–12 从 Reduce 轴语义推进到 Online Softmax 的 running max/sum/output recurrence。
 - **数学状态到真实 pipeline**：课程 13 把 QK、P、PV、GU 放进 Cube/Vector 两域与三条 GM FIFO，闭合 preload/steady/epilogue。
 - **pipeline 到同步证明**：课程 14 追到 PTOAS InsertSync 与生成后 barrier patch，确认“匹配文本”不能替代“证明依赖不存在”。
-- **当前最大缺口**：课程 16 已补齐 legacy PlanMemory 跨 root 物理复用与 async WAR；剩余最大缺口转为地址 provenance/overflow、modern no-reuse gates，以及设备级 race/性能归因证据。
+- **当前最大缺口**：课程 16–17 已补齐 legacy physical WAR 与 modern touching/target hard gate 的分工；剩余最大缺口转为 branch/loop alias closure、地址 provenance/overflow、target-hazard direct lit，以及设备级 race/性能归因证据。
