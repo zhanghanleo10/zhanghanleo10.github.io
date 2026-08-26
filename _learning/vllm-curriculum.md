@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 9：Serving，聚焦异步请求流、streaming、断连取消、错误传播与 EngineCore client 生命周期。
-- 当前主线：Serving 入口取消链已闭合：HTTP disconnect、async generator close、前端 tombstone、跨进程 ABORT 与 KV fence；下一章进入输出流与慢消费者。
+- 阶段 9：Serving，聚焦异步请求流、streaming、断连取消、输出合并、错误传播与 EngineCore client 生命周期。
+- 当前主线：取消链与正常输出链均已闭合；已确认 collector 是单槽无损压缩而非有界背压，下一章进入多 prompt × `n>1` 的 fan-in、公平性与关闭语义。
 
 ## 已完成章节
 
@@ -28,6 +28,7 @@
 | 2026-08-22 13 | `local dispatch → DP mode/token consensus → ForwardContext → capture/replay` | [`8bdc70ec`](https://github.com/vllm-project/vllm/commit/8bdc70ec7b379279ec0152343239c2d50aced687) | [分布式 CUDA Graph Key 契约]({{ '/articles/vllm-distributed-cudagraph-key-padding-address-contract/' | relative_url }}) |
 | 2026-08-23 14 | `Dynamo full graph → FX partition → PiecewiseBackend/RangeEntry → CUDAGraphWrapper` | [`30b34171`](https://github.com/vllm-project/vllm/commit/30b34171b113887e0e08d7f6d06e2e5a5c33b9d2) | [torch.compile 切图边界]({{ '/articles/vllm-torch-compile-piecewise-splitting-boundaries/' | relative_url }}) |
 | 2026-08-24 15 | `HTTP disconnect → AsyncLLM.generate → OutputProcessor tombstone → EngineCore ABORT → KV fence` | [`a7195188`](https://github.com/vllm-project/vllm/commit/a7195188a4b45dec40030467ec6b69b4f1283c8e) | [Serving 断连取消]({{ '/articles/vllm-serving-disconnect-abort-lifecycle/' | relative_url }}) |
+| 2026-08-26 16 | `EngineCoreOutputs → AsyncMPClient queue → output_handler → collector coalescing → SSE` | [`a447955a`](https://github.com/vllm-project/vllm/commit/a447955acad919a6902d65f0af2d4f76c0335ed3) | [单槽输出合并]({{ '/articles/vllm-serving-output-coalescing-slow-consumer/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -190,6 +191,16 @@
 - `EngineCore._process_aborts_queue`
 - `Scheduler.finish_requests/_free_request/_free_request_blocks/_drain_deferred_frees`（取消释放路径）
 
+- `EngineCoreOutput/EngineCoreOutputs`（Serving Host 输出协议）
+- `AsyncMPClient._ensure_output_queue_task/get_output_async`
+- `AsyncLLM._run_output_handler/generate`（正常输出路径）
+- `RequestState.make_request_output/_new_request_output/_new_completion_output`
+- `OutputProcessor.process_outputs/propagate_error`（collector 投递与错误广播）
+- `RequestOutputCollector.put/get/get_nowait`
+- `RequestOutput.add`
+- `OpenAIServingCompletion.completion_stream_generator`（SSE 序列化与流内错误）
+- `SamplingParams.stream_interval`（请求级降频）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -274,6 +285,13 @@
 79. ABORT 的 eager queue 保证执行期间到达的取消先于 `update_from_output`，ordered input queue 保证 ADD/ABORT 相对顺序；双路径正确性依赖 Scheduler finish 幂等。
 80. 显式 external abort 可向仍存活消费者产生 `finish_reason=abort` 的 final output；disconnect 路径消费者已取消，二者共享 cleanup 机制但外部可观察语义不同。
 81. 请求 terminal 与 KV block 物理复用分离：在途 GPU 写未越过 `processed_step_seq` 时，blocks 必须进入 `deferred_frees`，不能因 Host tombstone 提前复用。
+82. `AsyncMPClient.outputs_queue` 没有 `maxsize`；socket reader 通过 `put_nowait` 与 output handler 解耦，因此 handler 落后会转化为 Host backlog，而非 Core 侧等待。
+83. `VLLM_V1_OUTPUT_PROC_CHUNK_SIZE` 只限制单次 event-loop 占用时间，不限制 `EngineCoreOutputs`、ZMQ 或 request payload 容量。
+84. `RequestOutputCollector` 至多持有一个 pending 对象，但 DELTA 会扩展该对象的 text/token_ids/logprobs；对象数有界不能推出 bytes 有界。
+85. DELTA 按 `CompletionOutput.index` 追加并采用最新终态 metadata；CUMULATIVE 按 index 替换最新 snapshot，同时保留其他 choice index。
+86. `stream_interval` 的 request 值只能高于 engine default；它降低 Host/SSE 事件频率，不是慢消费者容量协议。
+87. collector 的 exception put 覆盖 pending data，保证失败优先于未发送普通 chunk；SSE 已开始后错误只能作为流内事件收敛。
+88. 当前输出路径优先隔离 GPU/Core 与单个网络消费者；若要严格有界，必须在无损、上游不停和有限内存三者中显式选择拒绝或背压策略。
 
 ## 前置依赖与版本注意
 
@@ -289,7 +307,7 @@
 - multimodal cache 在线程池下的并发契约，以及 PR #50896 的最终结果。
 - Rust EngineCore client 与 Python `EngineCoreRequest`/aux frame 的双向协议兼容测试。
 - `torch_shm` 中 payload 发送失败后的 orphan tensor 清理与可观测性。
-- 慢/断连 output consumer 下 `pending` payload、ZMQ buffer 和 Python queue 的实际内存曲线，以及应该采用的容量/拒绝策略。
+- 慢/断连 output consumer 下，`AsyncMPClient.outputs_queue` 对象数、collector payload bytes、ZMQ/SSE buffer 与 P99 的联合曲线尚未测量；需要 per-request byte/age 指标和明确的超限 abort/背压策略。
 - 大量 waiting 请求的 Host metadata、prompt embedding 和 multimodal feature 内存曲线，以及服务层 admission 上限。
 - `connector.on_new_request()` 抛异常时 queue/registry 的回滚原子性。
 - 运行期间 EngineCore 被硬杀时，在途 `get_output`、后续 `add_request` 与各 DP/Ray manager 的一致故障语义。
@@ -323,15 +341,15 @@
 - FX early partition 与 Inductor late partition 的 cold start、artifact 复用、graph pool 显存和线上 P99 尚无同模型对照。
 - 缺少从真实 ASGI socket disconnect 到 `AsyncLLM.generate` abort、Scheduler terminal、KV/connector ref 归零的跨层测试；当前 mid-stream 测试通过提前退出 async iterator 模拟取消。
 - 多 prompt × `n>1` 断连是否完整关闭所有 iterator/child、ADD 尚未被 Core 消费时的快速取消、API 进程硬杀后的孤儿请求回收尚未系统覆盖。
-- `RequestOutputCollector` 的 DELTA coalescing 不是严格有界背压；慢消费者、长输出与取消风暴下的 Host 内存、ZMQ backlog 和 P99 尚未量化。
+- collector exception 覆盖 pending chunk、SSE error event 与 `[DONE]` 的完整序列缺少端到端断言；logprobs × 长输出 × `n>1` 的 payload 复制成本也未基准化。
 - connector 延迟释放与 GPU in-flight deferred fence 同时存在时，缺少断言所有引用和 blocks 最终归零的故障注入。
 
 ## 下一批候选章节
 
-1. 下一主线：Streaming 输出方向——`EngineCoreOutputs → output_handler → RequestOutputCollector → SSE`，聚焦 chunk coalescing、慢消费者内存与错误传播。
-2. Serving 取消回访：真实 ASGI disconnect、`n>1` child fan-out、API 进程硬死与取消风暴。
-3. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
-4. Compile 回访：真实模型 partition topology golden 与 FX/Inductor partition 对照。
+1. 下一主线：多 prompt × `n>1` 的 `merge_async_iterators` fan-in、来源 index、公平性、关闭与失败收敛。
+2. Serving 错误终态：HTTP 200 已发出后的 SSE error event、`[DONE]`、取消与可观测性。
+3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
+4. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
 5. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
 ## 第七篇知识图谱回顾
