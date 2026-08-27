@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：Serving，聚焦异步请求流、streaming、断连取消、输出合并、错误传播与 EngineCore client 生命周期。
-- 当前主线：取消链与正常输出链均已闭合；已确认 collector 是单槽无损压缩而非有界背压，下一章进入多 prompt × `n>1` 的 fan-in、公平性与关闭语义。
+- 当前主线：多 prompt × `n>1` 的两级 fan-in 已闭合；已确认 P×n 个 Core child 先按 prompt 由 `ParentRequest` 收敛，再由 `merge_async_iterators` 合并 P 个 stream。下一章进入 HTTP 200 之后的 SSE 错误终态。
 
 ## 已完成章节
 
@@ -29,6 +29,7 @@
 | 2026-08-23 14 | `Dynamo full graph → FX partition → PiecewiseBackend/RangeEntry → CUDAGraphWrapper` | [`30b34171`](https://github.com/vllm-project/vllm/commit/30b34171b113887e0e08d7f6d06e2e5a5c33b9d2) | [torch.compile 切图边界]({{ '/articles/vllm-torch-compile-piecewise-splitting-boundaries/' | relative_url }}) |
 | 2026-08-24 15 | `HTTP disconnect → AsyncLLM.generate → OutputProcessor tombstone → EngineCore ABORT → KV fence` | [`a7195188`](https://github.com/vllm-project/vllm/commit/a7195188a4b45dec40030467ec6b69b4f1283c8e) | [Serving 断连取消]({{ '/articles/vllm-serving-disconnect-abort-lifecycle/' | relative_url }}) |
 | 2026-08-26 16 | `EngineCoreOutputs → AsyncMPClient queue → output_handler → collector coalescing → SSE` | [`a447955a`](https://github.com/vllm-project/vllm/commit/a447955acad919a6902d65f0af2d4f76c0335ed3) | [单槽输出合并]({{ '/articles/vllm-serving-output-coalescing-slow-consumer/' | relative_url }}) |
+| 2026-08-27 17 | `P×n Core child → ParentRequest n-way → merge_async_iterators P-way → flattened choice index` | [`d1e5e66e`](https://github.com/vllm-project/vllm/commit/d1e5e66ee30ba4bc020ac8e14b05e7a8c41b9302) | [两级 Fan-in]({{ '/articles/vllm-serving-multi-prompt-parallel-sampling-fanin/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -201,6 +202,13 @@
 - `OpenAIServingCompletion.completion_stream_generator`（SSE 序列化与流内错误）
 - `SamplingParams.stream_interval`（请求级降频）
 
+- `CompletionRequest.prompt/n`（多 prompt 与 parallel sampling 输入）
+- `OpenAIServingCompletion._create_completion`（per-prompt generator 创建与 P-way fan-out）
+- `AsyncLLM.add_request/_add_request`（`n>1` child admission）
+- `ParentRequest.__init__/_get_child_sampling_params/get_child_info/get_outputs`
+- `merge_async_iterators`（single fast path、P-way task map 与关闭）
+- `OpenAIServingCompletion.completion_stream_generator`（二维 choice index 展平）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -292,6 +300,13 @@
 86. `stream_interval` 的 request 值只能高于 engine default；它降低 Host/SSE 事件频率，不是慢消费者容量协议。
 87. collector 的 exception put 覆盖 pending data，保证失败优先于未发送普通 chunk；SSE 已开始后错误只能作为流内事件收敛。
 88. 当前输出路径优先隔离 GPU/Core 与单个网络消费者；若要严格有界，必须在无损、上游不停和有限内存三者中显式选择拒绝或背压策略。
+89. 多 prompt × `n>1` 是两级 fan-in：每 prompt 的 n 个 child 先经 `ParentRequest`/共享 collector 收敛，外层 merge 只接收 P 个 prompt generator。
+90. `n>1` child 是独立 `EngineCoreRequest`，其 `SamplingParams.n` 被改为 1；parent identity、child set 与 output aggregator 都是 frontend Host 状态，不是 Scheduler group。
+91. streaming parent finished 以所有 child 首次终态后 `child_requests` 归零为准；重复 child 终态不得再次进入公开输出。
+92. `merge_async_iterators` 对每个 active source 最多持有一个 pending `anext`，task/state 上界为 O(P)，但整个调用的 Core request/KV 规模仍为 O(P×n)。
+93. SSE `choice.index = local_choice_index + prompt_idx × n`；公开 index 与到达顺序解耦，跨 prompt 交错顺序不属于稳定协议。
+94. `FIRST_COMPLETED` 提供 ready-source 及时转发，不提供 round-robin、配额或稳定 tie-break；work-conserving 不等于严格公平。
+95. outer source 异常使整个 Completion call 失败并触发其余 source 的 close；单 prompt fast path 也必须显式 `aclose` 底层 generator，才能把关闭传播到 `AsyncLLM.generate` abort。
 
 ## 前置依赖与版本注意
 
@@ -303,7 +318,7 @@
 - `AsyncMPClient`/DP client 的 engine identity 选择、跨 producer 顺序和线程安全边界。
 - hybrid KV groups 下 per-group prefix blocks 如何收敛为统一 `num_computed_tokens`，以及 partial-tail/CoW 的正确性边界。
 - watermark、`scheduler_reserve_full_isl` 与 async KV load `reserved_blocks` 的容量策略和配置取舍。
-- `n>1` parallel sampling 的 parent/child ID 与前端合并。
+- 多 prompt × `n>1` 的基本 parent/child 与两级 fan-in 已解释；仍缺 sampling streaming 的组合 E2E、单源异常/断连、admission 中途失败回滚、pending task/iterator close 与 KV 归零证明。
 - multimodal cache 在线程池下的并发契约，以及 PR #50896 的最终结果。
 - Rust EngineCore client 与 Python `EngineCoreRequest`/aux frame 的双向协议兼容测试。
 - `torch_shm` 中 payload 发送失败后的 orphan tensor 清理与可观测性。
@@ -346,9 +361,9 @@
 
 ## 下一批候选章节
 
-1. 下一主线：多 prompt × `n>1` 的 `merge_async_iterators` fan-in、来源 index、公平性、关闭与失败收敛。
-2. Serving 错误终态：HTTP 200 已发出后的 SSE error event、`[DONE]`、取消与可观测性。
-3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
+1. 下一主线：Serving 错误终态——HTTP 200 已发出后的 SSE error event、`[DONE]`、取消、metrics 与客户端重试语义。
+2. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
+3. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
 4. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
 5. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
