@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：Serving，聚焦异步请求流、streaming、断连取消、输出合并、错误传播与 EngineCore client 生命周期。
-- 当前主线：多 prompt × `n>1` 的两级 fan-in 已闭合；已确认 P×n 个 Core child 先按 prompt 由 `ParentRequest` 收敛，再由 `merge_async_iterators` 合并 P 个 stream。下一章进入 HTTP 200 之后的 SSE 错误终态。
+- 当前主线：HTTP 200 后的 SSE 错误终态已闭合；已确认存活连接以 error payload 后接 `[DONE]` 收敛，而 disconnect/cancel 走 abort 与资源释放且不保证 wire terminal。下一章进入 EngineCore 故障广播与 health/readiness 的 fail-stop 边界。
 
 ## 已完成章节
 
@@ -30,6 +30,7 @@
 | 2026-08-24 15 | `HTTP disconnect → AsyncLLM.generate → OutputProcessor tombstone → EngineCore ABORT → KV fence` | [`a7195188`](https://github.com/vllm-project/vllm/commit/a7195188a4b45dec40030467ec6b69b4f1283c8e) | [Serving 断连取消]({{ '/articles/vllm-serving-disconnect-abort-lifecycle/' | relative_url }}) |
 | 2026-08-26 16 | `EngineCoreOutputs → AsyncMPClient queue → output_handler → collector coalescing → SSE` | [`a447955a`](https://github.com/vllm-project/vllm/commit/a447955acad919a6902d65f0af2d4f76c0335ed3) | [单槽输出合并]({{ '/articles/vllm-serving-output-coalescing-slow-consumer/' | relative_url }}) |
 | 2026-08-27 17 | `P×n Core child → ParentRequest n-way → merge_async_iterators P-way → flattened choice index` | [`d1e5e66e`](https://github.com/vllm-project/vllm/commit/d1e5e66ee30ba4bc020ac8e14b05e7a8c41b9302) | [两级 Fan-in]({{ '/articles/vllm-serving-multi-prompt-parallel-sampling-fanin/' | relative_url }}) |
+| 2026-08-28 18 | `HTTP 200 → partial SSE → error payload → [DONE] / cancel→abort` | [`6ec92bcb`](https://github.com/vllm-project/vllm/commit/6ec92bcbc8ef9af25cb4834ba3d922115792fbeb) | [HTTP 200 后的错误终态]({{ '/articles/vllm-serving-sse-error-terminal-after-http-200/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -209,6 +210,15 @@
 - `merge_async_iterators`（single fast path、P-way task map 与关闭）
 - `OpenAIServingCompletion.completion_stream_generator`（二维 choice index 展平）
 
+- `completion.api_router.create_completion`（header 前 JSONResponse 与 streaming 200 分界）
+- `GenerateBaseServing._raise_if_error/_convert_generation_error_to_streaming_response`
+- `GenerateBaseServing.create_streaming_error_response`
+- `create_error_response/sanitize_message`
+- `FinishReason.ERROR/GenerationError/EngineGenerateError/EngineDeadError`
+- `RequestResponseMetadata.final_usage_info`
+- `PrometheusStatLogger.counter_request_success`（`finished_reason` label）
+- `OpenAIServingCompletion.completion_stream_generator`（error payload、`[DONE]` 与 cancellation 分界）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -307,6 +317,11 @@
 93. SSE `choice.index = local_choice_index + prompt_idx × n`；公开 index 与到达顺序解耦，跨 prompt 交错顺序不属于稳定协议。
 94. `FIRST_COMPLETED` 提供 ready-source 及时转发，不提供 round-robin、配额或稳定 tie-break；work-conserving 不等于严格公平。
 95. outer source 异常使整个 Completion call 失败并触发其余 source 的 close；单 prompt fast path 也必须显式 `aclose` 底层 generator，才能把关闭传播到 `AsyncLLM.generate` abort。
+96. `StreamingResponse` 一旦开始发送，HTTP status 已固定为 200；后续 `ErrorResponse.error.code=500` 是 SSE payload 字段，不能改写 transport status。
+97. `FinishReason.ERROR` 必须在 Serving 边界转成 `GenerationError`；连接仍可写时，GenerationError 与普通 Exception 都以 error data frame 后接 `[DONE]` 收敛。
+98. `CancelledError`/generator close 不进入普通 `except Exception`，因此 disconnect 不保证 error frame 或 `[DONE]`；其正确性由 abort、tombstone、Scheduler/KV 最终释放定义。
+99. `[DONE]` 只表示 SSE iterator 不再产生 event，不蕴含生成成功；客户端必须把已见 error payload 作为最终失败状态。
+100. normal stream 尾部才赋 `RequestResponseMetadata.final_usage_info`；error 提前跳转到 catch 时没有 canonical final usage，partial usage 不能自动视为完整计费事实。
 
 ## 前置依赖与版本注意
 
@@ -358,14 +373,19 @@
 - 多 prompt × `n>1` 断连是否完整关闭所有 iterator/child、ADD 尚未被 Core 消费时的快速取消、API 进程硬杀后的孤儿请求回收尚未系统覆盖。
 - collector exception 覆盖 pending chunk、SSE error event 与 `[DONE]` 的完整序列缺少端到端断言；logprobs × 长输出 × `n>1` 的 payload 复制成本也未基准化。
 - connector 延迟释放与 GPU in-flight deferred fence 同时存在时，缺少断言所有引用和 blocks 最终归零的故障注入。
+- 缺少真实 ASGI late-error 联合测试：`HTTP 200 → partial data → error(code=500) → [DONE]`，并同时断言 HTTP 2xx bucket、engine `finished_reason=error` 与 `final_usage_info is None`。
+- 缺少 `P>1 × n>1` 单 child error 后所有 merge task、collector、Core child、KV blocks 与 connector refs 归零的跨层故障注入。
+- completion streaming 没有 resume cursor/exactly-once contract；partial output 后的 retry、deduplication 与 usage/accounting 语义尚未形成稳定协议。
+- `vllm:request_success{finished_reason="error"}` 的命名可能被 dashboard 误聚合；HTTP 2xx 与 engine error 的跨指标告警规则尚未建立。
 
 ## 下一批候选章节
 
-1. 下一主线：Serving 错误终态——HTTP 200 已发出后的 SSE error event、`[DONE]`、取消、metrics 与客户端重试语义。
+1. 下一主线：EngineCore 故障广播与健康状态——`output_handler → propagate_error → EngineDeadError → /health/readiness` 的 fail-stop 边界。
 2. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 3. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
-4. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
-5. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
+4. 错误协议回访：真实 ASGI late-error 的 status/body/metrics/usage 联合测试与客户端 retry contract。
+5. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
+6. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
 ## 第七篇知识图谱回顾
 
