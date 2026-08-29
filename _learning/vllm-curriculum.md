@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：Serving，聚焦异步请求流、streaming、断连取消、输出合并、错误传播与 EngineCore client 生命周期。
-- 当前主线：HTTP 200 后的 SSE 错误终态已闭合；已确认存活连接以 error payload 后接 `[DONE]` 收敛，而 disconnect/cancel 走 abort 与资源释放且不保证 wire terminal。下一章进入 EngineCore 故障广播与 health/readiness 的 fail-stop 边界。
+- 当前主线：EngineCore fatal failure 的双路检测、全请求异常广播、后续 admission 拒绝，以及 `/health` 与 server watchdog 的 fail-stop 收敛已闭合。下一章进入“进程未死但执行不再前进”的 timeout/watchdog 链。
 
 ## 已完成章节
 
@@ -31,6 +31,7 @@
 | 2026-08-26 16 | `EngineCoreOutputs → AsyncMPClient queue → output_handler → collector coalescing → SSE` | [`a447955a`](https://github.com/vllm-project/vllm/commit/a447955acad919a6902d65f0af2d4f76c0335ed3) | [单槽输出合并]({{ '/articles/vllm-serving-output-coalescing-slow-consumer/' | relative_url }}) |
 | 2026-08-27 17 | `P×n Core child → ParentRequest n-way → merge_async_iterators P-way → flattened choice index` | [`d1e5e66e`](https://github.com/vllm-project/vllm/commit/d1e5e66ee30ba4bc020ac8e14b05e7a8c41b9302) | [两级 Fan-in]({{ '/articles/vllm-serving-multi-prompt-parallel-sampling-fanin/' | relative_url }}) |
 | 2026-08-28 18 | `HTTP 200 → partial SSE → error payload → [DONE] / cancel→abort` | [`6ec92bcb`](https://github.com/vllm-project/vllm/commit/6ec92bcbc8ef9af25cb4834ba3d922115792fbeb) | [HTTP 200 后的错误终态]({{ '/articles/vllm-serving-sse-error-terminal-after-http-200/' | relative_url }}) |
+| 2026-08-29 19 | `Core failure → MPClient latch/queue → output_handler → all collectors → /health/watchdog` | [`99013d77`](https://github.com/vllm-project/vllm/commit/99013d77d332a2d21d7214b57fa495f2bad2b448) | [EngineCore 失效广播]({{ '/articles/vllm-enginecore-failure-broadcast-health-readiness/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -219,6 +220,15 @@
 - `PrometheusStatLogger.counter_request_success`（`finished_reason` label）
 - `OpenAIServingCompletion.completion_stream_generator`（error payload、`[DONE]` 与 cancellation 分界）
 
+- `MPClient.start_engine_core_monitor/_format_exception/get_output_async`（fatal error 双路检测与规范化）
+- `AsyncLLM._run_output_handler/is_running/errored/check_health/dead_error`
+- `OutputProcessor.propagate_error`（全活跃请求异常广播）
+- `RequestOutputCollector.put/get`（Exception 覆盖 pending output）
+- `health`（EngineDeadError → HTTP 503）
+- `watchdog_loop/terminate_if_errored`
+- `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`
+- `engine_error_handler`（非 streaming fatal response 与即时终止检查）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -323,6 +333,15 @@
 99. `[DONE]` 只表示 SSE iterator 不再产生 event，不蕴含生成成功；客户端必须把已见 error payload 作为最终失败状态。
 100. normal stream 尾部才赋 `RequestResponseMetadata.final_usage_info`；error 提前跳转到 catch 时没有 canonical final usage，partial usage 不能自动视为完整计费事实。
 
+101. Core process monitor 与 output channel exception 两条检测路径最终汇入单向 `engine_dead` latch 和 `EngineDeadError`；上层不依赖具体 ZMQ/EOF/exit-code 形态。
+102. `output_handler` 的 fatal catch 把同一个异常广播给所有 active collectors；collector 中 Exception 覆盖 pending normal output，错误优先于未消费数据。
+103. `EngineDeadError` 是共享 EngineCore 的不可恢复终态；`generate()` 不再发送 per-request ABORT，因为 client/server shutdown 承担全局资源回收。
+104. `resources.engine_dead` 或 `output_handler.done()` 任一成立都会使 `errored=True`；后续请求在建立 frontend state 和发送 ADD 之前被拒绝。
+105. `/health` 仅在 `check_health()` 正常返回时给 200，只把 `EngineDeadError` 映射为 503；render-only server 固定 200。它检查 fail-stop health/admission，不检查 forward progress。
+106. server watchdog 每 5 秒轮询；默认在 `errored && !is_running` 时设置 `server.should_exit`。keep-alive 只禁止 server exit，不恢复请求 admission，也不把 `/health` 改回 200。
+107. 官方 Kubernetes/Helm 示例把同一 `/health` 同时用于 readiness 与 liveness，因此流量摘除和容器重启语义被合并；keep-alive 若用于诊断，需要独立的进程 liveness 设计。
+108. 当前 `/health` 无法发现进程/handler 存活但 GPU/NCCL 不再前进；PR #45453 的 progress endpoint 方案已关闭且未合入，不能视为现有功能。
+
 ## 前置依赖与版本注意
 
 - 本课程以每章记录的 `main` commit 为准，不把 v0.22.1 专题中的实现自动视为当前事实。
@@ -340,7 +359,8 @@
 - 慢/断连 output consumer 下，`AsyncMPClient.outputs_queue` 对象数、collector payload bytes、ZMQ/SSE buffer 与 P99 的联合曲线尚未测量；需要 per-request byte/age 指标和明确的超限 abort/背压策略。
 - 大量 waiting 请求的 Host metadata、prompt embedding 和 multimodal feature 内存曲线，以及服务层 admission 上限。
 - `connector.on_new_request()` 抛异常时 queue/registry 的回滚原子性。
-- 运行期间 EngineCore 被硬杀时，在途 `get_output`、后续 `add_request` 与各 DP/Ray manager 的一致故障语义。
+- EngineCore 硬失败的基本 fan-out、new-admission 拒绝、health 503 与 GPU cleanup 已解释；仍缺 DP/Ray/external launcher 同时失败、keep-alive 下 `request_states` retention、真实 Uvicorn watchdog/503/exit 时序。
+- `/health` 不检查 forward progress；alive-but-stalled GPU/NCCL 只能等待其他 timeout/monitor。closed-unmerged PR #45453 未进入当前 `main`。
 - `ENGINE_CORE_DEAD` 在 5 秒 output-thread join、4 秒 socket linger 与 frontend shutdown 竞争下的交付边界。
 - victim selection 未纳入已计算 token、模型结构或实际重算代价；长短 prompt 混合负载下的浪费、公平性和饥饿边界缺少策略级基准。
 - async scheduling 的 stale/drop 基本协议已有源码与 fake-runner 测试；真实 PP×MTP×KVConnector 组合的故障注入、跨 rank 顺序和资源归零仍未覆盖。
@@ -380,7 +400,7 @@
 
 ## 下一批候选章节
 
-1. 下一主线：EngineCore 故障广播与健康状态——`output_handler → propagate_error → EngineDeadError → /health/readiness` 的 fail-stop 边界。
+1. 下一主线：前向未崩但不再前进——Engine iteration timeout、`execute_model` timeout 与 worker/process watchdog 如何把 hang 收敛为 fail-stop。
 2. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 3. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
 4. 错误协议回访：真实 ASGI late-error 的 status/body/metrics/usage 联合测试与客户端 retry contract。
