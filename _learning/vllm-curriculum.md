@@ -6,8 +6,8 @@
 
 ## 当前阶段
 
-- 阶段 9：Serving，聚焦异步请求流、streaming、断连取消、输出合并、错误传播与 EngineCore client 生命周期。
-- 当前主线：EngineCore fatal failure 的双路检测、全请求异常广播、后续 admission 拒绝，以及 `/health` 与 server watchdog 的 fail-stop 收敛已闭合。下一章进入“进程未死但执行不再前进”的 timeout/watchdog 链。
+- 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
+- 当前主线：Multiproc `execute_model` 的 response deadline、worker death monitor、Engine fail-stop 与 shutdown escalation 已拆分；同时确认当前 V1 的 60 秒 iteration timeout 未接线、UniProc alive hang 仍是盲区。下一章进入 fatal dump 的诊断证据链。
 
 ## 已完成章节
 
@@ -32,6 +32,7 @@
 | 2026-08-27 17 | `P×n Core child → ParentRequest n-way → merge_async_iterators P-way → flattened choice index` | [`d1e5e66e`](https://github.com/vllm-project/vllm/commit/d1e5e66ee30ba4bc020ac8e14b05e7a8c41b9302) | [两级 Fan-in]({{ '/articles/vllm-serving-multi-prompt-parallel-sampling-fanin/' | relative_url }}) |
 | 2026-08-28 18 | `HTTP 200 → partial SSE → error payload → [DONE] / cancel→abort` | [`6ec92bcb`](https://github.com/vllm-project/vllm/commit/6ec92bcbc8ef9af25cb4834ba3d922115792fbeb) | [HTTP 200 后的错误终态]({{ '/articles/vllm-serving-sse-error-terminal-after-http-200/' | relative_url }}) |
 | 2026-08-29 19 | `Core failure → MPClient latch/queue → output_handler → all collectors → /health/watchdog` | [`99013d77`](https://github.com/vllm-project/vllm/commit/99013d77d332a2d21d7214b57fa495f2bad2b448) | [EngineCore 失效广播]({{ '/articles/vllm-enginecore-failure-broadcast-health-readiness/' | relative_url }}) |
+| 2026-08-30 20 | `SchedulerOutput → Multiproc RPC deadline → TimeoutError → Core fail-stop → worker termination` | [`680e2177`](https://github.com/vllm-project/vllm/commit/680e2177e473ed8dfaa9773f7ead185b369cab46) | [TP RPC timeout 与单卡 hang 盲区]({{ '/articles/vllm-execute-model-timeout-hang-failstop-gap/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -229,6 +230,17 @@
 - `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`
 - `engine_error_handler`（非 streaming fatal response 与即时终止检查）
 
+- `EngineCore.step/step_with_batch_queue`（Executor future 等待与 commit 闸门）
+- `MultiprocExecutor.execute_model/sample_tokens/collective_rpc/get_response`
+- `FutureWrapper.result/_wait_for_response`
+- `MultiprocExecutor.start_worker_monitor/_ensure_worker_termination/shutdown`
+- `EngineCoreProc._send_engine_dead`（timeout fatal 收敛）
+- `UniProcExecutor.collective_rpc/execute_model`
+- `AsyncOutputFuture.result`
+- `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`
+- `VLLM_ENGINE_ITERATION_TIMEOUT_S`
+- `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS`
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -341,6 +353,11 @@
 106. server watchdog 每 5 秒轮询；默认在 `errored && !is_running` 时设置 `server.should_exit`。keep-alive 只禁止 server exit，不恢复请求 admission，也不把 `/health` 改回 200。
 107. 官方 Kubernetes/Helm 示例把同一 `/health` 同时用于 readiness 与 liveness，因此流量摘除和容器重启语义被合并；keep-alive 若用于诊断，需要独立的进程 liveness 设计。
 108. 当前 `/health` 无法发现进程/handler 存活但 GPU/NCCL 不再前进；PR #45453 的 progress endpoint 方案已关闭且未合入，不能视为现有功能。
+109. Multiproc `execute_model` 在 RPC 创建时绑定一个共享绝对 deadline；所有必要 response queue 消耗同一预算，不能按 rank 累加完整 timeout。
+110. RPC timeout 只证明 deadline 前未收到必要响应，不证明 GPU/NCCL/MQ 根因，也不保证设备工作已取消。
+111. worker process monitor 检测进程退出，不检测 alive-but-stalled forward progress；shutdown grace/TERM/KILL 是检测之后的资源回收阶段。
+112. `SchedulerOutput` 只有在 `future.result()` 成功后才进入 `Scheduler.update_from_output`；timeout 时 completion unknown，不能在同一 Engine 中安全原地重试。
+113. 当前 V1 runtime 未消费 `VLLM_ENGINE_ITERATION_TIMEOUT_S`；UniProc 对 alive GPU hang 没有由该变量提供的 60 秒 watchdog，不能把配置声明误作生效契约。
 
 ## 前置依赖与版本注意
 
@@ -397,15 +414,20 @@
 - 缺少 `P>1 × n>1` 单 child error 后所有 merge task、collector、Core child、KV blocks 与 connector refs 归零的跨层故障注入。
 - completion streaming 没有 resume cursor/exactly-once contract；partial output 后的 retry、deduplication 与 usage/accounting 语义尚未形成稳定协议。
 - `vllm:request_success{finished_reason="error"}` 的命名可能被 dashboard 误聚合；HTTP 2xx 与 engine error 的跨指标告警规则尚未建立。
+- 缺少 alive Worker withheld-response 的跨层测试：`execute_model` deadline 到期后应断言 `TimeoutError → ENGINE_CORE_DEAD → all collectors`，并验证 Scheduler/KV/connector/device context 随进程退出归零。
+- TP=1 UniProc alive GPU/NCCL hang 目前缺少独立 supervisor/progress watchdog；`VLLM_ENGINE_ITERATION_TIMEOUT_S` 的 V1 语义需要删除、接线或明确弃用。
+- Multiproc、Ray V2、legacy Ray 和 external launcher 对 execution deadline、process death、callback 可抢占性与 termination ownership 尚无统一 contract。
+- 300 秒静态阈值在长 prefill、首次 compile/capture、大 TP collective 与严格 SLO 之间缺少分布式 trace 和 workload-aware 配置准则。
 
 ## 下一批候选章节
 
-1. 下一主线：前向未崩但不再前进——Engine iteration timeout、`execute_model` timeout 与 worker/process watchdog 如何把 hang 收敛为 fail-stop。
-2. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
-3. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
-4. 错误协议回访：真实 ASGI late-error 的 status/body/metrics/usage 联合测试与客户端 retry contract。
-5. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
-6. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
+1. 下一主线：fatal dump 的证据链——`log_error_detail → dump_engine_exception → Scheduler/request/KV snapshot` 的信息、开销与隐私边界。
+2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E 与跨 Executor deadline parity。
+3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
+4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
+5. 错误协议回访：真实 ASGI late-error 的 status/body/metrics/usage 联合测试与客户端 retry contract。
+6. Executor 回访：`TP>1 × PP>1` 故障注入、connector sideband 与 external launcher contract。
+7. 协议专项回访：定义有界 backpressure，并建立 Python↔Rust 双向 golden fixtures。
 
 ## 第七篇知识图谱回顾
 
