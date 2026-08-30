@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-28。
+最后更新：2026-08-30。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 19 已闭合 modern PlanMemory 的 `RootInfo size/alignment → address-space order → legal ReuseGroup/fresh → reuse cost/capacity pressure → packed offset`，确认 largest-first 只控制非 Cube space 的 item 顺序，placement 会遍历全部合法 group，并在性能 penalty、packed footprint 与容量余量之间确定性选择。下一步研究 `ReserveBuffer` 的真实 hole-fit、level 语义与 overlap verifier。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 20 已闭合 `PTODSL reserve_buffer → ReserveBufferOp → Level owner contract → aligned hole-fit → ResolveReservedBuffers → i32 base`，并确认 placement-time `occupied` 与 post-pass semantic no-alias verifier 是两套不同证明；当前 internal-hole early-return 不登记新区间，是在真实内洞可达时可能触发的 allocator 完整性缺口。下一步把 reserve/import 地址接入 `initialize_pipe`、peer binding 与 flag/base ABI。
 
 ## 已完成章节
 
@@ -44,6 +44,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-26 | Modern PlanMemory touching 与 A3 target hazard | `writer-defined birth → touching → load/split-TPOP facts → no-reuse gate → InsertSync boundary` | [课程 17]({% post_url 2026-08-26-ptoas-modern-memplan-touching-target-hazard %}) |
 | 2026-08-27 | Modern PlanMemory phi family 与 loop back-edge | `valueToRoots closure → cross-branch pairs → loop-carried deny-set → pairwise reuse group → addr` | [课程 18]({% post_url 2026-08-27-ptoas-memplan-phi-family-loop-backedge %}) |
 | 2026-08-28 | Modern PlanMemory largest-first 与 reuse cost | `RootInfo size/alignment → address-space order → legal groups/fresh → cost/capacity → packed offsets` | [课程 19]({% post_url 2026-08-28-ptoas-memplan-largest-first-reuse-cost-fragmentation %}) |
+| 2026-08-30 | ReserveBuffer aligned hole-fit 与 Level 地址所有权 | `ReserveBufferOp → level validation → occupied merge/first-fit → base → i32 constant` | [课程 20]({% post_url 2026-08-30-ptoas-reserve-buffer-hole-fit-level-contract %}) |
 
 ## ISA 知识地图
 
@@ -86,6 +87,7 @@ permalink: /learning/pto-curriculum/
 | Modern PlanMemory touching gate | `freeIndex==allocIndex` 仅通过 strict-lifetime gate；A3 的 load-derived + split-TPOP + same-writer 组合由 target gate 禁止共址，semantic gate 继续约束通用 inplace | 已讲透 hard-gate 边界，target 设备证据待补 |
 | Modern PlanMemory phi/loop gate | 同一 `scf.if` result 位的对向、本地 root 可越过静态 lifetime overlap；select/view/result 必须保留 root-set closure；任一 loop-carried root 取消互斥豁免 | 已讲透 branch/loop 证明边界 |
 | Modern PlanMemory placement | `slotBytes=alignUp(rawBytes, alignment)`，group footprint 取 member 最大值；非 Cube space 才按 totalBytes 降序，全部 legal group 与 fresh 以 fits/cost/projectedBytes/stable order 比较，容量压力只可推翻性能偏好 | 已讲透 greedy placement 主路径，权重待真机标定 |
+| ReserveBuffer placement | `size` 是 byte count、result 是 `i32 base`；Level 1/2 由 PlanMemory 做 aligned first-fit，Level 3 由作者显式给 base；resolve 后 marker 退化为常量 | 已讲透地址生命周期；internal-hole 记账待回归 |
 | 通信 ISA | 尚未系统覆盖 | 待学习 |
 
 ## 六仓版本与覆盖矩阵
@@ -94,7 +96,7 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [3186c38](https://github.com/hw-native-sys/pto-isa/commit/3186c381bd49e1164092e67ff1b3564302754e76) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `compile.sh`、`patch_vec_barriers.py`、barrier pattern reference、`run.py` case1..case8 | ISA 深挖 12 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [cd429fc](https://github.com/hw-native-sys/PTOAS/commit/cd429fc8aae0d28c14528b50c95168b6142b6f9e) | 既有 InsertSync、legacy reuse、modern hard gates 与 phi/loop closure；新增 `MemSpec`、`RootInfo`、`ReuseGroup`、`getRootPairReuseCost`、`getHotClusterReuseCost`、`getProjectedPackedBytes`、`chooseReuseGroupByCost`、`buildSlotOffsets`、CLI modern/order-by-size contract 及 order/cost/capacity lit | 跨仓深挖 7 |
+| PTOAS | [cc519bc](https://github.com/hw-native-sys/PTOAS/commit/cc519bc92db73b2a2cdfd7c409fe7dfdf72d85e4) | 既有 InsertSync、legacy/modern reuse、hard gates、phi/loop 与 cost placement；新增 `ReserveBufferOp`、PTODSL `reserve_buffer`、`planReserveBufferBase`、Level rules、`PTOResolveReservedBuffersPass`、`verifySemanticNoAliasRanges` 及 reserve level/resolve lit | 跨仓深挖 8 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -183,6 +185,10 @@ permalink: /learning/pto-curriculum/
 - fresh group 的基础 cost 为 1；capacity pressure 可在 fresh slack 小于 `max(totalBytes, alignmentBytes)` 时强制选择已 fit 的 legal reuse，但不能绕过 lifetime/phi、target 或 semantic gate。
 - `ReuseGroup.sizeBytes` 取 member `totalBytes` 最大值；顺序 pack 的同一 space 通常不会产生任意中间 hole，主要浪费来自 slot rounding、group max slack 与早期 group 扩张造成的 tail growth。
 - group 构建完成后才 materialize offsets；任何 end 超过 capacity 都 fail closed，不回滚、不放松 correctness gate。真正合并 occupied interval 并做 aligned first-fit 的是后续 `reserve_buffer(auto=true)`。
+- `ReserveBufferOp` 以 byte count 请求 VEC/MAT local range，结果是 `i32 base`；它没有 Tile shape/dtype/layout，也没有运行时 allocator 生命周期。
+- Level 1/2 的 reserve 地址 owner 是 PlanMemory，只允许 `auto=true` 且输入不得预填 base；Level 3 的 owner 是作者，只允许 `auto=false` 与显式 base。
+- auto placement 必须用 `alignUp(size, alignment)` 形成半开占用区间；每个成功 placement 都必须把新区间提交给 allocator 账本，不能只返回地址。
+- `verifySemanticNoAliasRanges` 只检查 op 声明的 Tile/view no-alias operand pairs，不枚举所有 ReserveBuffer/Tile ranges，不能替代全局布局 verifier。
 
 ## 待验证推断
 
@@ -217,6 +223,8 @@ permalink: /learning/pto-curriculum/
 - reuse penalty `10/20/6/12/4`、lookahead=1 与 pressure reserve 是候选排序 heuristic，不是周期模型；尚缺 workload sweep 与真机 stall/latency 标定。
 - Cube local space 关闭 size-first 的 bank/operand-pattern 收益只有代码和设计动机，没有 L0/L1 bank trace；具体微架构成因仍是推断。
 - 当前 bank-risk 只用 whole-root exact co-location 代理，尚未纳入 subview 精确 interval 与 `offset % bankModulo`；fragmentation samples 的文件名也不能证明 modern 的真实 hole 行为。
+- 当前 `planReserveBufferBase` 的 tail success 会登记新区间，但 internal-hole early-return 不会；若 `occupied` 真有内洞，连续两个 auto reserve 可由代码推导得到相同 base。当前 root pack 常形成连续前缀，因此该路径是否在主 pipeline 可达仍需 exact lit 证明。
+- 现有 reserve direct tests 覆盖 Level contract、单个 base=0 物化与 nested resolve，但未覆盖 internal hole、多 auto reserve、alignment boundary 或 generic post-plan overlap audit。
 
 ## 尚未解释的知识债
 
@@ -238,12 +246,12 @@ permalink: /learning/pto-curriculum/
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
-- PlanMemory 跨 root physical WAR、modern hard gates、branch/loop alias closure 与 greedy placement 的职责边界已闭合；仍缺 raw/slot/cursor checked arithmetic、动态 subview/reinterpret provenance、nested branch/view 负例、branch×target×semantic 交叉矩阵、fragmentation exact golden、跨 pass reuse/sync verifier，以及 legacy/modern 的 `UB peak + event topology + device latency` 三联对照。
+- PlanMemory 跨 root physical WAR、modern hard gates、branch/loop alias closure、greedy placement 与 ReserveBuffer Level/resolve 主链已闭合；仍缺 raw/slot/cursor/base checked arithmetic、internal-hole 多 reserve exact golden、Tile/ReserveBuffer 全局 interval verifier、动态 subview/reinterpret provenance、branch×target×semantic 交叉矩阵，以及 legacy/modern 的 `UB peak + event topology + device latency` 三联对照。
 - Event ID exhaustion、dynamic lane 异常退出/early-exit、zero-trip 嵌套控制流需要真机 race/stall 与死锁故障注入，FileCheck topology 不能替代。
 
 ## 下一批候选主线
 
-1. 主线：研究 `ReserveBuffer` 的真实 Hole-Fit：occupied interval merge、aligned first-fit、manual/auto base、level2/level3 语义与 overlap verifier。
+1. 主线：研究 `ReserveBuffer/import_reserved_buffer → initialize_pipe → backend helper`：peer name binding、local base、flag/base 分配与多 pipe ABI。
 2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
 4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
