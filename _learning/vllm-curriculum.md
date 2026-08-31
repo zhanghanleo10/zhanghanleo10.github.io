@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：Multiproc `execute_model` 的 response deadline、worker death monitor、Engine fail-stop 与 shutdown escalation 已拆分；同时确认当前 V1 的 60 秒 iteration timeout 未接线、UniProc alive hang 仍是盲区。下一章进入 fatal dump 的诊断证据链。
+- 当前主线：已拆分 timeout、worker death、Engine fail-stop 与 fatal dump。第 21 章确认 fatal dump 仅记录未提交的 `SchedulerOutput` 计划与可选聚合 `SchedulerStats`，不是完整 Scheduler/request/KV 原子快照；下一章进入 fatal-path 测试矩阵与资源归零证据。
 
 ## 已完成章节
 
@@ -33,6 +33,7 @@
 | 2026-08-28 18 | `HTTP 200 → partial SSE → error payload → [DONE] / cancel→abort` | [`6ec92bcb`](https://github.com/vllm-project/vllm/commit/6ec92bcbc8ef9af25cb4834ba3d922115792fbeb) | [HTTP 200 后的错误终态]({{ '/articles/vllm-serving-sse-error-terminal-after-http-200/' | relative_url }}) |
 | 2026-08-29 19 | `Core failure → MPClient latch/queue → output_handler → all collectors → /health/watchdog` | [`99013d77`](https://github.com/vllm-project/vllm/commit/99013d77d332a2d21d7214b57fa495f2bad2b448) | [EngineCore 失效广播]({{ '/articles/vllm-enginecore-failure-broadcast-health-readiness/' | relative_url }}) |
 | 2026-08-30 20 | `SchedulerOutput → Multiproc RPC deadline → TimeoutError → Core fail-stop → worker termination` | [`680e2177`](https://github.com/vllm-project/vllm/commit/680e2177e473ed8dfaa9773f7ead185b369cab46) | [TP RPC timeout 与单卡 hang 盲区]({{ '/articles/vllm-execute-model-timeout-hang-failstop-gap/' | relative_url }}) |
+| 2026-08-31 21 | `SchedulerOutput → log_error_detail → prepare_object_to_dump/make_stats → logger → original exception` | [`c92b29a1`](https://github.com/vllm-project/vllm/commit/c92b29a1d40644da710209f862b1be0ebd5c2e74) | [Fatal Dump 证据与隐私边界]({{ '/articles/vllm-fatal-dump-scheduleroutput-evidence-privacy/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -241,6 +242,12 @@
 - `VLLM_ENGINE_ITERATION_TIMEOUT_S`
 - `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS`
 
+- `EngineCore.log_error_detail`
+- `dump_engine_exception/_dump_engine_exception`
+- `prepare_object_to_dump`
+- `NewRequestData.anon_repr/CachedRequestData.anon_repr`
+- `Scheduler.make_stats`（fatal path 的聚合统计与 drain/reset 副作用）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -358,6 +365,13 @@
 111. worker process monitor 检测进程退出，不检测 alive-but-stalled forward progress；shutdown grace/TERM/KILL 是检测之后的资源回收阶段。
 112. `SchedulerOutput` 只有在 `future.result()` 成功后才进入 `Scheduler.update_from_output`；timeout 时 completion unknown，不能在同一 Engine 中安全原地重试。
 113. 当前 V1 runtime 未消费 `VLLM_ENGINE_ITERATION_TIMEOUT_S`；UniProc 对 alive GPU hang 没有由该变量提供的 60 秒 watchdog，不能把配置声明误作生效契约。
+114. fatal dump 位于 `future.result/sample_tokens` 与 `Scheduler.update_from_output` 之间；它记录 Host 执行计划，不能证明 device completion。
+115. normal step 与 batch queue 都必须用触发异常的 matched `SchedulerOutput` dump，不能错配到更新的一轮计划。
+116. `dump_engine_exception` 必须 exception-free，诊断失败不能覆盖原始 model execution exception；`BaseException` 不属于该 dump 契约。
+117. token/Tensor 脱敏是字段级协议：New/Cached request token 改为长度、Tensor 只留 metadata，但 SchedulerOutput 其他嵌套字段仍可能保留 request/block/spec/connector 数据。
+118. `Scheduler.make_stats()` 是聚合观测而非 registry/KV snapshot；且会 reset prefix stats、connector stats 并 drain eviction events。
+119. 当前 dump 只写进程内 logger，没有持久化文件、原子提交、schema version 或跨 rank 一致性边界。
+120. fatal evidence 只能证明 scheduler intent 与当时可读的 Host 聚合状态；SIGKILL/native crash、日志截断和设备内部进度仍是明确盲区。
 
 ## 前置依赖与版本注意
 
@@ -419,9 +433,14 @@
 - Multiproc、Ray V2、legacy Ray 和 external launcher 对 execution deadline、process death、callback 可抢占性与 termination ownership 尚无统一 contract。
 - 300 秒静态阈值在长 prefill、首次 compile/capture、大 TP collective 与严格 SLO 之间缺少分布式 trace 和 workload-aware 配置准则。
 
+- fatal dump 缺少 Tensor/anon_repr 隐私矩阵、原异常保留、matched batch-queue plan 与 make_stats drain/reset 的直接测试。
+- 缺少 deterministic、versioned、bounded 的 structured crash envelope；当前 dict/set 字段顺序不稳定，日志不适合作为机器重放格式。
+- 缺少独立 supervisor 持久化、rank/stream progress、KV block refcount/free-list 摘要，以及 SIGKILL/native crash 下的证据保全。
+- `scheduled_spec_decode_tokens` 与 connector/mm metadata 的字段级敏感性尚未形成统一审计和日志大小上限。
+
 ## 下一批候选章节
 
-1. 下一主线：fatal dump 的证据链——`log_error_detail → dump_engine_exception → Scheduler/request/KV snapshot` 的信息、开销与隐私边界。
+1. 下一主线：fatal-path 测试矩阵——ModelRunner exception、Worker death 与 timeout 各自断言什么，KV/connector/device cleanup 还缺哪一层资源归零证据。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
@@ -444,3 +463,11 @@
 - 当前最大盲区：内部 fail-stop、取消和 finished 状态如何穿过异步 Serving 协程，形成唯一且可观察的 HTTP/streaming 终态。
 - 后续路线调整：进入 Serving；随后以跨层测试、性能与故障注入回收 graph、connector、backpressure 和 finish transaction 知识债。
 
+
+
+## 第三次七章知识图谱回顾（第 15–21 章）
+
+- 已打通：`disconnect/abort → KV deferred free`、`output coalescing → P×n fan-in → SSE terminal`、`timeout/exception → fatal evidence → EngineDeadError/health`。
+- 已闭合：正常取消与 fatal failure 的资源语义已经分离；HTTP 终态、Engine admission health 和 forward progress 也不再混为同一不变量。
+- 当前最大盲区：fatal-path 测试还不能同时证明所有 request collector、Scheduler registry、KV/connector refs、Worker/device context 随 Engine 退出归零；dump 也不是 durable snapshot。
+- 后续路线调整：以 fault injection、structured diagnostics 和资源归零测试收束故障诊断阶段，再回访 connector、backpressure 与跨 backend parity。
