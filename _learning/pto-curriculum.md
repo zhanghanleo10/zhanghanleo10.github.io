@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-08-31。
+最后更新：2026-09-01。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 21 已闭合 `reserve/import symbol → frontend id → PipePeerKey → two-function component → local base + flag_base → EmitC TPipe<...>`：函数内 `id` 只绑定本地 handle，跨函数 identity 来自 `(owner function, reserve name, direction)`；payload byte base 与 16-ID flag interval 属于两套独立资源域。下一步沿统一 pipe handle 追 `nosplit/split → TALLOC/TPUSH → TPOP/TFREE → PTOVerifyTFree` 的 entry 借用生命周期。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 22 已闭合 `frontend result → DeclareTile/DeclareGlobal → TALLOC/TPUSH → TPOP/TFREE → pto-isa intrinsic` 的 entry 借用主链：GlobalData 的 payload 读写与 ready/free commit 解耦；split 不缩小 full-entry slot；可选 `PTOVerifyTFree` 只证明同 block、单 outstanding 与 last-use-before-free，且当前没有接入默认 `ptoas` pipeline。下一步研究 `if/loop/early-exit` 下的 path-sensitive 余额、取消 ownership 与跨 dispatch flag 归零。
 
 ## 已完成章节
 
@@ -46,6 +46,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-28 | Modern PlanMemory largest-first 与 reuse cost | `RootInfo size/alignment → address-space order → legal groups/fresh → cost/capacity → packed offsets` | [课程 19]({% post_url 2026-08-28-ptoas-memplan-largest-first-reuse-cost-fragmentation %}) |
 | 2026-08-30 | ReserveBuffer aligned hole-fit 与 Level 地址所有权 | `ReserveBufferOp → level validation → occupied merge/first-fit → base → i32 constant` | [课程 20]({% post_url 2026-08-30-ptoas-reserve-buffer-hole-fit-level-contract %}) |
 | 2026-08-31 | Pipe peer identity、local base 与 16-ID flag ABI | `frontend id → PipePeerKey → two-function component → base/flag_base → TPipe<...>` | [课程 21]({% post_url 2026-08-31-ptoas-pipe-peer-buffer-flag-base-abi %}) |
+| 2026-09-01 | TPipe entry 借用、split 与 TFREE verifier | `Declare entry → TALLOC/TPUSH → TPOP/last use/TFREE → slot reuse` | [课程 22]({% post_url 2026-09-01-ptoas-tpipe-entry-borrow-lifetime-tfree-verifier %}) |
 
 ## ISA 知识地图
 
@@ -90,15 +91,17 @@ permalink: /learning/pto-curriculum/
 | Modern PlanMemory placement | `slotBytes=alignUp(rawBytes, alignment)`，group footprint 取 member 最大值；非 Cube space 才按 totalBytes 降序，全部 legal group 与 fresh 以 fits/cost/projectedBytes/stable order 比较，容量压力只可推翻性能偏好 | 已讲透 greedy placement 主路径，权重待真机标定 |
 | ReserveBuffer placement | `size` 是 byte count、result 是 `i32 base`；Level 1/2 由 PlanMemory 做 aligned first-fit，Level 3 由作者显式给 base；resolve 后 marker 退化为常量 | 已讲透地址生命周期；internal-hole 记账待回归 |
 | Pipe peer/flag ABI | function-local `id` 只绑定本地 handle；跨函数 key 为 owner function + reserve name + direction；payload base 与 `flag_base` 分属 byte-address/16-ID 资源域，最终进入 `TPipe` value/type | 已讲透 compiler 主路径；device flag 清零待验证 |
-| 通信 ISA | 尚未系统覆盖 | 待学习 |
+| TPipe entry ownership | GlobalData 以 `TALLOC→显式写→TPUSH→TPOP→显式读→TFREE` 完成交接；TileData 的 A2/A3 free 通知折叠进 TPOP，而 A5 TFREE 执行真实 release | 已讲透主协议 |
+| split/nosplit slot contract | split 改变 subblock view/执行，不改变切分前 full-entry `SLOT_SIZE`；同 peer component 禁止混用 split=0 与非零 split | 已讲透 compiler contract |
+| TFREE lifecycle verifier | 可选 pass 只证明同 block、单 outstanding、borrowed entry last use 在 free 前；当前未接入默认 pipeline | 已审计证明边界，CFG balance 待学习 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [3186c38](https://github.com/hw-native-sys/pto-isa/commit/3186c381bd49e1164092e67ff1b3564302754e76) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `compile.sh`、`patch_vec_barriers.py`、barrier pattern reference、`run.py` case1..case8 | ISA 深挖 12 |
+| pto-isa | [96ba706](https://github.com/hw-native-sys/pto-isa/commit/96ba706ce1697dd5febe107ee41a72b26e687b42) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `TALLOC/TPUSH/TPOP/TFREE` 规范与 A2/A3 `TAlloc/TPop/TFree` 实现、Tile/GlobalData release 差异 | ISA 深挖 13 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [cc519bc](https://github.com/hw-native-sys/PTOAS/commit/cc519bc92db73b2a2cdfd7c409fe7dfdf72d85e4) | 既有 InsertSync、memplan 与 ReserveBuffer；新增 `import_reserved_buffer` symbol resolution、frontend `id`、`PipePeerKey`/peer component、16-ID flag allocator、`InitializeL2L/L2G2L → TPipe<...>` EmitC 及 peer/overflow lit | 跨仓深挖 9 |
+| PTOAS | [5eb87c2](https://github.com/hw-native-sys/PTOAS/commit/5eb87c21ab9479d834e66968f63f0b1def292764) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI；新增 frontend entry lowering、nosplit inference/validation、`TAlloc/TPush/TPop/TFree` ops、`PTOVerifyTFreePass` 与 GlobalTensor/mixed-split lit | 跨仓深挖 10 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -197,6 +200,13 @@ permalink: /learning/pto-curriculum/
 - 单向 Pipe 占两个偶数对齐 flag ID，`DIR_BOTH` 占四个；只要两个 component 共享任一参与函数，其 flag 半开区间就不得重叠，参与函数集合完全不相交时允许复用。
 - `flag_base`、direction、slot sizes/counts 与 nosplit 被编入 `TPipe<...>` 模板 token；local/GM base 作为构造 value operand 传入，后续 TPUSH/TPOP/TFREE 从 handle defining init 恢复同一 token。
 
+- GlobalData `TALLOC/TPUSH/TPOP/TFREE` 只转移 slot 访问资格：`TALLOC/TPUSH` 之间由 producer 独占，`TPOP/TFREE` 之间由 consumer 借用；descriptor SSA lifetime 不得代替 FIFO ownership lifetime。
+- split consumer 可以看到 half-view，但 ring stride 与 `SLOT_SIZE` 始终按切分前 full entry 计算；`SLOT_NUM` 也不由 split 改变。
+- A2/A3 TileData `TFREE(Pipe&)` 是 API 对称 no-op，因为 free-space notification 已折叠进 TPOP；GlobalData TFREE 仍是实际 release boundary。
+- `PTOInferValidatePipeInitPass` 拒绝同一 peer component 混用 split=0 与非零 split，但不要求所有非零 split 枚举完全相同；旧设计文档的“任意混用”结论已滞后。
+- `PTOVerifyTFree` 的 matching 只按同 block 后续相同 pipe handle，且禁止同 pipe 多 outstanding pop；它不证明 producer 余额、CFG path balance、entry identity、split matching 或额外 free。
+- 可选 pass 的存在不等于默认 pipeline 保证；当前 main pipeline 未加入 `createPTOVerifyTFreePass()`，标准 `ptoas` 成功不能推出该生命周期检查已运行。
+
 ## 待验证推断
 
 - A2/A3 plain ND/DN 中 `gmGap` 通过字节数右移 5 位得到；如果 gap 不是 32 B 整数倍，是否由调用前的公共 verifier 拒绝，当前尚未找到闭合证据。
@@ -236,6 +246,10 @@ permalink: /learning/pto-curriculum/
 - 现有 flag tests 覆盖 source-order 稳定分配、9 条单向 Pipe 溢出、incomplete/non-peer 失败和跨端不同 id；尚缺 valid `DIR_BOTH` exact 4-ID、disjoint function-component reuse 与 explicit/auto 混排 golden。
 - FileCheck 只能证明 `TPipe` 模板/地址拓扑；多 local peer Pipe 在设备执行、异常退出和 graph replay 后是否清空 ready/free credit，仍需 poison/delay 与跨 dispatch 测试。
 
+- 将 `PTOVerifyTFree` 接入默认 pipeline 会与现有 interleaved two-pop codegen test 直接冲突；应选择保守 single-outstanding、FIFO-aware pairing，还是只在特定 frontend profile 启用，尚无已合入 policy。
+- 当前 GlobalData lit 证明 EmitC shape/stride/slot template，不证明异步 TLOAD 完成点先于 TFREE；需要 delay/poison 设备测试。
+- `if/loop` 下 exactly-once free、producer/consumer 跨函数累计余额、early-exit cancellation 与下一 dispatch flag 基线尚无统一 verifier 或 E2E。
+
 ## 尚未解释的知识债
 
 - NZ/5HD 的 C0 盒化五维地址映射及其与二维 Tile 的关系。
@@ -257,12 +271,12 @@ permalink: /learning/pto-curriculum/
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
 - PlanMemory 跨 root physical WAR、modern hard gates、branch/loop alias closure、greedy placement 与 ReserveBuffer Level/resolve 主链已闭合；仍缺 raw/slot/cursor/base checked arithmetic、internal-hole 多 reserve exact golden、Tile/ReserveBuffer 全局 interval verifier、动态 subview/reinterpret provenance、branch×target×semantic 交叉矩阵，以及 legacy/modern 的 `UB peak + event topology + device latency` 三联对照。
-- Pipe peer identity、local base 与 flag interval 的 compiler 主链已闭合；仍缺 A2/A3 L2G2L vs A5 L2L device ABI、valid DIR_BOTH/disjoint reuse exact golden、local multi-pipe E2E，以及完成/取消/异常后的 entry 与 flag 余额归零证明。
+- Pipe peer identity、local base/flag interval 与线性 entry borrow 主链已闭合；仍缺 A2/A3 L2G2L vs A5 L2L device ABI、valid DIR_BOTH/disjoint reuse exact golden、CFG/FIFO-aware lifecycle verifier、local multi-pipe E2E，以及完成/取消/异常后的 entry 与 flag 余额归零证明。
 - Event ID exhaustion、dynamic lane 异常退出/early-exit、zero-trip 嵌套控制流需要真机 race/stall 与死锁故障注入，FileCheck topology 不能替代。
 
 ## 下一批候选主线
 
-1. 主线：研究 `nosplit/split → TALLOC/TPUSH → TPOP/TFREE → PTOVerifyTFree`：entry 借用、匹配 free、use-after-free 与多 outstanding pop。
+1. 主线：研究 `scf.if/scf.for/early-exit → path-sensitive entry balance → cancellation owner → next-dispatch flag baseline`，补齐 TPipe 控制流生命周期。
 2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
 4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
