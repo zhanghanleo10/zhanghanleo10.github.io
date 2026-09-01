@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：已拆分 timeout、worker death、Engine fail-stop 与 fatal dump。第 21 章确认 fatal dump 仅记录未提交的 `SchedulerOutput` 计划与可选聚合 `SchedulerStats`，不是完整 Scheduler/request/KV 原子快照；下一章进入 fatal-path 测试矩阵与资源归零证据。
+- 当前主线：第 22 章已把 fatal 正确性拆成 F1 故障检测、F2 请求收敛、F3 进程收敛、F4 逻辑资源收敛与 F5 设备资源收敛，并审计 ModelRunner exception、Worker death、RPC timeout 三组测试证据；下一章进入 shutdown ownership 与 acknowledgement。
 
 ## 已完成章节
 
@@ -34,6 +34,7 @@
 | 2026-08-29 19 | `Core failure → MPClient latch/queue → output_handler → all collectors → /health/watchdog` | [`99013d77`](https://github.com/vllm-project/vllm/commit/99013d77d332a2d21d7214b57fa495f2bad2b448) | [EngineCore 失效广播]({{ '/articles/vllm-enginecore-failure-broadcast-health-readiness/' | relative_url }}) |
 | 2026-08-30 20 | `SchedulerOutput → Multiproc RPC deadline → TimeoutError → Core fail-stop → worker termination` | [`680e2177`](https://github.com/vllm-project/vllm/commit/680e2177e473ed8dfaa9773f7ead185b369cab46) | [TP RPC timeout 与单卡 hang 盲区]({{ '/articles/vllm-execute-model-timeout-hang-failstop-gap/' | relative_url }}) |
 | 2026-08-31 21 | `SchedulerOutput → log_error_detail → prepare_object_to_dump/make_stats → logger → original exception` | [`c92b29a1`](https://github.com/vllm-project/vllm/commit/c92b29a1d40644da710209f862b1be0ebd5c2e74) | [Fatal Dump 证据与隐私边界]({{ '/articles/vllm-fatal-dump-scheduleroutput-evidence-privacy/' | relative_url }}) |
+| 2026-09-01 22 | `ModelRunner exception / Worker death / RPC timeout → EngineCore fatal → frontend fanout / process shutdown / resource evidence` | [`8600db5d`](https://github.com/vllm-project/vllm/commit/8600db5dff18054f7a4314f6f8bba4259e3e2a98) | [Fatal 测试矩阵与资源归零]({{ '/articles/vllm-fatal-path-test-matrix-resource-zero/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -247,6 +248,17 @@
 - `prepare_object_to_dump`
 - `NewRequestData.anon_repr/CachedRequestData.anon_repr`
 - `Scheduler.make_stats`（fatal path 的聚合统计与 drain/reset 副作用）
+- `WorkerProc._execute_worker_rpc`
+- `MultiprocExecutor.execute_model/collective_rpc`
+- `MultiprocExecutor._run_worker_monitor/register_failure_callback/shutdown`
+- `BackgroundResources.validate_alive/_format_exception`
+- `AsyncLLM.output_handler`（fatal fan-out）
+- `OutputProcessor.propagate_error`
+- `tests.v1.shutdown.test_forward_error.evil_forward/test_async_llm_model_error/test_llm_model_error`
+- `wait_for_gpu_memory_to_clear`
+- `test_ray_v2_executor_worker_death/test_ray_v2_executor_shutdown`
+- `test_worker_kill_survivor_unhealthy_and_dead_rejects_retry`
+- `tests.v1.executor.test_multiproc_executor_timeout`
 
 ## 已确认不变量
 
@@ -372,6 +384,12 @@
 118. `Scheduler.make_stats()` 是聚合观测而非 registry/KV snapshot；且会 reset prefix stats、connector stats 并 drain eviction events。
 119. 当前 dump 只写进程内 logger，没有持久化文件、原子提交、schema version 或跨 rank 一致性边界。
 120. fatal evidence 只能证明 scheduler intent 与当时可读的 Host 聚合状态；SIGKILL/native crash、日志截断和设备内部进度仍是明确盲区。
+121. fatal 正确性必须分为 F1 故障检测、F2 请求收敛、F3 进程收敛、F4 逻辑资源收敛和 F5 设备资源收敛；任一单层通过都不能替代其余层。
+122. forward-error shutdown 测试直接证明 TP=1/2 下在途请求 fatal fan-out、new admission 拒绝和粗粒度 GPU memory 回落，但没有直接断言 Scheduler/KV/connector/Worker state 精确归零。
+123. Worker monitor 通过 OS process sentinel 检测 death 并关闭整个 Worker group；alive-but-stalled Worker 只能由 RPC deadline 覆盖。
+124. Worker 被 SIGKILL 后不能再提供自身 cleanup acknowledgement；应断言进程消失、parent-owned IPC/actor refs 清理和设备 baseline，而不是虚构 victim 侧逻辑回执。
+125. multiprocess timeout 现有直接测试验证 deadline clamp、剩余时间与 FIFO drain 的单元语义；真实 withheld-response 到 ENGINE_CORE_DEAD、collector fan-out 和资源收敛仍无直接 E2E。
+126. 进程退出或显存低于阈值只证明地址空间/设备资源粗粒度收敛，不能反证 KV refcount、connector job 与 Worker request state 走过正常逻辑释放路径。
 
 ## 前置依赖与版本注意
 
@@ -438,10 +456,14 @@
 - 缺少独立 supervisor 持久化、rank/stream progress、KV block refcount/free-list 摘要，以及 SIGKILL/native crash 下的证据保全。
 - `scheduled_spec_decode_tokens` 与 connector/mm metadata 的字段级敏感性尚未形成统一审计和日志大小上限。
 
+- ModelRunner exception 的现有 E2E 已覆盖 fatal fan-out、new-admission 拒绝和 GPU memory threshold，但缺 owner-specific resource census；进程销毁不能替代 F4 精确断言。
+- Worker death 的 Ray V2/FT 测试覆盖 callback、状态转换和部分关闭语义，尚缺默认 MP 全链 collector/KV/connector/device cleanup parity。
+- multiprocess timeout 只有 fake-clock/deadline 单元测试，尚缺真实 alive Worker withheld-response 的 fatal convergence 与资源基线 E2E。
+
 ## 下一批候选章节
 
-1. 下一主线：fatal-path 测试矩阵——ModelRunner exception、Worker death 与 timeout 各自断言什么，KV/connector/device cleanup 还缺哪一层资源归零证据。
-2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E 与跨 Executor deadline parity。
+1. 下一主线：shutdown ownership——`EngineCore.shutdown → Executor/Worker termination → Scheduler/KV/connector cleanup` 中谁拥有最后一次释放权，哪些 owner 能在 fatal 前返回 acknowledgement。
+2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
 5. 错误协议回访：真实 ASGI late-error 的 status/body/metrics/usage 联合测试与客户端 retry contract。
