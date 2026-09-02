@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 22 章已把 fatal 正确性拆成 F1 故障检测、F2 请求收敛、F3 进程收敛、F4 逻辑资源收敛与 F5 设备资源收敛，并审计 ModelRunner exception、Worker death、RPC timeout 三组测试证据；下一章进入 shutdown ownership 与 acknowledgement。
+- 当前主线：第 23 章已追通 `AsyncLLM → MPClient/process manager → EngineCore state machine → Executor/Worker/ModelRunner → Scheduler/Connector` 的 shutdown owner 链，并确认最终成功屏障是进程退出而非逐资源 acknowledgement；下一章进入 cleanup exception isolation 与 bounded acknowledgement。
 
 ## 已完成章节
 
@@ -35,6 +35,7 @@
 | 2026-08-30 20 | `SchedulerOutput → Multiproc RPC deadline → TimeoutError → Core fail-stop → worker termination` | [`680e2177`](https://github.com/vllm-project/vllm/commit/680e2177e473ed8dfaa9773f7ead185b369cab46) | [TP RPC timeout 与单卡 hang 盲区]({{ '/articles/vllm-execute-model-timeout-hang-failstop-gap/' | relative_url }}) |
 | 2026-08-31 21 | `SchedulerOutput → log_error_detail → prepare_object_to_dump/make_stats → logger → original exception` | [`c92b29a1`](https://github.com/vllm-project/vllm/commit/c92b29a1d40644da710209f862b1be0ebd5c2e74) | [Fatal Dump 证据与隐私边界]({{ '/articles/vllm-fatal-dump-scheduleroutput-evidence-privacy/' | relative_url }}) |
 | 2026-09-01 22 | `ModelRunner exception / Worker death / RPC timeout → EngineCore fatal → frontend fanout / process shutdown / resource evidence` | [`8600db5d`](https://github.com/vllm-project/vllm/commit/8600db5dff18054f7a4314f6f8bba4259e3e2a98) | [Fatal 测试矩阵与资源归零]({{ '/articles/vllm-fatal-path-test-matrix-resource-zero/' | relative_url }}) |
+| 2026-09-02 23 | `AsyncLLM.shutdown → process deadline → EngineCore request convergence → Executor/Worker device cleanup → Scheduler/Connector shutdown` | [`80389cfe`](https://github.com/vllm-project/vllm/commit/80389cfedd5040e382d64a64b1782f66de1a38bf) | [Shutdown owner 链与进程退出屏障]({{ '/articles/vllm-shutdown-ownership-process-exit-barrier/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -460,9 +461,24 @@
 - Worker death 的 Ray V2/FT 测试覆盖 callback、状态转换和部分关闭语义，尚缺默认 MP 全链 collector/KV/connector/device cleanup parity。
 - multiprocess timeout 只有 fake-clock/deadline 单元测试，尚缺真实 alive Worker withheld-response 的 fatal convergence 与资源基线 E2E。
 
+## 第 23 章课程账本增量
+
+- 源码基线：[`80389cfe`](https://github.com/vllm-project/vllm/commit/80389cfedd5040e382d64a64b1782f66de1a38bf)。
+- 已覆盖文件：`vllm/v1/engine/async_llm.py`、`core_client.py`、`engine/utils.py`、`engine/core.py`、`core/sched/scheduler.py`、`executor/abstract.py`、`uniproc_executor.py`、`multiproc_executor.py`、`worker/gpu_worker.py`、`worker/gpu/model_runner.py`、`v1/utils.py`。
+- 已覆盖符号：`AsyncLLM.shutdown`、`MPClient.shutdown`、`CoreEngineProcManager.shutdown`、`EngineCoreProc._handle_shutdown`、`EngineCore.shutdown`、`Scheduler.finish_requests/_free_request/shutdown`、`MultiprocExecutor.shutdown/_ensure_worker_termination`、`WorkerProc.shutdown`、`Worker.shutdown`、`GPUModelRunner.shutdown`。
+- 新确认不变量：
+  1. `shutdown_timeout=0` 仍先经过 `finish_requests` 的正常逻辑释放入口；GPU step 未完成时 KV blocks 必须由 fence 延迟归还。
+  2. 资源释放职责归最内层 owner；EngineCore 只编排，process manager 只持有 deadline 与 force-kill 权。
+  3. Multiproc graceful path 由 death-pipe EOF 使 Worker busy loop 退出并在 `finally` 清理；SIGKILL path 不保证任何 Python cleanup。
+  4. `Scheduler.shutdown` 只关闭 publisher/Connector，不显式清空 request registry 或 KVCacheManager；残余对象依赖进程销毁。
+  5. 当前最终 acknowledgement 是 EngineCore/Worker process exit，不是 owner-specific resource census。
+- 测试证据：process-manager timeout 选择/幂等、Worker grace fake-clock、abort-mid-prefill deferred free；尚无一条真实 MP E2E 同时证明 collector、Scheduler registry、KV block pool、Connector refs、Worker tasks 与 device memory 全部回到基线。
+- 新知识债：`EngineCore.shutdown` 缺逐 owner 的 exception isolation；缺 bounded `drained/abandoned/failed` summary；缺 Connector pending transfer、TP/PP/Ray/external launcher 的关闭 parity；缺 SIGTERM→SIGKILL 期间 GPU/NCCL progress 观测。
+- 下一章：**Shutdown 故障注入——Executor、Scheduler、Connector cleanup 抛异常时的后续 owner 执行与 bounded acknowledgement。**
+
 ## 下一批候选章节
 
-1. 下一主线：shutdown ownership——`EngineCore.shutdown → Executor/Worker termination → Scheduler/KV/connector cleanup` 中谁拥有最后一次释放权，哪些 owner 能在 fatal 前返回 acknowledgement。
+1. 下一主线：shutdown 故障注入——`Executor.shutdown`、`Scheduler.shutdown`、Connector cleanup 任一抛异常时是否阻断后续 owner，并定义不延长 kill deadline 的 bounded acknowledgement。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
