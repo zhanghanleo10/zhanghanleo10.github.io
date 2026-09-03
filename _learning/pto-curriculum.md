@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-02。
+最后更新：2026-09-03。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 23 已把线性 entry 借用推进到 `scf.if/scf.for → dynamic push/pop/free count → TPipe constructor/destructor → next-dispatch FlagID baseline`：安全条件是两个 peer 在每条动态路径上的 transaction delta 一致；析构只消费已产生的 pending free credit，不是 cancellation/reset。下一步设计 component-level balance verifier，研究 branch merge、loop summary 与跨函数 predicate provenance。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 24 已把“应当检查路径余额”推进为 compiler proof boundary：`PTOInferValidatePipeInitPass` 只建立 peer component 与统一 nosplit，`PTOVerifyTFree` 只检查单函数同 block 的借用，而跨 endpoint 的 `push/pop/release` effect equality 尚无默认 verifier。下一步转向 pto-isa CPU_SIM，用 matched、missing-pop 与连续 dispatch 场景校验动态 FIFO 状态，并界定模拟器与真机证据的边界。
 
 ## 已完成章节
 
@@ -48,6 +48,7 @@ permalink: /learning/pto-curriculum/
 | 2026-08-31 | Pipe peer identity、local base 与 16-ID flag ABI | `frontend id → PipePeerKey → two-function component → base/flag_base → TPipe<...>` | [课程 21]({% post_url 2026-08-31-ptoas-pipe-peer-buffer-flag-base-abi %}) |
 | 2026-09-01 | TPipe entry 借用、split 与 TFREE verifier | `Declare entry → TALLOC/TPUSH → TPOP/last use/TFREE → slot reuse` | [课程 22]({% post_url 2026-09-01-ptoas-tpipe-entry-borrow-lifetime-tfree-verifier %}) |
 | 2026-09-02 | TPipe 控制流余额与跨 dispatch credit drain | `scf.if/scf.for → dynamic transaction delta → pending free credit → destructor drain → FlagID baseline` | [课程 23]({% post_url 2026-09-02-ptoas-tpipe-control-flow-credit-balance %}) |
+| 2026-09-03 | TPipe component 路径效应与 verifier 最小证明 | `PipePeerKey/component → endpoint SCF effect → branch/loop merge → peer equality → fail-closed` | [课程 24]({% post_url 2026-09-03-ptoas-tpipe-component-balance-verifier %}) |
 
 ## ISA 知识地图
 
@@ -95,15 +96,16 @@ permalink: /learning/pto-curriculum/
 | TPipe entry ownership | GlobalData 以 `TALLOC→显式写→TPUSH→TPOP→显式读→TFREE` 完成交接；TileData 的 A2/A3 free 通知折叠进 TPOP，而 A5 TFREE 执行真实 release | 已讲透主协议 |
 | split/nosplit slot contract | split 改变 subblock view/执行，不改变切分前 full-entry `SLOT_SIZE`；同 peer component 禁止混用 split=0 与非零 split | 已讲透 compiler contract |
 | TFREE lifecycle verifier | 可选 pass 只证明同 block、单 outstanding、borrowed entry last use 在 free 前；当前未接入默认 pipeline | 已审计局部证明边界 |
-| TPipe control-flow balance | branch 必须在所有 peer 上产生相同 transaction delta；loop 每迭代应净余额为零；析构 drain 只确认已发出的 pending free credit，不能修复不对称路径 | 已讲透运行时守恒；component-level verifier 待实现 |
+| TPipe control-flow balance | branch 必须在所有 peer 上产生相同 transaction delta；loop 每迭代应净余额为零；析构 drain 只确认已发出的 pending free credit，不能修复不对称路径 | 已讲透运行时守恒 |
+| TPipe component balance proof | component identity、单 endpoint borrow safety 与跨 endpoint transaction equality 是三份独立证明；最小 module analysis 应组合 sequence/branch/loop effect，并在 predicate/trip-count unknown 时 fail closed | 已完成源码边界与最小设计；实现和动态验证待补 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [99ee520](https://github.com/hw-native-sys/pto-isa/commit/99ee520889019a883c7a58302548eb3b0af253a6) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A2/A3 `countPendingFreeCredits`、A2/A3/A5 `TPipe` constructor/destructor、Tile/GlobalData TFREE 与连续 dispatch tests | ISA 深挖 14 |
+| pto-isa | [f7f4e64](https://github.com/hw-native-sys/pto-isa/commit/f7f4e64a910aaf9673fcd5e3c5bd8389afa6ebbc) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；复核最新 TPUSH/TPOP/TFREE 文档与 CPU_SIM host FIFO，确认 TileData/GlobalData release 和 target 差异 | ISA 深挖 15 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [bdcb319](https://github.com/hw-native-sys/PTOAS/commit/bdcb319d6ad43fe4a562e8911e05aebca228b848) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 entry lowering；新增真实 `scf.if/scf.for` pipe transactions、`PTOVerifyTFree` block-local control-flow边界、nested control-flow tests/samples | 跨仓深挖 11 |
+| PTOAS | [bdcb319](https://github.com/hw-native-sys/PTOAS/commit/bdcb319d6ad43fe4a562e8911e05aebca228b848) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 entry lowering；新增 `PipePeerKey` component DFS、`resolveNoSplitComponent`、`PTOVerifyTFree` 三层 block-local 检查、默认 pipeline 缺口与 balance effect 最小设计 | 跨仓深挖 12 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -212,10 +214,13 @@ permalink: /learning/pto-curriculum/
 - A2/A3 `TPipe::~TPipe()` 的 `countPendingFreeCredits(prod.tileIndex)` 只等待消费者按协议应已发出的残余 credit；它不会创建 credit，也不是 cancellation/reset。不对称路径会在 TPOP、稳态 TPUSH 或析构中 stall。
 - 下一 dispatch 安全依赖上一 dispatch 的 flag baseline；正常路径的精确 drain 与连续 dispatch 测试只能证明已配平 transaction，不证明 fault/early-exit 可以恢复。
 - A5 local no-split 与 GM/split 的 startup/drain 协议不同；当前 `a5/TFree.hpp` 的 Tile TFREE 具有真实 release 路径，而 `docs/isa/system/ops/TPOP.md` 的 no-op 描述已滞后。
+- `PTOInferValidatePipeInitPass` 的 module-level component 只统一 `nosplit`，不计算 endpoint 动态次数；`PTOVerifyTFree` 的 func-level同 block检查只覆盖局部 borrow，二者均不能推出跨 endpoint `P=C=R`。
+- component balance 的最小 effect 至少要区分 `push/pop/release`、出口 outstanding 与前缀范围；branch effect 不同、loop trip count 不可比或 peer 符号计数 unknown 时必须 fail closed。
+- balance verifier 应在 frontend pipe lowering 和 peer component 形成后、PlanMemory/EmitC 丢失高层 provenance 前运行；从生成 C++ 文本反推控制流会失去稳定的 SSA/SCF 证据。
 
 ## 待验证推断
 
-- component-level path verifier 可以为每个 pipe 传播 `(push,pop,free)` symbolic delta：branch merge 要求 successor 等价，loop 要求每迭代净零，return 要求本地 borrow 为零；跨函数 predicate/trip-count provenance 无法证明时应 fail closed。
+- component-level path verifier 可以为每个 pipe 传播 `(push,pop,release,outstanding,min,max)` symbolic effect：branch merge 要求 successor 等价，loop 要求每迭代本地 borrow 净零，return 要求 outstanding 为零；跨函数 predicate/trip-count provenance 无法证明时应 fail closed。该设计尚未在当前主干实现。
 - 真正的 runtime cancellation 需要 quiescence + generation/epoch + backing ownership 回收；仅清 flag 可能把旧 payload/迟到通知误认作下一 dispatch，不能作为安全兜底。
 
 - A2/A3 plain ND/DN 中 `gmGap` 通过字节数右移 5 位得到；如果 gap 不是 32 B 整数倍，是否由调用前的公共 verifier 拒绝，当前尚未找到闭合证据。
@@ -280,12 +285,12 @@ permalink: /learning/pto-curriculum/
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
 - PlanMemory 跨 root physical WAR、modern hard gates、branch/loop alias closure、greedy placement 与 ReserveBuffer Level/resolve 主链已闭合；仍缺 raw/slot/cursor/base checked arithmetic、internal-hole 多 reserve exact golden、Tile/ReserveBuffer 全局 interval verifier、动态 subview/reinterpret provenance、branch×target×semantic 交叉矩阵，以及 legacy/modern 的 `UB peak + event topology + device latency` 三联对照。
-- Pipe peer identity、local base/flag interval、线性 borrow 与正常路径析构 drain 已闭合；仍缺 A2/A3 L2G2L vs A5 L2L device ABI、valid DIR_BOTH/disjoint reuse exact golden、component-level CFG/FIFO-aware verifier、local multi-pipe E2E，以及 fault/cancel/early-exit 后的 entry 与 flag 余额归零证明。
+- Pipe peer identity、local base/flag interval、线性 borrow、正常路径析构 drain 与 component balance 的最小静态证明边界已闭合；仍缺 A2/A3 L2G2L vs A5 L2L device ABI、valid DIR_BOTH/disjoint reuse exact golden、verifier 实现与 FIFO-aware pairing、local multi-pipe E2E，以及 fault/cancel/early-exit 后的 entry 与 flag 余额归零证明。
 - Event ID exhaustion、dynamic lane 异常退出/early-exit、zero-trip 嵌套控制流需要真机 race/stall 与死锁故障注入，FileCheck topology 不能替代。
 
 ## 下一批候选主线
 
-1. 主线：设计 TPipe component-level balance verifier：branch merge equality、loop zero-net summary、跨函数 predicate/trip-count provenance 与 fail-closed diagnostics。
+1. 主线：研究 pto-isa CPU_SIM TPipe FIFO 状态机，以 matched flow、missing pop、bounded timeout 与连续 dispatch 验证静态余额模型，并明确 CPU_SIM 不支持 GlobalData 等边界。
 2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
 4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
@@ -323,3 +328,14 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：depth 8、40 transfers 的 pending drain 为 2；连续 80 dispatch 覆盖 stale credit/过量 drain；现有 PTOAS nested-control-flow lit 主要验证 InsertSync，不验证 peer balance。
 - 新知识债：`PTOVerifyTFree` direct lit/default policy、component-level branch/loop analysis、predicate provenance、A5/DIR_BOTH fault injection、early-exit recovery 与 A5 TFREE 文档同步。
 - 下一章：**TPipe component-level balance verifier——branch merge、loop summary 与跨函数 predicate provenance。**
+
+## 第 24 章课程账本增量
+
+- 源码基线：PTOAS [`bdcb319d`](https://github.com/hw-native-sys/PTOAS/commit/bdcb319d6ad43fe4a562e8911e05aebca228b848)，pto-isa [`f7f4e64a`](https://github.com/hw-native-sys/pto-isa/commit/f7f4e64a910aaf9673fcd5e3c5bd8389afa6ebbc)。
+- 新覆盖文件：`PTOInferValidatePipeInitPass.cpp`、`PTOVerifyTFreePass.cpp`、`Passes.td`、`ptoas_pipeline.cpp`、mixed-split/globaltensor-loop lit，以及最新 TPUSH/TPOP/TFREE 中文规范。
+- 新覆盖符号：`PipePeerKey`、`classifyPipeUsage`、`resolveNoSplitComponent`、`findMatchingTFree`、`verifySingleOutstandingUntil`、`verifyNoTileUsesAfterTFree`。
+- 新确认不变量：component identity、局部 borrow safety、跨 endpoint transaction equality 是三份独立证明；默认 pipeline 当前只包含第一份，第二份是可选局部 pass，第三份尚无已合入 verifier。
+- 最小设计：module-level effect summary 组合 sequence/branch/loop，比较 producer push 与 consumer pop/release；branch 不等、trip count/provenance unknown 时 fail closed，后续再逐步支持共享 predicate 的分段等价。
+- 直接测试事实：现有 negative lit 能拒绝 peer split/nosplit 冲突，GlobalTensor loop lit 能固定 full-entry EmitC ABI；未找到 `PTOVerifyTFree` direct diagnostic lit，也没有跨函数 branch/loop count mismatch 测试。
+- 新知识债：抽取共享 `PipeComponentAnalysis`、实现稳定 effect lattice/diagnostic、predicate/trip-count provenance、FIFO-aware多 outstanding、CPU_SIM 与 A2/A3/A5 fault injection。
+- 下一章：**CPU_SIM TPipe FIFO 状态机——用 matched flow、missing pop 与连续 dispatch 故障注入检验静态余额模型。**
