@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 24 章确认 `AsyncLLM → EngineCore → Executor/Worker + Scheduler/Connector` 的进程内 cleanup 仍以串行 fail-fast 为主，并由 `MultiConnector`/`TieringManager` 反例推导出 dependency-aware best effort；下一章建立进程退出前的 owner-specific resource census。
+- 当前主线：第 25 章把 shutdown 正确性拆成 frontend collector、Scheduler registry、KV BlockPool、Connector job、Worker/device 五层 census，并确认异常投递、finished status、free count、显存回落与进程退出互不等价；下一章用故障注入验证 partial census 与共享 kill deadline。
 
 ## 已完成章节
 
@@ -37,6 +37,7 @@
 | 2026-09-01 22 | `ModelRunner exception / Worker death / RPC timeout → EngineCore fatal → frontend fanout / process shutdown / resource evidence` | [`8600db5d`](https://github.com/vllm-project/vllm/commit/8600db5dff18054f7a4314f6f8bba4259e3e2a98) | [Fatal 测试矩阵与资源归零]({{ '/articles/vllm-fatal-path-test-matrix-resource-zero/' | relative_url }}) |
 | 2026-09-02 23 | `AsyncLLM.shutdown → process deadline → EngineCore request convergence → Executor/Worker device cleanup → Scheduler/Connector shutdown` | [`80389cfe`](https://github.com/vllm-project/vllm/commit/80389cfedd5040e382d64a64b1782f66de1a38bf) | [Shutdown owner 链与进程退出屏障]({{ '/articles/vllm-shutdown-ownership-process-exit-barrier/' | relative_url }}) |
 | 2026-09-03 24 | `AsyncLLM.shutdown → EngineCore/Executor/Scheduler cleanup fault → dependency-aware continuation → shared process deadline` | [`0e14198a`](https://github.com/vllm-project/vllm/commit/0e14198a63c03f899a10f3e782e88eca7f11265b) | [Cleanup 故障隔离与有界回执]({{ '/articles/vllm-shutdown-cleanup-fault-isolation-bounded-ack/' | relative_url }}) |
+| 2026-09-05 25 | `OutputProcessor registry → Scheduler/deferred free → BlockPool refcount → Connector job → Worker/device teardown` | [`6cbb3c15`](https://github.com/vllm-project/vllm/commit/6cbb3c154ef1449d2b3c9131a237f36faa695734) | [Shutdown Resource Census 五层终态]({{ '/articles/vllm-shutdown-resource-census-five-layer-terminal-state/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -275,6 +276,16 @@
 - `P2PTieringManager._drain_inflight_for_shutdown`
 - `vllm.v1.utils.shutdown`
 
+- `OutputProcessor.request_states/parent_requests/external_req_ids`
+- `OutputProcessor.propagate_error/_finish_request/abort_requests`
+- `EngineCoreProc._handle_shutdown/has_work`
+- `Scheduler.finish_requests/_free_request/_free_blocks/_free_request_blocks`
+- `Scheduler.deferred_frees/sched_step_seq/processed_step_seq`
+- `KVCacheManager.free/pop_blocks_for_free`
+- `BlockPool.ref_cnt/free_block_queue/null_block/get_usage/reset_prefix_cache`
+- `GPUModelRunner.finish_requests/_remove_request/shutdown`
+- `tests.v1.core.test_deferred_block_free`
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -410,6 +421,11 @@
 128. `run_engine_core()` 的 `finally` cleanup 若再抛异常，可能遮蔽正在传播的原始 fatal exception；`_send_engine_dead()` 已发出并不等价于诊断根因仍被保留。
 129. 独立 sibling 可以 best-effort 全部尝试并聚合异常；存在资源依赖时，前置 quiescence 失败必须阻止后置资源销毁，避免 use-after-unmap 一类错误。
 130. 任意 C/CUDA cleanup 若在同一进程内不可抢占，就无法同时保证“后续 owner 一定运行”和“总时间严格有界”；硬 deadline 必须由可终止的进程边界承担。
+131. `OutputProcessor.propagate_error()` 只向 collector 投递异常；frontend registry 的删除由 `_finish_request` 或 `abort_requests` 完成，error delivery 与 registry zero 必须分开断言。
+132. Request finished、从调度队列移除、从 Scheduler registry 删除、KV block 回到 free queue、Worker slot 删除是不同生命周期节点，不能用前一节点替代后一节点。
+133. `deferred_frees` 在 newest in-flight step 的 output 处理前持有 blocks；`requests==0` 时它仍可能非空，物理复用必须等待 device completion fence。
+134. BlockPool 的 null block 永久占用一个物理块；无 request ownership 时 `num_free_blocks == num_gpu_blocks - 1`。refcount 为零的 prefix-cached block 可以仍保留 hash 并位于 free queue。
+135. `GPUModelRunner.shutdown()` 通过 synchronize、断引用、GC 与 allocator cleanup 尝试回收设备资源，但没有结构化 active-slot/tensor-byte 回执；显存回落和进程退出都不能补写进程内 census。
 
 ## 前置依赖与版本注意
 
@@ -417,6 +433,11 @@
 - 直接向 InputProcessor 传 raw prompt、向 LLMEngine 传 `EngineCoreRequest` 均处于 v0.18 移除迁移期。
 
 ## 尚未解释的知识债
+
+- 缺少不可变、owner-specific 的 `ShutdownCensus` schema 与跨进程 shutdown generation；Core/Worker 死亡后只能标记 census unavailable，不能伪造全零。
+- 缺少 BlockPool 守恒审计：非 null block refcount、free queue membership、request tables、deferred frees 与 Connector holds 尚无一次性一致性断言。
+- Connector 没有统一 `pending_loads/pending_saves/stopped` 回执；各实现的 background job 与 transport quiescence 仍不可横向比较。
+- Worker/ModelRunner 缺 active slots、in-flight batches、device synchronized 和 teardown-done 的结构化快照；allocator memory threshold 仍是弱证据。
 
 - `AsyncMPClient`/DP client 的 engine identity 选择、跨 producer 顺序和线程安全边界。
 - hybrid KV groups 下 per-group prefix blocks 如何收敛为统一 `num_computed_tokens`，以及 partial-tail/CoW 的正确性边界。
@@ -510,9 +531,19 @@
 - 新知识债：cleanup DAG、共享 deadline、结构化 `ShutdownReport`、原异常保留、Executor/Scheduler/Connector/ModelRunner 的 throw/hang 故障注入。
 - 下一章：**Shutdown resource census——在进程退出前证明 request、KV block、Connector job、Worker state 与 device allocation 到达何种终态。**
 
+## 第 25 章课程账本增量
+
+- 源码基线：[`6cbb3c15`](https://github.com/vllm-project/vllm/commit/6cbb3c154ef1449d2b3c9131a237f36faa695734)；该提交优化 GDN CUDA Graph capture metadata，与本文 shutdown 路径无直接修改。
+- 已覆盖文件：`vllm/v1/engine/async_llm.py`、`engine/output_processor.py`、`engine/core.py`、`core/sched/scheduler.py`、`core/kv_cache_manager.py`、`core/block_pool.py`、`worker/gpu/model_runner.py`、`worker/gpu_worker.py`、`tests/v1/core/test_deferred_block_free.py`、`tests/v1/core/test_prefix_caching.py`。
+- 已覆盖符号：`OutputProcessor.request_states/propagate_error/_finish_request/abort_requests`、`EngineCoreProc._handle_shutdown`、`Scheduler.finish_requests/_free_request/_free_request_blocks/deferred_frees`、`KVCacheManager.free/pop_blocks_for_free`、`BlockPool.ref_cnt/free_block_queue/null_block`、`GPUModelRunner.finish_requests/_remove_request/shutdown`。
+- 新确认不变量：frontend exception delivery 与 registry zero 分离；finished status 与 block reuse 分离；deferred free 必须等待 newest step fence；无请求时 free count 扣除 null block；prefix hash 不等于 request ownership；进程退出不能补写进程内 census。
+- 直接测试事实：33-token prompt 在 block size 16 下占 3 blocks；abort 后 free count 保持，直到 newest fence output 被处理才恢复；双请求 deferred entries 可在同一 fence 后排空。尚无全链 collector/Scheduler/Connector/KV/Worker/device 联合 census 测试。
+- 新知识债：统一 census schema、generation、BlockPool 守恒、Connector pending-job 接口、各 rank Worker/device 强回执、SIGTERM/SIGKILL partial report。
+- 下一章：**Shutdown census fault injection——Executor、Connector 或 device synchronize 失败时的 partial evidence、completion unknown 与共享 kill deadline。**
+
 ## 下一批候选章节
 
-1. 下一主线：shutdown resource census——为 request collector、Scheduler registry、KV block pool、Connector job、Worker state 与 device allocation 定义 owner-specific 终态和可观测快照。
+1. 下一主线：shutdown census fault injection——让 Executor、Connector 或 device synchronize 抛错/卡住，验证 partial evidence、`completion_unknown` 和共享 kill deadline。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
