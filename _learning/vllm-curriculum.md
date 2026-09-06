@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 25 章把 shutdown 正确性拆成 frontend collector、Scheduler registry、KV BlockPool、Connector job、Worker/device 五层 census，并确认异常投递、finished status、free count、显存回落与进程退出互不等价；下一章用故障注入验证 partial census 与共享 kill deadline。
+- 当前主线：第 26 章用 CPU KV offload 的 event/device synchronize 故障注入确认 metadata cleared、device completion 与 process exit 是三种不同证据，并引入 `completion_unknown`；下一章把 partial evidence 落成跨进程、跨 rank 的 `ShutdownReport` wire protocol。
 
 ## 已完成章节
 
@@ -38,6 +38,7 @@
 | 2026-09-02 23 | `AsyncLLM.shutdown → process deadline → EngineCore request convergence → Executor/Worker device cleanup → Scheduler/Connector shutdown` | [`80389cfe`](https://github.com/vllm-project/vllm/commit/80389cfedd5040e382d64a64b1782f66de1a38bf) | [Shutdown owner 链与进程退出屏障]({{ '/articles/vllm-shutdown-ownership-process-exit-barrier/' | relative_url }}) |
 | 2026-09-03 24 | `AsyncLLM.shutdown → EngineCore/Executor/Scheduler cleanup fault → dependency-aware continuation → shared process deadline` | [`0e14198a`](https://github.com/vllm-project/vllm/commit/0e14198a63c03f899a10f3e782e88eca7f11265b) | [Cleanup 故障隔离与有界回执]({{ '/articles/vllm-shutdown-cleanup-fault-isolation-bounded-ack/' | relative_url }}) |
 | 2026-09-05 25 | `OutputProcessor registry → Scheduler/deferred free → BlockPool refcount → Connector job → Worker/device teardown` | [`6cbb3c15`](https://github.com/vllm-project/vllm/commit/6cbb3c154ef1449d2b3c9131a237f36faa695734) | [Shutdown Resource Census 五层终态]({{ '/articles/vllm-shutdown-resource-census-five-layer-terminal-state/' | relative_url }}) |
+| 2026-09-06 26 | `CPU KV offload event failure → sibling cleanup → device sync failure → mmap release → process boundary` | [`f4eccdad`](https://github.com/vllm-project/vllm/commit/f4eccdadefc6501fafeb1a0bf7f171ff24f984b0) | [Shutdown Fault Injection 与 Completion Unknown]({{ '/articles/vllm-shutdown-fault-injection-completion-unknown/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -541,9 +542,24 @@
 - 新知识债：统一 census schema、generation、BlockPool 守恒、Connector pending-job 接口、各 rank Worker/device 强回执、SIGTERM/SIGKILL partial report。
 - 下一章：**Shutdown census fault injection——Executor、Connector 或 device synchronize 失败时的 partial evidence、completion unknown 与共享 kill deadline。**
 
+## 第 26 章课程账本增量
+
+- 源码基线：[`f4eccdad`](https://github.com/vllm-project/vllm/commit/f4eccdadefc6501fafeb1a0bf7f171ff24f984b0)；默认分支最新提交本身与 shutdown 无关。
+- 已覆盖文件：`vllm/v1/engine/core.py`、`engine/utils.py`、`v1/utils.py`、`executor/uniproc_executor.py`、`executor/multiproc_executor.py`、`worker/gpu_worker.py`、`worker/gpu/model_runner.py`、`v1/kv_offload/cpu/gpu_worker.py`、`tests/v1/kv_offload/cpu/test_gpu_worker.py`、`tests/v1/executor/test_executor.py`。
+- 已覆盖符号：`EngineCore.shutdown`、`CoreEngineProcManager.shutdown`、`_shutdown_subprocesses`、`MultiprocExecutor._ensure_worker_termination`、`GPUWorker.shutdown`、`GPUModelRunner.shutdown`、`SingleDirectionOffloadingHandler.shutdown`、`CPUOffloadingWorker.shutdown`。
+- 新确认不变量：
+  1. `_transfers.clear()`、tensor/pool 断引用只证明 metadata cleared，不证明 DMA 或 device kernel 已完成。
+  2. event wait 失败后未被观察的 transfer 必须标记 `completion_unknown` 或 `not_observed`；本地计数为零不能升级证据。
+  3. store/load handler 是可独立尝试的 sibling；mmap backing release 依赖 device quiescence，不能照搬无条件 best effort 的安全结论。
+  4. native synchronize 抛错可形成 partial report，永久挂起只能由进程监督器 TERM/KILL 给出有界终止。
+  5. 当前外层 process deadline 与 MultiprocExecutor 内层 grace/TERM/KILL budget 分层存在，尚未共享一条端到端绝对 deadline。
+- 直接测试事实：已合入 PR #51622 的 mock/unit tests 覆盖双 handler 都运行、event sync failure 后跳过其余 events 并清空局部状态、device sync 成功/失败后均执行 region cleanup；不覆盖真实 DMA、native hang 或跨 rank ack。
+- 新知识债：结构化 `ShutdownReport`、record-before-destroy、rank/generation-scoped partial ack、单一绝对 deadline、真实 GPU/Connector/Executor fault matrix、kill 前 durable persistence。
+- 下一章：**ShutdownReport wire protocol——用 generation、rank-scoped partial ack 与单一绝对 deadline，把 Core 内证据安全送到进程外。**
+
 ## 下一批候选章节
 
-1. 下一主线：shutdown census fault injection——让 Executor、Connector 或 device synchronize 抛错/卡住，验证 partial evidence、`completion_unknown` 和共享 kill deadline。
+1. 下一主线：ShutdownReport wire protocol——定义 generation、rank/owner 状态、partial ack、共享 absolute deadline 与 kill 前持久化边界。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
