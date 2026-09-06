@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-05。
+最后更新：2026-09-06。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 26 已把 CPU_SIM 的无限等待语义与测试终止责任分开：用 test-only generation/cancel、wait-site census、snapshot-before-cancel 和 outer process deadline 构造可解释的负向验证；同时把 protocol blocked、residual state 与 payload layout mismatch 分成独立证据。下一步对齐 A2/A3/A5 的 ready/free flag、GM/UB/L1 slot 与 CPU_SIM census，明确哪些动态字段可跨 backend 比较。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 27 已将 CPU_SIM、A2/A3 与 A5 归一为 `publish/acquire/release/reuse` 四个 ownership 事件，并确认 TileData 的 release 点随 backend/path 改变：A2/A3 在 `TPOP` 内归还 GM slot，A5 local 与 CPU_SIM 依赖显式 `TFREE`。下一步研究 `DIR_BOTH` early-exit 与跨 dispatch generation，证明残余 ready/free credit 不会污染下一次同 `FlagID` 执行。
 
 ## 已完成章节
 
@@ -51,6 +51,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-03 | TPipe component 路径效应与 verifier 最小证明 | `PipePeerKey/component → endpoint SCF effect → branch/loop merge → peer equality → fail-closed` | [课程 24]({% post_url 2026-09-03-ptoas-tpipe-component-balance-verifier %}) |
 | 2026-09-04 | CPU_SIM TPipe FIFO 状态机与 payload ownership | `allocate → payload copy → record → wait/pop → free → slot reuse` | [课程 25]({% post_url 2026-09-04-pto-isa-cpu-sim-tpipe-fifo-state-machine %}) |
 | 2026-09-05 | CPU_SIM TPipe 故障注入与 FIFO census | `milestone → bounded wait → snapshot → cancel/join → quiescence` | [课程 26]({% post_url 2026-09-05-pto-isa-cpu-sim-tpipe-fault-injection-census %}) |
+| 2026-09-06 | A2/A3/A5 TPipe 故障证据边界 | `publish → acquire → backend-specific release → reuse` | [课程 27]({% post_url 2026-09-06-pto-isa-tpipe-a2a3-a5-fault-evidence-boundary %}) |
 
 ## ISA 知识地图
 
@@ -76,6 +77,7 @@ permalink: /learning/pto-curriculum/
 | Credit batching | 初始 SlotNum 个 entries 免等待；之后 consumer 每 SyncPeriod 个 pop 发一个 credit，producer 每 SyncPeriod 个 wrap 前消费一个 | 已讲透 depth=8/40 entries |
 | TPipe drain | pending=`consumer notified - producer steady waited`；析构精确消费余额，使同一 FlagID 在下一 dispatch 前回到零 credit | 已讲透正常完成路径 |
 | CPU_SIM TPipe fault census | 无限 `cv.wait` 是协议语义；负向测试需 snapshot-before-cancel、join-before-reset。quiescence 是 `occupied/busy/direction/borrow/commit/waiter` 集合，不要求 cursor、sequence 或旧 payload 清零 | 已讲透最小测试协议；实现待补 |
+| A2/A3/A5 TPipe evidence boundary | 可移植不变量是 `publish/acquire/release/reuse`；A2/A3 TileData 在 `TPOP` 内释放 GM ring，A5 local/CPU_SIM 由显式 `TFREE` 结束借用；不可观测设备状态必须记为 `unknown` | 已讲透语义对齐；device trace 待补 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -107,7 +109,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [a804045](https://github.com/hw-native-sys/pto-isa/commit/a8040450238f162985d8b596fbebeb54bfba2bf5) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 CPU `cv.wait/reset_for_cpu_sim` 终止边界、FIFO census 最小设计、跨 dispatch generation，以及 `06c68ccf` V2C 窄 view payload layout 回归 | ISA 深挖 17 |
+| pto-isa | [a804045](https://github.com/hw-native-sys/pto-isa/commit/a8040450238f162985d8b596fbebeb54bfba2bf5) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 CPU_SIM/A2A3/A5 `publish/acquire/release/reuse` 证据边界、GM/UB/L1 slot 生命周期与 backend-specific `TFREE` 语义 | ISA 深挖 18 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [bdcb319](https://github.com/hw-native-sys/PTOAS/commit/bdcb319d6ad43fe4a562e8911e05aebca228b848) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 entry lowering；新增 `PipePeerKey` component DFS、`resolveNoSplitComponent`、`PTOVerifyTFree` 三层 block-local 检查、默认 pipeline 缺口与 balance effect 最小设计 | 跨仓深挖 12 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
@@ -310,7 +312,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：A2/A3/A5 TPipe 故障证据对齐——把 CPU_SIM 的 direction/slot/borrow/waiter census 映射到 ready/free flag、GM/UB/L1 slot 与设备 trace，明确可比边界。
+1. 主线：`DIR_BOTH` early-exit 与跨 dispatch generation——为 ready/free credit 建立 generation-scoped trace，证明下一次同 `FlagID` 执行不会消费旧 credit。
 2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
 4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
@@ -381,3 +383,13 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：现有 4-slot/10-entry 流证明正常跨环推进；方向测试只证明短暂阻塞后可由匹配 peer 解锁；部分 `DIR_BOTH` 测试已检查正常终态字段；`06c68ccf` 的三个窄 Vec view case证明完成路径上的 layout/value contract。
 - 待验证设计：generation/cancel、wait-site census、immutable snapshot、missing pop/free/错误方向负向矩阵、同 key 无 reset 连续 dispatch，以及 cancellation failure 的 outer-process deadline。
 - 下一章：**A2/A3/A5 TPipe 故障证据对齐——ready/free flag、GM/UB/L1 slot 与 CPU_SIM census 的可比边界。**
+
+## 第 27 章课程账本增量
+
+- 源码基线：pto-isa [`a8040450`](https://github.com/hw-native-sys/pto-isa/commit/a8040450238f162985d8b596fbebeb54bfba2bf5)。
+- 新覆盖文件：`include/pto/common/fifo.hpp`，A2/A3 与 A5 的 `TPush.hpp/TPop.hpp/TFree.hpp`，两端 `tpushpop_dir_both`，以及 A2/A3 `tpushpop_cv_nosplit` repeated-dispatch 回归。
+- 新覆盖符号：A2/A3 `shouldWaitFree/shouldNotifyFree/countPendingFreeCredits`、`ffts_cross_core_sync/wait_flag_dev`；A5 local/GM direction、`set_intra_block/wait_intra_block`、`uses_local_no_split_credit_protocol`。
+- 新确认不变量：跨 backend 只比较 `publish/acquire/release/reuse` 抽象事件；A2/A3 TileData release 位于 `TPOP`，A5 local 与 CPU_SIM 位于显式 `TFREE`；cursor/count 相等不能证明 flag generation 已归零；不可观测状态必须保留为 `unknown`。
+- 直接测试事实：A2/A3 与 A5 的 `128×64×128, f32, FIFO_DEPTH=2, DIR_BOTH` 测试验证双向数值；A2/A3 depth-8/40-transfer/80-dispatch 回归验证正常 residual-credit drain；PR #240 提供历史穷举记录，但本文未重新上板。
+- 新知识债：A2/A3/A5 device trace adapter、missing ready/free bounded negative matrix、真实 timeout 的 blocked-site 归因、A5 GM/GlobalData release 组合、插桩开销与同 `FlagID` 跨代隔离。
+- 下一章：**DIR_BOTH early-exit 与跨 Dispatch generation——如何防止一侧残余 ready/free credit 污染下一次同 FlagID 执行。**
