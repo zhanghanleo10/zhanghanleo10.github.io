@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-06。
+最后更新：2026-09-07。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 27 已将 CPU_SIM、A2/A3 与 A5 归一为 `publish/acquire/release/reuse` 四个 ownership 事件，并确认 TileData 的 release 点随 backend/path 改变：A2/A3 在 `TPOP` 内归还 GM slot，A5 local 与 CPU_SIM 依赖显式 `TFREE`。下一步研究 `DIR_BOTH` early-exit 与跨 dispatch generation，证明残余 ready/free credit 不会污染下一次同 `FlagID` 执行。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 28 已把 TPipe 的空间 identity、路径 balance 与时间 generation 合并为跨 dispatch 复用条件：`DIR_BOTH` 两向必须同时 quiescent；析构 drain 不是 cancel；证据缺失时必须 poison/隔离而非复用同一 `FlagID`。TPipe 故障协议主线暂告一段落，下一步回到 ISA layout 基础，补全 A2/A3 与 A5 的 `TMOV` 代际合法矩阵。
 
 ## 已完成章节
 
@@ -52,6 +52,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-04 | CPU_SIM TPipe FIFO 状态机与 payload ownership | `allocate → payload copy → record → wait/pop → free → slot reuse` | [课程 25]({% post_url 2026-09-04-pto-isa-cpu-sim-tpipe-fifo-state-machine %}) |
 | 2026-09-05 | CPU_SIM TPipe 故障注入与 FIFO census | `milestone → bounded wait → snapshot → cancel/join → quiescence` | [课程 26]({% post_url 2026-09-05-pto-isa-cpu-sim-tpipe-fault-injection-census %}) |
 | 2026-09-06 | A2/A3/A5 TPipe 故障证据边界 | `publish → acquire → backend-specific release → reuse` | [课程 27]({% post_url 2026-09-06-pto-isa-tpipe-a2a3-a5-fault-evidence-boundary %}) |
+| 2026-09-07 | DIR_BOTH early-exit 与跨 dispatch generation | `spatial identity + path balance + temporal quiescence → safe reuse` | [课程 28]({% post_url 2026-09-07-pto-isa-tpipe-dir-both-cross-dispatch-generation %}) |
 
 ## ISA 知识地图
 
@@ -78,6 +79,7 @@ permalink: /learning/pto-curriculum/
 | TPipe drain | pending=`consumer notified - producer steady waited`；析构精确消费余额，使同一 FlagID 在下一 dispatch 前回到零 credit | 已讲透正常完成路径 |
 | CPU_SIM TPipe fault census | 无限 `cv.wait` 是协议语义；负向测试需 snapshot-before-cancel、join-before-reset。quiescence 是 `occupied/busy/direction/borrow/commit/waiter` 集合，不要求 cursor、sequence 或旧 payload 清零 | 已讲透最小测试协议；实现待补 |
 | A2/A3/A5 TPipe evidence boundary | 可移植不变量是 `publish/acquire/release/reuse`；A2/A3 TileData 在 `TPOP` 内释放 GM ring，A5 local/CPU_SIM 由显式 `TFREE` 结束借用；不可观测设备状态必须记为 `unknown` | 已讲透语义对齐；device trace 待补 |
+| TPipe temporal identity | `DIR_BOTH` 的 C2V/V2C 使用四个 flag identity；跨 dispatch 复用要求两向同时 quiescent。当前实现没有显式 generation，析构只 drain 正常 pending credit；unknown/early-exit 必须 poison 或重建 context | 已讲透安全边界；generation/cancel 实现待补 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -109,7 +111,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [a804045](https://github.com/hw-native-sys/pto-isa/commit/a8040450238f162985d8b596fbebeb54bfba2bf5) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 CPU_SIM/A2A3/A5 `publish/acquire/release/reuse` 证据边界、GM/UB/L1 slot 生命周期与 backend-specific `TFREE` 语义 | ISA 深挖 18 |
+| pto-isa | [a804045](https://github.com/hw-native-sys/pto-isa/commit/a8040450238f162985d8b596fbebeb54bfba2bf5) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 DIR_BOTH 四 flag 映射、A2/A3/A5 析构 drain、CPU_SIM shared-state key 与 cross-dispatch generation/quiescence 边界 | ISA 深挖 19 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [bdcb319](https://github.com/hw-native-sys/PTOAS/commit/bdcb319d6ad43fe4a562e8911e05aebca228b848) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 entry lowering；新增 `PipePeerKey` component DFS、`resolveNoSplitComponent`、`PTOVerifyTFree` 三层 block-local 检查、默认 pipeline 缺口与 balance effect 最小设计 | 跨仓深挖 12 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
@@ -296,7 +298,7 @@ permalink: /learning/pto-curriculum/
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
 - Online Softmax recurrence 与四阶段正常完成路径已闭合；尚欠 S1 tail、全 mask 行、P fp16/sum fp32 误差上界、exp-ring poison/wrap、stage delay 和 early-exit cancellation 注入。
 - Reduce 的 accumulator widening、整数 overflow、poison-padding 与 CPU/A2A3/A5 parity contract。
-- producer/consumer 数量不匹配或 early-exit 时的 TPipe cancellation、flag 清理与超时协议；CPU_SIM 还缺 test-only bounded wait、FIFO census 和跨 dispatch 无 reset 的负向矩阵。
+- producer/consumer 数量不匹配或 early-exit 时的 TPipe cancellation、flag 清理与超时协议；课程已确定两向 quiescence、generation 与 poison-on-unknown 边界，但 CPU_SIM/device 仍缺实现、snapshot、bounded wait 和 same-key/no-reset 负向矩阵。
 - V2C、DIR_BOTH、同一 kernel 内顺序复用同 FlagID、ACL Graph replay 下的 pending-credit 回归。
 - A2/A3 与 A5 在 ready/free credit、local SRAM/GM ring 与析构语义上的逐点差异。
 - A2/A3 GM ring 与 A5 consumer SRAM 的 TPUSH/TPOP 差异。
@@ -312,12 +314,11 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：`DIR_BOTH` early-exit 与跨 dispatch generation——为 ready/free credit 建立 generation-scoped trace，证明下一次同 `FlagID` 执行不会消费旧 credit。
-2. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
-3. 对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 TMOV 合法矩阵与代际漂移。
-4. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 建立 cross-dispatch CI contract。
-5. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
-6. 用 device trace 量化 QK/PV 与 P/GU overlap、reduce tree、credit batching和 Compact 的同步/搬运 stall。
+1. 主线：对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 `TMOV` 合法矩阵、shape/layout/location 前置条件与代际漂移。
+2. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 实现 generation-aware cross-dispatch CI contract。
+3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
+4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
+5. 用 device trace 量化 QK/PV 与 P/GU overlap、reduce tree、credit batching和 Compact 的同步/搬运 stall。
 
 ## 第二次七章知识图谱回顾（课程 08–14）
 
@@ -393,3 +394,25 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：A2/A3 与 A5 的 `128×64×128, f32, FIFO_DEPTH=2, DIR_BOTH` 测试验证双向数值；A2/A3 depth-8/40-transfer/80-dispatch 回归验证正常 residual-credit drain；PR #240 提供历史穷举记录，但本文未重新上板。
 - 新知识债：A2/A3/A5 device trace adapter、missing ready/free bounded negative matrix、真实 timeout 的 blocked-site 归因、A5 GM/GlobalData release 组合、插桩开销与同 `FlagID` 跨代隔离。
 - 下一章：**DIR_BOTH early-exit 与跨 Dispatch generation——如何防止一侧残余 ready/free credit 污染下一次同 FlagID 执行。**
+
+
+## 第四次七章知识图谱回顾（课程 22–28）
+
+- **entry borrow（22）**：从 `TALLOC/TPUSH/TPOP/TFREE` 建立单 entry 的 ownership 与 last-use。
+- **路径余额（23）**：branch/loop 必须保持 peer transaction delta；析构 drain 只结算正常 credit。
+- **component proof（24）**：component identity、局部 borrow、跨 endpoint effect equality 是三份独立证明。
+- **动态 FIFO（25）**：CPU_SIM 将 `allocate/record/wait/free`、payload 与 slot reuse 落为可观测状态机。
+- **故障证据（26）**：负向测试必须 bounded wait、snapshot-before-cancel、join-before-reset。
+- **跨 backend 对齐（27）**：只以 `publish/acquire/release/reuse` 比较 A2/A3、A5 和 CPU_SIM，不把不可见状态猜成零。
+- **时间隔离（28）**：空间 identity 与路径 balance 之外，还需 generation/quiescence；证据 unknown 时必须 poison。
+- **当前知识图**：`compiler component → entry ownership → path balance → backend flag/slot → fault evidence → temporal isolation` 已连通。下一阶段回到尚未闭合的 ISA layout/compute 合法矩阵。
+
+## 第 28 章课程账本增量
+
+- 源码基线：pto-isa [`a8040450`](https://github.com/hw-native-sys/pto-isa/commit/a8040450238f162985d8b596fbebeb54bfba2bf5)。
+- 新覆盖文件：`include/pto/cpu/TPush.hpp`，A2/A3 与 A5 的 `TPush.hpp/TPop.hpp/TFree.hpp`，`tpushpop_dir_both_concurrent` 与 `tpushpop_cv_nosplit` repeated-dispatch 回归。
+- 新覆盖符号：C2V/V2C 四 flag mapping、A2/A3 `countPendingFreeCredits/~TPipe`、A5 `uses_local_no_split_credit_protocol/~TPipe`、CPU_SIM `GetSharedState/reset_for_cpu_sim/commit_seq`。
+- 新确认不变量：`Q(g)=Q(g,C2V)∧Q(g,V2C)`；空间 identity 不等于时间 identity；generation 不能替代 in-flight DMA/worker quiescence；证据缺失必须阻止同 component 复用。
+- 直接测试事实：正常 DIR_BOTH 并发覆盖空间 ring 隔离；depth-8/40-transfer/80-dispatch 覆盖正常精确 drain；CPU_SIM tests 在 case 前 reset。尚无 same-key/no-reset early-exit、旧 waiter/旧 DMA 跨代测试。
+- 新知识债：generation-aware supervisor、parent-owned snapshot、device trace adapter、missing ready/free 真机负向矩阵、ACL Graph replay，以及 A5 GM/GlobalData 跨代测试。
+- 下一章：**TMOV 代际合法矩阵——A2/A3 与 A5 的 ND/NZ/ZN、Mat/Left/Right 迁移边界。**
