@@ -26,7 +26,7 @@ backend-specific release point
 
 ## 前置知识
 
-对一条方向为 (d) 的 FIFO transaction，可以把生命周期写成：
+对一条方向为 $d$ 的 FIFO transaction，可以把生命周期写成：
 
 \[
 \text{free slot}\xrightarrow{allocate/write/publish}
@@ -40,7 +40,7 @@ backend-specific release point
 ## 今日两个核心问题
 
 1. `DIR_BOTH` 为什么不是“一条带方向位的协议”，而是共享一个 `TPipe` 对象的两套 ready/free 信用？
-2. 如果 dispatch (g) 在一侧 early-exit，怎样证明 dispatch (g+1) 不会消费旧 payload 或旧 credit？
+2. 如果 dispatch $g$ 在一侧 early-exit，怎样证明 dispatch $g+1$ 不会消费旧 payload 或旧 credit？
 
 结论先说：**当前实现有空间身份，没有显式时间身份。** `FlagID`、ring base 和 slot index 能回答“是哪条 pipe、哪个槽”，不能回答“属于哪一次 dispatch”。因此安全复用的最小条件不是“重新构造了 `TPipe`”，而是上一代已经被证明 quiescent；若证明失败，必须 poison 该上下文并拒绝复用。
 
@@ -77,7 +77,7 @@ A2/A3 [`TPush.hpp`](https://github.com/hw-native-sys/pto-isa/blob/a8040450238f16
 
 ### 跨代安全条件
 
-把一次 dispatch 的代数记为 (g)，方向为 (d\in\{C2V,V2C\})。可复用条件至少是：
+把一次 dispatch 的代数记为 $g$，方向为 $d\in\{C2V,V2C\}$。可复用条件至少是：
 
 \[
 Q(g,d)=
@@ -156,12 +156,12 @@ sequenceDiagram
 
 设：
 
-- `Tile = 16×16×f32`，每 entry 为 (16×16×4=1024) B；
+- `Tile = 16×16×f32`，每 entry 为 $16×16×4=1024$ B；
 - `SlotNum=2`，故 `SyncPeriod=2`；
 - `TPipe<0, DIR_BOTH, 1024, 2>`；
 - C2V flags 为 0/1，V2C flags 为 2/3；两个方向各有 2×1024 B ring。
 
-dispatch (g=7)：
+dispatch $g=7$：
 
 | 步骤 | C2V | V2C | 结果 |
 | --- | --- | --- | --- |
@@ -169,7 +169,7 @@ dispatch (g=7)：
 | 2 | Vector 在 `TPOP` 前 early-exit | Vector→Cube 正常完成一项 | 两向终态不对称 |
 | 3 | producer 离开作用域 | — | free 1 未产生；正常析构可能等待 |
 
-如果外层强杀了这一轮并立即以相同参数启动 (g=8)，新 Vector 看到的 ready 0 本身不携带 `g=7` 标签。它可能消费旧 signal/旧 1024 B payload；反过来，错误残留的 free credit 也可能使新 producer 过早覆盖尚未完成的 slot。具体设备 flag 在强杀后的保存行为，公开代码没有给出，必须记为 **unknown**；但“无法区分新旧”已足以否定无条件复用。
+如果外层强杀了这一轮并立即以相同参数启动 $g=8$，新 Vector 看到的 ready 0 本身不携带 `g=7` 标签。它可能消费旧 signal/旧 1024 B payload；反过来，错误残留的 free credit 也可能使新 producer 过早覆盖尚未完成的 slot。具体设备 flag 在强杀后的保存行为，公开代码没有给出，必须记为 **unknown**；但“无法区分新旧”已足以否定无条件复用。
 
 CPU_SIM 中反例更直接：静态 `SharedState` 仍含 `transfer_dirs[C2V]`、非零 `occupied` 与 `commit_seq`。不 reset，新 consumer 会把旧 entry 当作最早匹配项；并发 reset，又可能让旧 waiter 跨代醒来。
 
@@ -206,7 +206,7 @@ CPU_SIM 中反例更直接：静态 `SharedState` 仍含 `transfer_dirs[C2V]`、
 
 **未覆盖：**missing C2V acquire、missing A5/CPU_SIM release、仅一向完成、旧 producer 延迟到下一代、同 FlagID graph replay、真实 device timeout 后的 flag/slot snapshot。当前仓库也没有 production generation/cancel API。
 
-最小负向矩阵应记录 `{generation, direction, event, slot, seq, flag_id, core}`，在 (g) 注入缺失事件，保存 snapshot，再尝试 (g+1)。期望不是“侥幸算对”，而是 bounded 地拒绝复用或证明旧执行者已终止；任何缺失字段都保留为 `unknown`。
+最小负向矩阵应记录 `{generation, direction, event, slot, seq, flag_id, core}`，在 $g$ 注入缺失事件，保存 snapshot，再尝试 $g+1$。期望不是“侥幸算对”，而是 bounded 地拒绝复用或证明旧执行者已终止；任何缺失字段都保留为 `unknown`。
 
 ## 与前后章节的连接
 
