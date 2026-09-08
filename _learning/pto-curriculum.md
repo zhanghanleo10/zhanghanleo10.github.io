@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-07。
+最后更新：2026-09-08。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 28 已把 TPipe 的空间 identity、路径 balance 与时间 generation 合并为跨 dispatch 复用条件：`DIR_BOTH` 两向必须同时 quiescent；析构 drain 不是 cancel；证据缺失时必须 poison/隔离而非复用同一 `FlagID`。TPipe 故障协议主线暂告一段落，下一步回到 ISA layout 基础，补全 A2/A3 与 A5 的 `TMOV` 代际合法矩阵。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 29 已补全 `TMOV` 的核心代际矩阵：A5 为 Vec ND→NZ/ZN 提供显式重排，A2/A3 的 generic Vec copy 不具有同等语义；同名 `TileLeft` 在 A2/A3 展开为 ZZ、在 A5 展开为 NZ。下一步继续区分 `TTRANS/TRESHAPE/TMOV` 的逻辑坐标、view 与物理重排职责。
 
 ## 已完成章节
 
@@ -53,6 +53,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-05 | CPU_SIM TPipe 故障注入与 FIFO census | `milestone → bounded wait → snapshot → cancel/join → quiescence` | [课程 26]({% post_url 2026-09-05-pto-isa-cpu-sim-tpipe-fault-injection-census %}) |
 | 2026-09-06 | A2/A3/A5 TPipe 故障证据边界 | `publish → acquire → backend-specific release → reuse` | [课程 27]({% post_url 2026-09-06-pto-isa-tpipe-a2a3-a5-fault-evidence-boundary %}) |
 | 2026-09-07 | DIR_BOTH early-exit 与跨 dispatch generation | `spatial identity + path balance + temporal quiescence → safe reuse` | [课程 28]({% post_url 2026-09-07-pto-isa-tpipe-dir-both-cross-dispatch-generation %}) |
+| 2026-09-08 | TMOV 的 A2/A3 与 A5 代际合法矩阵 | `target + TileType + layout → semantic branch → physical representation` | [课程 29]({% post_url 2026-09-08-pto-isa-tmov-generation-layout-matrix %}) |
 
 ## ISA 知识地图
 
@@ -85,6 +86,7 @@ permalink: /learning/pto-curriculum/
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
 | Cube pipe chain | TLOAD/MTE2 → TMOV/MTE1 → TMATMUL/M → TSTORE/FIX，含反向复用 event 与末尾 drain | 已讲透一个真实实例 |
 | TMOV Mat→Left/Right（A2/A3） | 保持有效域逻辑值，完成 L1→L0 role transfer；A 的 NZ→ZZ 改外层 block order，B 的 ZN→ZN 保布局搬运 | 已讲透核心路径 |
+| TMOV 代际合法矩阵 | A5 显式支持 Vec ND→NZ/ZN，并扩展 Acc→Vec、Vec→Mat 与 ScaleLeft/ScaleRight；A2/A3 generic Vec→Vec 不能当 layout repack。`TileLeft` 在 A2/A3 为 ZZ、A5 为 NZ，`TileRight` 均为 ZN | 核心矩阵已闭合；tail/negative/perf 待补 |
 | TMOV compact/tail | `CompactMode::Normal` 从 valid 推导 fractal/C0 对齐的 MTE1 envelope；不缩小 allocation，也不保证 padding 为零 | 已讲透 A2/A3 核心路径 |
 | Tail GEMM ownership | source capacity 覆盖 envelope；TEXTRACT 写 envelope；`mad(m,k,n)` 与 TSTORE 把语义重新收紧到 valid | 已讲透一个真实 int8 case |
 | Row/Column Reduce | `TROWSUM` 只定义 `R×1`、`TCOLSUM` 只定义 `1×C`；valid prefix 控制数学域，A2/A3 scratch 与 A5 register path 资源需求不同，binary/sequential 改变依赖深度与浮点顺序 | 已讲透 sum 基础 |
@@ -111,7 +113,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [a804045](https://github.com/hw-native-sys/pto-isa/commit/a8040450238f162985d8b596fbebeb54bfba2bf5) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 DIR_BOTH 四 flag 映射、A2/A3/A5 析构 drain、CPU_SIM shared-state key 与 cross-dispatch generation/quiescence 边界 | ISA 深挖 19 |
+| pto-isa | [5a4f74c](https://github.com/hw-native-sys/pto-isa/commit/5a4f74cbf627d4aac2e0ce10d5e0d8b118343265) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A2/A3/A5 `TMOV` 分派、target-conditioned `TileLeft/TileRight` alias、A5 ND→NZ/ZN kernel 与 physical-byte golden | ISA 深挖 20 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [bdcb319](https://github.com/hw-native-sys/PTOAS/commit/bdcb319d6ad43fe4a562e8911e05aebca228b848) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 entry lowering；新增 `PipePeerKey` component DFS、`resolveNoSplitComponent`、`PTOVerifyTFree` 三层 block-local 检查、默认 pipeline 缺口与 balance effect 最小设计 | 跨仓深挖 12 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
@@ -123,6 +125,9 @@ permalink: /learning/pto-curriculum/
 - Tile capacity shape 是静态资源/type contract；valid region 是本次运行的真实语义域。
 - Valid region 是左上角连续前缀；区外元素除非指令明示，否则不得假设为零或保持不变。
 - Tile location 与 layout 都参与指令合法性；shape/dtype 相同不足以证明两个 Tile 可互换。
+- `TMOV` 的合法性键必须包含 target、source/destination TileType 与展开后的 layout；A5 的 Vec ND→NZ/ZN 命中显式重排分支，A2/A3 generic Vec copy 不能替代该语义。
+- `TileLeft` 是 target-conditioned source alias：A2/A3 展开为 ZZ，A5 展开为 NZ；`TileRight` 在两代均为 ZN。同名 alias 不构成跨 target physical ABI。
+- A5 ND→ZN 要求同 dtype、`Rows % (32/sizeof(T)) == 0` 且 `Cols % 16 == 0`；逻辑有效域必须被 source 已初始化域覆盖，完成后的跨 pipe consumer 仍需显式或编译器生成的同步。
 - GlobalTensor 不拥有 GM；其有效期不得超过底层 allocation，且 stride 单位固定为元素。
 - 五维坐标到 GM 的元素 offset 是 `Σ(ik×stridek)`；layout 负责从 Tile `(row,col)` 恢复五维坐标，不能替代 stride。
 - ND 的 `validRows=shape0×shape1×shape2×shape3`、`validCols=shape4`；DN 的 `validRows=shape3`、`validCols=shape0×shape1×shape2×shape4`。
@@ -293,7 +298,7 @@ permalink: /learning/pto-curriculum/
 - NZ/5HD 的 C0 盒化五维地址映射及其与二维 Tile 的关系。
 - GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract；下界 clamp 已定位，上界/overflow 未闭合。
 - static/dynamic partition lowering 重复实现的等价性与长期漂移保护。
-- TMOV、TRESHAPE、transpose 与 ND/NZ/ZN 布局转换的完整合法矩阵。
+- `TMOV` 的 A2/A3/A5 核心矩阵已闭合；仍欠 `TTRANS/TRESHAPE` 与 TMOV 的完整职责矩阵、partial-valid/tail、非法组合 negative tests 和 device stall 证据。
 - A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region、padding 读取与最终 store；缺少 poison-padding 边界测试。
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
 - Online Softmax recurrence 与四阶段正常完成路径已闭合；尚欠 S1 tail、全 mask 行、P fp16/sum fp32 误差上界、exp-ring poison/wrap、stage delay 和 early-exit cancellation 注入。
@@ -314,7 +319,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：对照 A5 的 ND→NZ/ZN 与 A2/A3 Mat→Left/Right，补全 `TMOV` 合法矩阵、shape/layout/location 前置条件与代际漂移。
+1. 主线：区分 `TTRANS/TRESHAPE/TMOV` 的逻辑坐标、view 与物理重排职责，并建立 shape/layout/location 合法矩阵。
 2. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 实现 generation-aware cross-dispatch CI contract。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -416,3 +421,13 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：正常 DIR_BOTH 并发覆盖空间 ring 隔离；depth-8/40-transfer/80-dispatch 覆盖正常精确 drain；CPU_SIM tests 在 case 前 reset。尚无 same-key/no-reset early-exit、旧 waiter/旧 DMA 跨代测试。
 - 新知识债：generation-aware supervisor、parent-owned snapshot、device trace adapter、missing ready/free 真机负向矩阵、ACL Graph replay，以及 A5 GM/GlobalData 跨代测试。
 - 下一章：**TMOV 代际合法矩阵——A2/A3 与 A5 的 ND/NZ/ZN、Mat/Left/Right 迁移边界。**
+
+## 第 29 章课程账本增量
+
+- 源码基线：pto-isa [`5a4f74cb`](https://github.com/hw-native-sys/pto-isa/commit/5a4f74cbf627d4aac2e0ce10d5e0d8b118343265)；直接相关 ND→ZN 合入提交为 [`5e98634a`](https://github.com/hw-native-sys/pto-isa/commit/5e98634aadfef35468b9bf8ae96fe8e2d531973c)。
+- 新覆盖文件：A2/A3 与 A5 `include/pto/npu/*/TMov.hpp`、`include/pto/common/pto_tile.hpp`、A5 `tmov_nd2nz/tmov_nd2zn` kernel、main 与 golden generator。
+- 新覆盖符号：A2/A3 `TMOV_TILE_IMPL/TMovToLeft/TMovToRight`；A5 `CommonCheck/TMovND2NZ/TMovND2ZN/TMOV_TILE_IMPL`；target-conditioned `TileLeft/TileRight` aliases。
+- 新确认不变量：`TMOV` 的 semantic key 必须包含 target、TileType 和展开后的 layout；A5 ND→NZ/ZN 是显式物理重排，A2/A3 generic Vec copy 不能冒充；`TileLeft` 同名不等于跨代同格式；logical valid values 保持不代表 byte offset 保持。
+- 直接测试事实：A5 ND→NZ 现有真机 case 覆盖 `hifloat8` 的三个 shape；ND→ZN 覆盖三类 element width 与四个 shape，均比较完整 physical bytes。尚无非法组合 negative matrix、partial-valid/tail poison、A2/A3 误用反例或 stall trace。
+- 新知识债：`TTRANS/TRESHAPE/TMOV` 职责矩阵、A5 tail/valid contract、`TMOV→TMATMUL` consumer E2E、跨 target expanded-type cache key 与真实 UB/Vector/MTE stall。
+- 下一章：**`TTRANS/TRESHAPE` 与 `TMOV` 的边界——逻辑坐标、view 与物理重排分别由谁负责。**
