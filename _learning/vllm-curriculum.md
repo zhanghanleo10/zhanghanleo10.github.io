@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 27 章已从 `ENGINE_CORE_DEAD`、normal `EngineCoreOutputs` 与 process manager deadline 推导出 generation/rank/sequence-scoped `ShutdownReport`；下一章验证 progress snapshot 如何在 SIGKILL 前进入 parent-owned durable sink。
+- 当前主线：第 28 章已从 child fatal/cleanup 顺序与 parent SIGTERM→join→SIGKILL 边界推导出 record-before-destroy、parent-owned latest view 和 durable checkpoint；下一章把 `ShutdownProgress` 接入 Worker→Executor→Core，并统一 MP/Ray/external launcher terminal contract。
 
 ## 已完成章节
 
@@ -40,6 +40,7 @@
 | 2026-09-05 25 | `OutputProcessor registry → Scheduler/deferred free → BlockPool refcount → Connector job → Worker/device teardown` | [`6cbb3c15`](https://github.com/vllm-project/vllm/commit/6cbb3c154ef1449d2b3c9131a237f36faa695734) | [Shutdown Resource Census 五层终态]({{ '/articles/vllm-shutdown-resource-census-five-layer-terminal-state/' | relative_url }}) |
 | 2026-09-06 26 | `CPU KV offload event failure → sibling cleanup → device sync failure → mmap release → process boundary` | [`f4eccdad`](https://github.com/vllm-project/vllm/commit/f4eccdadefc6501fafeb1a0bf7f171ff24f984b0) | [Shutdown Fault Injection 与 Completion Unknown]({{ '/articles/vllm-shutdown-fault-injection-completion-unknown/' | relative_url }}) |
 | 2026-09-07 27 | `AsyncLLM.shutdown → process manager deadline → Core progress/fatal wire → Python/Rust receiver → rank-scoped aggregate` | [`199cb9b9`](https://github.com/vllm-project/vllm/commit/199cb9b964822e59ab9b58d88e7be31eb419a2ae) | [ShutdownReport 跨进程协议]({{ '/articles/vllm-shutdown-report-wire-protocol/' | relative_url }}) |
+| 2026-09-09 28 | `child record-before-destroy → parent latest view → durable checkpoint → deadline 合成 missing final` | [`a97dacb7`](https://github.com/vllm-project/vllm/commit/a97dacb7106ee49f39f3d1fc6ae1800ff724e01d) | [Progress Snapshot 与 Parent-owned Durable Sink]({{ '/articles/vllm-shutdown-progress-snapshot-durable-sink/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -296,6 +297,9 @@
 - `get_engine_process_shutdown_timeout`
 - `rust::engine-core-client::transport::run_output_loop`
 - `ElasticState._progress_removing_engine`（`SHUTDOWN_COMPLETE` notification）
+- `DPSupervisor._shutdown_children`
+- `_join_processes_with_timeout`
+- `dump_engine_exception/prepare_object_to_dump`
 
 ## 已确认不变量
 
@@ -442,6 +446,11 @@
 138. DP/TP shutdown aggregate 的成功条件必须量化所有 expected ranks；missing final 是显式失败终态，不能从分母中删除。
 139. shutdown progress 必须用 generation 与 report sequence 隔离旧实例迟到、重复和乱序帧；PID、request ID 或单向 bool latch 均不足以防 ABA。
 140. generic process manager 在本层使用同一 monotonic deadline，但跨机/跨 owner 不能比较裸 monotonic timestamp；应由 parent 持有总预算并逐层传递剩余时间。
+141. shutdown evidence 必须遵循 record-before-destroy：危险 owner 开始前先发 `started`，成功返回后才可发 `completed`；只有 started 时后续状态仍为 unknown。
+142. accepted progress 的 owner 必须比被观察 child 活得更久；parent 内存 latest view 可抗 child crash，durable checkpoint 才能进一步抗 supervisor crash。
+143. collector 必须先比较 generation，再在同一 `(generation, engine_index, rank)` 内比较 `report_seq`；旧代高 sequence 不得覆盖当前代。
+144. parent deadline 到达时必须保留每个 expected rank 的最近证据，并为缺 final 合成 `abandoned_by_deadline/completion_unknown`，不得缩小 expected set。
+145. shutdown progress 必须是有界 Host 控制帧；原始 prompt/tensor、无界 repr 和未经定义的 child monotonic timestamp 不能进入稳定 wire contract。
 
 ## 前置依赖与版本注意
 
@@ -510,7 +519,7 @@
 
 - fatal dump 缺少 Tensor/anon_repr 隐私矩阵、原异常保留、matched batch-queue plan 与 make_stats drain/reset 的直接测试。
 - 缺少 deterministic、versioned、bounded 的 structured crash envelope；当前 dict/set 字段顺序不稳定，日志不适合作为机器重放格式。
-- 缺少独立 supervisor 持久化、rank/stream progress、KV block refcount/free-list 摘要，以及 SIGKILL/native crash 下的证据保全。
+- 尚未实现 `ShutdownProgress`、独立控制通道与 parent-owned collector；缺 owner/rank latest snapshot、KV block refcount/free-list 摘要、durability 等级，以及 SIGKILL/native crash 下的可恢复 checkpoint。
 - `scheduled_spec_decode_tokens` 与 connector/mm metadata 的字段级敏感性尚未形成统一审计和日志大小上限。
 
 - ModelRunner exception 的现有 E2E 已覆盖 fatal fan-out、new-admission 拒绝和 GPU memory threshold，但缺 owner-specific resource census；进程销毁不能替代 F4 精确断言。
@@ -582,9 +591,24 @@
 - 新知识债：实际 schema 与 tagged envelope、Python/Rust golden、Worker→Executor→Core 聚合、parent durable sink、跨机 clock-domain、重复/乱序/旧 generation/缺 final 故障矩阵。
 - 下一章：**Kill 前的最后一份证据——progress snapshot、parent-owned durable sink 与重复/乱序/缺失报告故障注入。**
 
+## 第 28 章课程账本增量
+
+- 源码基线：[`a97dacb7`](https://github.com/vllm-project/vllm/commit/a97dacb7106ee49f39f3d1fc6ae1800ff724e01d)；该提交更新 EC Connector 文档，与本文 shutdown 路径无直接修改。
+- 已覆盖文件：`vllm/v1/engine/async_llm.py`、`engine/core.py`、`engine/core_client.py`、`engine/utils.py`、`v1/utils.py`、`logging_utils/dump_input.py`、`entrypoints/launchers/dp_supervisor.py`、`tests/v1/engine/test_startup_watch_processes.py`、`tests/entrypoints/launchers/test_dp_supervisor.py`。
+- 已覆盖符号：`AsyncLLM.shutdown`、`MPClient.shutdown`、`CoreEngineProcManager.shutdown`、generic `shutdown`、`run_engine_core` fatal/finally 顺序、`EngineCore.shutdown`、`_send_engine_dead`、`process_output_sockets`、`DPSupervisor._shutdown_children`、`_join_processes_with_timeout`、`dump_engine_exception`。
+- 新确认不变量：
+  1. final report 不能由可能被 SIGKILL 的 child 独占；child 生成 progress，parent 接受、排序并保存。
+  2. record-before-destroy 的 `started` 只能定位 blocked owner，不能升级为 failed 或 completed。
+  3. generation 先于 sequence 比较；sequence 只在同一 engine/rank/generation 内单调。
+  4. deadline 后保留 latest snapshot，为每个 missing final 合成 abandoned/unknown；正常 rank 的 final 不能替代缺失 rank。
+  5. parent memory 只抗 child crash；跨 supervisor crash 需要明确 fsync/ACK 语义的 durable sink。
+- 直接测试事实：startup/process-manager 测试覆盖 timeout 选择、幂等和 clean ROCm cleanup；DP supervisor 的 10 秒 mock drain 验证等待预算与最终进程退出，SIGKILL 场景验证整体收敛。二者都不验证 progress frame、latest snapshot 或 kill 前 checkpoint。
+- 新知识债：实际 schema、独立有界控制通道、parent WAL/checkpoint 与 durability 等级、Python/Rust golden、Worker→Executor→Core 聚合、MP/Ray/external launcher expected-set、真实 CUDA/NCCL hang 与磁盘/parent crash 矩阵。
+- 下一章：**Worker→Executor→Core 的 ShutdownProgress 聚合——device fence、rank expected-set 与 MP/Ray/external launcher terminal contract。**
+
 ## 下一批候选章节
 
-1. 下一主线：Kill 前持久化边界——progress snapshot、parent-owned durable sink、重复/乱序/旧 generation/缺 final 故障注入。
+1. 下一主线：Worker→Executor→Core 的 `ShutdownProgress` 聚合——device fence evidence、expected-rank set 与 MP/Ray/external launcher terminal contract。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
@@ -615,3 +639,12 @@
 - 已闭合：正常取消与 fatal failure 的资源语义已经分离；HTTP 终态、Engine admission health 和 forward progress 也不再混为同一不变量。
 - 当前最大盲区：fatal-path 测试还不能同时证明所有 request collector、Scheduler registry、KV/connector refs、Worker/device context 随 Engine 退出归零；dump 也不是 durable snapshot。
 - 后续路线调整：以 fault injection、structured diagnostics 和资源归零测试收束故障诊断阶段，再回访 connector、backpressure 与跨 backend parity。
+
+
+## 第四次七章知识图谱回顾（第 22–28 章）
+
+- 已打通：`fatal trigger → shutdown owner chain → cleanup fault isolation → five-layer census → completion_unknown → rank/generation report → parent-owned durable evidence`。
+- 已闭合：进程退出、Host metadata 清零、device completion 与跨 rank aggregate 已被拆成不同证据；SIGKILL 后缺失 final 只能成为 abandoned/unknown。
+- 当前最大盲区：`ShutdownProgress` 仍是设计，尚未从 Worker/ModelRunner 的 fence 与资源 census 实际聚合到 Executor/Core，也没有 MP/Ray/external launcher 的同构测试。
+- 后续路线调整：先建立 schema、collector、Python/Rust golden 和跨 backend fault matrix，再回访 alive-but-stalled Worker、Connector 与真实 GPU/NCCL hang。
+
