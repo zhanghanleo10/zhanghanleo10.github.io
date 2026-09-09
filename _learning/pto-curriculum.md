@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-08。
+最后更新：2026-09-09。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 29 已补全 `TMOV` 的核心代际矩阵：A5 为 Vec ND→NZ/ZN 提供显式重排，A2/A3 的 generic Vec copy 不具有同等语义；同名 `TileLeft` 在 A2/A3 展开为 ZZ、在 A5 展开为 NZ。下一步继续区分 `TTRANS/TRESHAPE/TMOV` 的逻辑坐标、view 与物理重排职责。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 30 已用逻辑坐标、物理字节与 storage identity 三个维度闭合 `TRESHAPE/TTRANS/TMOV` 的职责边界：当前 `TRESHAPE` 是 backing alias，`TTRANS` 生成独立转置结果，`TMOV` 执行 target-specific representation/location conversion。下一步把 partial-valid 与 padding 风险落成组合合法性和 negative matrix。
 
 ## 已完成章节
 
@@ -54,6 +54,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-06 | A2/A3/A5 TPipe 故障证据边界 | `publish → acquire → backend-specific release → reuse` | [课程 27]({% post_url 2026-09-06-pto-isa-tpipe-a2a3-a5-fault-evidence-boundary %}) |
 | 2026-09-07 | DIR_BOTH early-exit 与跨 dispatch generation | `spatial identity + path balance + temporal quiescence → safe reuse` | [课程 28]({% post_url 2026-09-07-pto-isa-tpipe-dir-both-cross-dispatch-generation %}) |
 | 2026-09-08 | TMOV 的 A2/A3 与 A5 代际合法矩阵 | `target + TileType + layout → semantic branch → physical representation` | [课程 29]({% post_url 2026-09-08-pto-isa-tmov-generation-layout-matrix %}) |
+| 2026-09-09 | TRESHAPE/TTRANS/TMOV 的三重边界 | `logical coordinates + physical bytes + storage identity → correct operator` | [课程 30]({% post_url 2026-09-09-pto-isa-treshape-ttrans-tmov-boundary %}) |
 
 ## ISA 知识地图
 
@@ -87,6 +88,7 @@ permalink: /learning/pto-curriculum/
 | Cube pipe chain | TLOAD/MTE2 → TMOV/MTE1 → TMATMUL/M → TSTORE/FIX，含反向复用 event 与末尾 drain | 已讲透一个真实实例 |
 | TMOV Mat→Left/Right（A2/A3） | 保持有效域逻辑值，完成 L1→L0 role transfer；A 的 NZ→ZZ 改外层 block order，B 的 ZN→ZN 保布局搬运 | 已讲透核心路径 |
 | TMOV 代际合法矩阵 | A5 显式支持 Vec ND→NZ/ZN，并扩展 Acc→Vec、Vec→Mat 与 ScaleLeft/ScaleRight；A2/A3 generic Vec→Vec 不能当 layout repack。`TileLeft` 在 A2/A3 为 ZZ、A5 为 NZ，`TileRight` 均为 ZN | 核心矩阵已闭合；tail/negative/perf 待补 |
+| TRESHAPE/TTRANS/TMOV 职责矩阵 | `TRESHAPE` 只重绑同一 backing 并改变 type/shape view；`TTRANS` 写出 `dst[c,r]=src[r,c]` 的独立结果；`TMOV` 保持逻辑值但可改变 target-specific representation/location | 主语义已闭合；partial-valid/alias negative/perf 待补 |
 | TMOV compact/tail | `CompactMode::Normal` 从 valid 推导 fractal/C0 对齐的 MTE1 envelope；不缩小 allocation，也不保证 padding 为零 | 已讲透 A2/A3 核心路径 |
 | Tail GEMM ownership | source capacity 覆盖 envelope；TEXTRACT 写 envelope；`mad(m,k,n)` 与 TSTORE 把语义重新收紧到 valid | 已讲透一个真实 int8 case |
 | Row/Column Reduce | `TROWSUM` 只定义 `R×1`、`TCOLSUM` 只定义 `1×C`；valid prefix 控制数学域，A2/A3 scratch 与 A5 register path 资源需求不同，binary/sequential 改变依赖深度与浮点顺序 | 已讲透 sum 基础 |
@@ -113,7 +115,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [5a4f74c](https://github.com/hw-native-sys/pto-isa/commit/5a4f74cbf627d4aac2e0ce10d5e0d8b118343265) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A2/A3/A5 `TMOV` 分派、target-conditioned `TileLeft/TileRight` alias、A5 ND→NZ/ZN kernel 与 physical-byte golden | ISA 深挖 20 |
+| pto-isa | [82eadca](https://github.com/hw-native-sys/pto-isa/commit/82eadca42893031d4d30cef5e0a2931cac70b8a9) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax/TMOV；新增 common wrapper、CPU/A2A3/A5 `TRESHAPE/TTRANS`、alias lifetime、A2/A3 tmp 与 A5 gather/scatter、直接测试/golden | ISA 深挖 21 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [bdcb319](https://github.com/hw-native-sys/PTOAS/commit/bdcb319d6ad43fe4a562e8911e05aebca228b848) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 entry lowering；新增 `PipePeerKey` component DFS、`resolveNoSplitComponent`、`PTOVerifyTFree` 三层 block-local 检查、默认 pipeline 缺口与 balance effect 最小设计 | 跨仓深挖 12 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
@@ -128,6 +130,9 @@ permalink: /learning/pto-curriculum/
 - `TMOV` 的合法性键必须包含 target、source/destination TileType 与展开后的 layout；A5 的 Vec ND→NZ/ZN 命中显式重排分支，A2/A3 generic Vec copy 不能替代该语义。
 - `TileLeft` 是 target-conditioned source alias：A2/A3 展开为 ZZ，A5 展开为 NZ；`TileRight` 在两代均为 ZN。同名 alias 不构成跨 target physical ABI。
 - A5 ND→ZN 要求同 dtype、`Rows % (32/sizeof(T)) == 0` 且 `Cols % 16 == 0`；逻辑有效域必须被 source 已初始化域覆盖，完成后的跨 pipe consumer 仍需显式或编译器生成的同步。
+- 当前 CPU_SIM、A2/A3 与 A5 的 `TRESHAPE` 都让 destination alias source backing；它不产生独立 storage，不 compact padding，任一 handle 的 liveness 不能单独决定 backing 可复用。
+- `TTRANS` 的二维语义是 `dst[c,r]=src[r,c]`，source valid `[R,C]` 变为 destination valid `[C,R]`；src/dst 必须拥有独立可写区，区外值不属于指令承诺。
+- A2/A3 普通 `TTRANS` 的对齐路径使用 `tmp` 再 UB copy，非对齐路径可直接写 dst；A5 普通路径以 gather/scatter 写 dst 且不读取 `tmp`，但公共 ABI 仍保留该 operand。
 - GlobalTensor 不拥有 GM；其有效期不得超过底层 allocation，且 stride 单位固定为元素。
 - 五维坐标到 GM 的元素 offset 是 `Σ(ik×stridek)`；layout 负责从 Tile `(row,col)` 恢复五维坐标，不能替代 stride。
 - ND 的 `validRows=shape0×shape1×shape2×shape3`、`validCols=shape4`；DN 的 `validRows=shape3`、`validCols=shape0×shape1×shape2×shape4`。
@@ -298,7 +303,7 @@ permalink: /learning/pto-curriculum/
 - NZ/5HD 的 C0 盒化五维地址映射及其与二维 Tile 的关系。
 - GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract；下界 clamp 已定位，上界/overflow 未闭合。
 - static/dynamic partition lowering 重复实现的等价性与长期漂移保护。
-- `TMOV` 的 A2/A3/A5 核心矩阵已闭合；仍欠 `TTRANS/TRESHAPE` 与 TMOV 的完整职责矩阵、partial-valid/tail、非法组合 negative tests 和 device stall 证据。
+- `TMOV/TTRANS/TRESHAPE` 的主职责矩阵已闭合；仍欠 partial-valid reshape 连续性、padding poison、src/dst/tmp overlap、跨 dtype/target negative tests，以及 A2/A3 tmp 与 A5 gather/scatter 的 device stall 证据。
 - A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region、padding 读取与最终 store；缺少 poison-padding 边界测试。
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
 - Online Softmax recurrence 与四阶段正常完成路径已闭合；尚欠 S1 tail、全 mask 行、P fp16/sum fp32 误差上界、exp-ring poison/wrap、stage delay 和 early-exit cancellation 注入。
@@ -319,7 +324,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：区分 `TTRANS/TRESHAPE/TMOV` 的逻辑坐标、view 与物理重排职责，并建立 shape/layout/location 合法矩阵。
+1. 主线：为 partial-valid layout 变换建立连续性条件、padding poison 与 `TRESHAPE/TTRANS/TMOV` 组合 negative matrix。
 2. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 实现 generation-aware cross-dispatch CI contract。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -431,3 +436,13 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：A5 ND→NZ 现有真机 case 覆盖 `hifloat8` 的三个 shape；ND→ZN 覆盖三类 element width 与四个 shape，均比较完整 physical bytes。尚无非法组合 negative matrix、partial-valid/tail poison、A2/A3 误用反例或 stall trace。
 - 新知识债：`TTRANS/TRESHAPE/TMOV` 职责矩阵、A5 tail/valid contract、`TMOV→TMATMUL` consumer E2E、跨 target expanded-type cache key 与真实 UB/Vector/MTE stall。
 - 下一章：**`TTRANS/TRESHAPE` 与 `TMOV` 的边界——逻辑坐标、view 与物理重排分别由谁负责。**
+
+## 第 30 章课程账本增量
+
+- 源码基线：pto-isa [`82eadca4`](https://github.com/hw-native-sys/pto-isa/commit/82eadca42893031d4d30cef5e0a2931cac70b8a9)；alias 相关历史提交为 [`79505654`](https://github.com/hw-native-sys/pto-isa/commit/79505654ab9c19e5dd42d41740d67ffdd4f47d13)、[`b22b57bf`](https://github.com/hw-native-sys/pto-isa/commit/b22b57bf1f6673d751bb9e3ba99c4494c1a92588)。
+- 新覆盖文件：`include/pto/common/pto_instr.hpp`，CPU/A2A3/A5 `TReshape.hpp` 与 `TTrans.hpp`，CPU alias test，A2/A3/A5 TTRANS kernel/main/golden。
+- 新覆盖符号：`TRESHAPE_IMPL`、`TTRANS_IMPL`、`TTransOperation`、`TTransTile`、`PtoWaitEvents`、`__cce_alias`。
+- 新确认不变量：reshape 共享 storage identity；transpose 交换逻辑坐标并生成独立 destination；move 保持逻辑值但可改变 representation/location；valid-element count 相等不等于有效字节连续。
+- 直接测试事实：CPU reshape 双向写验证 alias；A2/A3 与 A5 transpose 覆盖 dynamic valid/tail；A5 普通二维路径保留 tmp operand 但不消费其 storage。
+- 新知识债：同步 TRESHAPE 文档；补 NPU alias/negative matrix、partial-valid padding poison、src/dst/tmp overlap verifier 与设备 traffic/stall 对照。
+- 下一章：**Partial-valid layout 变换——用 padding poison 与 negative matrix 定义 TRESHAPE/TTRANS/TMOV 的组合合法性。**
