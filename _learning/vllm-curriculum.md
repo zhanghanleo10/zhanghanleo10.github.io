@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 28 章已从 child fatal/cleanup 顺序与 parent SIGTERM→join→SIGKILL 边界推导出 record-before-destroy、parent-owned latest view 和 durable checkpoint；下一章把 `ShutdownProgress` 接入 Worker→Executor→Core，并统一 MP/Ray/external launcher terminal contract。
+- 当前主线：第 29 章已对照 UniProc、Multiproc、Ray V2 与 external launcher，确认 expected-rank set 的所有权、device-fence evidence 与 process isolation evidence 必须分层；下一章用 MP 单 rank native hang 把 proposed progress contract 落成可执行的故障注入协议。
 
 ## 已完成章节
 
@@ -41,6 +41,7 @@
 | 2026-09-06 26 | `CPU KV offload event failure → sibling cleanup → device sync failure → mmap release → process boundary` | [`f4eccdad`](https://github.com/vllm-project/vllm/commit/f4eccdadefc6501fafeb1a0bf7f171ff24f984b0) | [Shutdown Fault Injection 与 Completion Unknown]({{ '/articles/vllm-shutdown-fault-injection-completion-unknown/' | relative_url }}) |
 | 2026-09-07 27 | `AsyncLLM.shutdown → process manager deadline → Core progress/fatal wire → Python/Rust receiver → rank-scoped aggregate` | [`199cb9b9`](https://github.com/vllm-project/vllm/commit/199cb9b964822e59ab9b58d88e7be31eb419a2ae) | [ShutdownReport 跨进程协议]({{ '/articles/vllm-shutdown-report-wire-protocol/' | relative_url }}) |
 | 2026-09-09 28 | `child record-before-destroy → parent latest view → durable checkpoint → deadline 合成 missing final` | [`a97dacb7`](https://github.com/vllm-project/vllm/commit/a97dacb7106ee49f39f3d1fc6ae1800ff724e01d) | [Progress Snapshot 与 Parent-owned Durable Sink]({{ '/articles/vllm-shutdown-progress-snapshot-durable-sink/' | relative_url }}) |
+| 2026-09-11 29 | `Worker device fence → Executor expected-rank set → MP/Ray/external launcher terminal aggregate` | [`84030bbe`](https://github.com/vllm-project/vllm/commit/84030bbe3d74d99bad477a3d2e37a973ccd8865c) | [Worker→Executor 的 Rank-scoped Shutdown Ack]({{ '/articles/vllm-shutdown-worker-executor-rank-ack/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -606,9 +607,24 @@
 - 新知识债：实际 schema、独立有界控制通道、parent WAL/checkpoint 与 durability 等级、Python/Rust golden、Worker→Executor→Core 聚合、MP/Ray/external launcher expected-set、真实 CUDA/NCCL hang 与磁盘/parent crash 矩阵。
 - 下一章：**Worker→Executor→Core 的 ShutdownProgress 聚合——device fence、rank expected-set 与 MP/Ray/external launcher terminal contract。**
 
+## 第 29 章课程账本增量
+
+- 源码基线：[`84030bbe`](https://github.com/vllm-project/vllm/commit/84030bbe3d74d99bad477a3d2e37a973ccd8865c)；该提交修复 deferred KV free 下的 zero-progress preemption cascade，与本文 shutdown 聚合路径无直接修改。
+- 已覆盖文件：`vllm/v1/engine/core.py`、`executor/abstract.py`、`executor/uniproc_executor.py`、`executor/multiproc_executor.py`、`executor/ray_executor.py`、`executor/ray_executor_v2.py`、`worker/worker_base.py`、`worker/gpu_worker.py`、`worker/gpu/model_runner.py`、`tests/v1/executor/test_executor.py`、`tests/v1/shutdown/test_forward_error.py`、`tests/distributed/test_ray_v2_executor.py`。
+- 已覆盖符号：`EngineCore.shutdown`、`Executor.collective_rpc/shutdown`、`UniProcExecutor.shutdown`、`ExecutorWithExternalLauncher`、`MultiprocExecutor.collective_rpc/shutdown/_ensure_worker_termination`、`WorkerProc.worker_main/shutdown`、`RayExecutorV2.shutdown`、`WorkerWrapperBase.rpc_rank/global_rank/shutdown`、`GPUWorker.shutdown`、`GPUModelRunner.shutdown`。
+- 新确认不变量：
+  1. Executor 必须在 teardown 前冻结本 generation 的 expected worker set；aggregate success 要求 expected ranks 全部具有 `completed_observed` final。
+  2. MP 的 death-pipe EOF、process exit/kill 与 Ray actor disappearance 都是 isolation evidence，不能替代 Worker/device cleanup evidence。
+  3. MP Worker 在 `WorkerProc.shutdown` 中先关闭 response MQ 再调用真实 Worker shutdown，因此当前业务 MQ 不能承载 post-cleanup final。
+  4. `rpc_rank` 与 `global_rank` 在 external launcher 中并不等价；本地 Executor 只能量化一个 Worker，全局 expected set 必须由外层 launcher/supervisor 持有。
+  5. `torch.accelerator.synchronize()` 正常返回可形成当前 rank 的 device-completion observation；抛错或永久挂起必须分别保留 failed/unknown，不能由后续断引用或进程消失升级。
+- 直接测试事实：MP fake-clock 测试只验证 6 秒 grace 内是否触发 TERM；Ray V2 shutdown 测试验证 TP=2 actor 均不可调用且 MQ 清空；forward-error 测试验证 TP=1/2 请求均收到 `EngineDeadError` 且显存回落。它们都不验证 per-rank owner final 或 expected/final/missing 集合。
+- 新知识债：实际 schema、独立 progress channel、MP/Ray/external launcher adapter、Worker owner census、单一剩余预算、Python/Rust golden、KILL 前 checkpoint，以及真实 CUDA/NCCL hang E2E。
+- 下一章：**Multiproc 单 Rank native hang 故障注入——progress snapshot、共享 deadline 与 grace→TERM→KILL 的可观测顺序。**
+
 ## 下一批候选章节
 
-1. 下一主线：Worker→Executor→Core 的 `ShutdownProgress` 聚合——device fence evidence、expected-rank set 与 MP/Ray/external launcher terminal contract。
+1. 下一主线：Multiproc 单 rank native hang 故障注入——progress snapshot、共享 deadline 与 grace→TERM→KILL 的可观测顺序。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
@@ -647,4 +663,3 @@
 - 已闭合：进程退出、Host metadata 清零、device completion 与跨 rank aggregate 已被拆成不同证据；SIGKILL 后缺失 final 只能成为 abandoned/unknown。
 - 当前最大盲区：`ShutdownProgress` 仍是设计，尚未从 Worker/ModelRunner 的 fence 与资源 census 实际聚合到 Executor/Core，也没有 MP/Ray/external launcher 的同构测试。
 - 后续路线调整：先建立 schema、collector、Python/Rust golden 和跨 backend fault matrix，再回访 alive-but-stalled Worker、Connector 与真实 GPU/NCCL hang。
-
