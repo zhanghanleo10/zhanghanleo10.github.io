@@ -466,3 +466,14 @@ permalink: /learning/pto-curriculum/
 - 规范差异：英文 TRESHAPE 文档已限制设备保证到 source valid region，中文文档尚未同步；本文将其登记为文档缺口，不推导第二套设备语义。
 - 新知识债：实现 static/dynamic valid-set verifier；补跨 dtype/target raw-bit poison E2E；闭合 A5 fractal tail fill 与 `TMATMUL` consumer；以 device trace 量化 rounded transfer/stall。
 - 下一章：**A5 ND→NZ/ZN partial-valid tail——fractal rounding、padding ownership 与 `TMATMUL` consumer E2E。**
+
+## 第 32 章课程账本增量
+
+- 源码基线：pto-isa [`bf80e5d5`](https://github.com/hw-native-sys/pto-isa/commit/bf80e5d50ebfbf8ee361c985781a951127909341)；直接相关 ND→NZ 循环重写为 [`1cac07f6`](https://github.com/hw-native-sys/pto-isa/commit/1cac07f6e5efac7609a2b022b78cc48076411ce3)，ND→ZN 实现/测试提交为 [`5e98634a`](https://github.com/hw-native-sys/pto-isa/commit/5e98634aadfef35468b9bf8ae96fe8e2d531973c)。
+- 新覆盖文件：A5 `include/pto/npu/a5/TMov.hpp/TMatmul.hpp/TMatmulCommon.hpp`、`include/pto/common/pto_instr.hpp/pto_tile.hpp`、`docs/isa/TMOV.md`、nested `tmatmul.md`、A5 `tmov_nd2nz/tmov_nd2zn/tpushpop_vc` kernel、host test 与 golden generator。
+- 新覆盖符号：`TMovNd2NzLoop/TMovToVecNd2Nz/GenerateNd2ZnGather/TMovNdTo2Zn/TMOV_TILE_IMPL`、`TMATMUL/TMATMUL_IMPL/CheckDynamicMmad/mad`、`Tile::GetValidRow/GetValidCol/SetValidShape`。
+- 新确认不变量：producer 合法域、defined physical lanes 与 consumer logical read-set 必须组合证明；capacity alignment 不能替代 dynamic-valid alignment；valid metadata 不初始化 padding；`TMATMUL(m,k,n)` 不修复上游缺失的 layout block。
+- 代码边界：ND→NZ 以 `ceil16(validRow)` 构造 scatter stride并对 valid columns 做 predicate，但不承诺 fill 未激活 lanes；ND→ZN 只迭代 `validRow/K0 × validCol/16` 个完整 fractal，规范要求两个维度整除，dynamic 域外输入当前会向下截断而非 fail fast。
+- 直接测试事实：ND→NZ 仅覆盖三个全对齐 hifloat8 shape；ND→ZN 覆盖 B8/B16/B32 共 12 个 full-fractal shape并比较 raw bits；`tpushpop_vc` 的 `128×64×64 float` case 串起 `TADD→TMOV NZ→TPUSH/TPOP→TMOV Left/Right→TMATMUL→TSTORE`，但仍没有 tail poison。
+- 新知识债：ND→ZN runtime alignment verifier、ND→NZ source/destination valid-column 对称检查、M/K/N 边界矩阵、producer-owned neutral fill、Cube physical read/mask trace、Mat staging partial-valid 对照和 padding fill 成本。
+- 下一章：**A5 fractal-tail 验证协议——把 runtime alignment fail-closed、source/destination poison、neutral fill 与 `TMATMUL` consumer matrix 落成可执行测试。**
