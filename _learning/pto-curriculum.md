@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-10。
+最后更新：2026-09-12。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 31 已把 partial-valid layout 的正确性归约为 `mapped consumer read set ⊆ source valid set ∪ specified fill set`，并用 padding poison 区分“物理触碰”与“语义观察”。下一步进入 A5 ND→NZ/ZN fractal tail，闭合 rounded block、padding ownership 与 `TMATMUL` consumer contract。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 33 已把 A5 fractal tail 分解为 compile-time reject、runtime fail-closed、raw-bit poison 与 `TMATMUL` consumer E2E 四层证据；下一步进入 PTOAS verifier，研究 layout、dynamic valid guard 与 fill ownership 如何在 EmitC 前闭合。
 
 ## 已完成章节
 
@@ -56,6 +56,8 @@ permalink: /learning/pto-curriculum/
 | 2026-09-08 | TMOV 的 A2/A3 与 A5 代际合法矩阵 | `target + TileType + layout → semantic branch → physical representation` | [课程 29]({% post_url 2026-09-08-pto-isa-tmov-generation-layout-matrix %}) |
 | 2026-09-09 | TRESHAPE/TTRANS/TMOV 的三重边界 | `logical coordinates + physical bytes + storage identity → correct operator` | [课程 30]({% post_url 2026-09-09-pto-isa-treshape-ttrans-tmov-boundary %}) |
 | 2026-09-10 | Partial-valid layout 的 padding poison 与合法矩阵 | `valid set → physical read set → consumer-visible set` | [课程 31]({% post_url 2026-09-10-pto-isa-partial-valid-layout-poison-matrix %}) |
+| 2026-09-11 | A5 ND→NZ/ZN 到 TMATMUL 的契约断层 | producer defined lanes + fill ownership → consumer read set | [课程 32]({% post_url 2026-09-11-pto-isa-a5-fractal-tail-tmatmul-contract %}) |
+| 2026-09-12 | A5 fractal-tail 四层验证协议 | static reject → dynamic fail-closed → raw-bit poison → consumer E2E | [课程 33]({% post_url 2026-09-12-pto-isa-a5-fractal-tail-validation-protocol %}) |
 
 ## ISA 知识地图
 
@@ -71,6 +73,7 @@ permalink: /learning/pto-curriculum/
 | partition_view lowering | PyPTO 以 valid_shape 生成 subview；PTOAS 将 rank N right-align 到 5D，以 signed 64-bit `Σ(offset×element_stride)` rebase pointer，并继承 source stride/layout | 已讲透跨仓基础 |
 | 对齐 | 未盒化 row-major 行宽通常需要 32 B 对齐；尾块用固定 capacity + dynamic valid 表达 | 已讲基础 |
 | TLOAD/TSTORE | 实际传输范围受 valid region 控制；跨布局、dtype、location 受代际约束 | 已讲 3 次 |
+| A5 ND→NZ/ZN fractal tail | ND→NZ 有 predicate tail但不隐式 fill；ND→ZN 仅定义完整 K0×16 fractal。验证必须分离 static reject、dynamic fail-closed、raw physical bytes 与 TMATMUL consumer | 协议已闭合；assert/poison E2E 待实现 |
 | A2/A3 ND/DN DMA | ND/DN 把语义映射为 nBurst/lenBurst/gmGap；shape、valid shape、32 B 对齐与 burst 上限是 backend contract | 已讲基础，gap 整除待验证 |
 | TADD | 以 destination valid region 为迭代域；输入兼容性仍是调用方 contract | 已讲基础 |
 | Event | 精确表达 producer/consumer pipeline 依赖，不是全局 barrier | 已讲透基础 |
@@ -117,7 +120,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [e131fa0](https://github.com/hw-native-sys/pto-isa/commit/e131fa0b0c5aa052c0926cfeca4369096898ce2b) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `Tile` dynamic valid API、partial-valid `TRESHAPE/TTRANS/TMOV` read-set、32 B rounded Vec copy、padding poison/negative matrix及直接测试边界 | ISA 深挖 22 |
+| pto-isa | [37ea0a0](https://github.com/hw-native-sys/pto-isa/commit/37ea0a0a3c79f5bcec19d23c6dcf8a7d9346dfdb) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A5 ND→NZ/ZN producer contract、dynamic alignment gap、raw-bit poison 四层协议与显式 padded TMATMUL consumer matrix | ISA 深挖 24 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
 | PTOAS | [bdcb319](https://github.com/hw-native-sys/PTOAS/commit/bdcb319d6ad43fe4a562e8911e05aebca228b848) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 entry lowering；新增 `PipePeerKey` component DFS、`resolveNoSplitComponent`、`PTOVerifyTFree` 三层 block-local 检查、默认 pipeline 缺口与 balance effect 最小设计 | 跨仓深挖 12 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
@@ -132,6 +135,7 @@ permalink: /learning/pto-curriculum/
 - `TMOV` 的合法性键必须包含 target、source/destination TileType 与展开后的 layout；A5 的 Vec ND→NZ/ZN 命中显式重排分支，A2/A3 generic Vec copy 不能替代该语义。
 - `TileLeft` 是 target-conditioned source alias：A2/A3 展开为 ZZ，A5 展开为 NZ；`TileRight` 在两代均为 ZN。同名 alias 不构成跨 target physical ABI。
 - A5 ND→ZN 要求同 dtype、`Rows % (32/sizeof(T)) == 0` 且 `Cols % 16 == 0`；逻辑有效域必须被 source 已初始化域覆盖，完成后的跨 pipe consumer 仍需显式或编译器生成的同步。
+- A5 fractal-tail 验证必须把 compile-time reject、runtime fail-closed、raw physical mapping 与 consumer E2E 分开；destination zero-init 不能充当缺写 oracle，dynamic gate 必须先于任何 gather/store。
 - 当前 CPU_SIM、A2/A3 与 A5 的 `TRESHAPE` 都让 destination alias source backing；它不产生独立 storage，不 compact padding，任一 handle 的 liveness 不能单独决定 backing 可复用。
 - `TTRANS` 的二维语义是 `dst[c,r]=src[r,c]`，source valid `[R,C]` 变为 destination valid `[C,R]`；src/dst 必须拥有独立可写区，区外值不属于指令承诺。
 - A2/A3 普通 `TTRANS` 的对齐路径使用 `tmp` 再 UB copy，非对齐路径可直接写 dst；A5 普通路径以 gather/scatter 写 dst 且不读取 `tmp`，但公共 ABI 仍保留该 operand。
@@ -312,7 +316,7 @@ permalink: /learning/pto-curriculum/
 - NZ/5HD 的 C0 盒化五维地址映射及其与二维 Tile 的关系。
 - GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract；下界 clamp 已定位，上界/overflow 未闭合。
 - static/dynamic partition lowering 重复实现的等价性与长期漂移保护。
-- `TMOV/TTRANS/TRESHAPE` 的主职责矩阵与 partial-valid read-set 条件已闭合；仍欠 verifier 实现、双语规范同步、CPU/A2/A3/A5 padding-poison E2E、src/dst/tmp overlap、A5 ND→NZ/ZN fractal tail 与真实 device stall 证据。
+- `TMOV/TTRANS/TRESHAPE` 的职责与 partial-valid read-set 已闭合；A5 ND→NZ/ZN 的四层验证协议也已定义，仍欠 runtime verifier、双语规范同步、CPU/A2/A3/A5 raw-bit poison E2E、src/dst/tmp overlap、Cube read/mask trace 与 neutral-fill benchmark。
 - A2/A3 `TMATMUL` 的 `m==1→16` 特例如何约束 capacity、valid region、padding 读取与最终 store；缺少 poison-padding 边界测试。
 - `gemm_basic` 在真实设备上的 MTE2/MTE1/M/FIX overlap、L2 reuse 和 buffer 容量余量。
 - Online Softmax recurrence 与四阶段正常完成路径已闭合；尚欠 S1 tail、全 mask 行、P fp16/sum fp32 误差上界、exp-ring poison/wrap、stage delay 和 early-exit cancellation 注入。
@@ -477,3 +481,15 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：ND→NZ 仅覆盖三个全对齐 hifloat8 shape；ND→ZN 覆盖 B8/B16/B32 共 12 个 full-fractal shape并比较 raw bits；`tpushpop_vc` 的 `128×64×64 float` case 串起 `TADD→TMOV NZ→TPUSH/TPOP→TMOV Left/Right→TMATMUL→TSTORE`，但仍没有 tail poison。
 - 新知识债：ND→ZN runtime alignment verifier、ND→NZ source/destination valid-column 对称检查、M/K/N 边界矩阵、producer-owned neutral fill、Cube physical read/mask trace、Mat staging partial-valid 对照和 padding fill 成本。
 - 下一章：**A5 fractal-tail 验证协议——把 runtime alignment fail-closed、source/destination poison、neutral fill 与 `TMATMUL` consumer matrix 落成可执行测试。**
+
+## 第 33 章课程账本增量
+
+- 源码基线：pto-isa [`37ea0a0a`](https://github.com/hw-native-sys/pto-isa/commit/37ea0a0a3c79f5bcec19d23c6dcf8a7d9346dfdb)；最新提交只修改 A2/A3 `TTRANS` 与 CI，A5 `TMOV/TMATMUL` 相关路径未直接变化。直接相关实现提交仍为 [`5e98634a`](https://github.com/hw-native-sys/pto-isa/commit/5e98634aadfef35468b9bf8ae96fe8e2d531973c) 与 [`1cac07f6`](https://github.com/hw-native-sys/pto-isa/commit/1cac07f6e5efac7609a2b022b78cc48076411ce3)。
+- 新覆盖文件：A5 `include/pto/npu/a5/TMov.hpp`、`docs/isa/TMOV.md`、`docs/coding/debug_zh.md`，A5 `tmov_nd2zn/tmov_nd2nz` 的 kernel/main/golden，以及 `tpushpop_vc` consumer chain。
+- 新覆盖符号：`TMovNdTo2Zn`、`GenerateNd2ZnGather`、`TMovToVecNd2Nz`、`TMovNd2NzLoop`、`TMOV_TILE_IMPL`、`PTO_ASSERT`。
+- 新确认不变量：compile-time reject、runtime fail-closed、raw physical mapping 与 consumer E2E 是四份独立证据；destination zero-init 会掩盖 tail 缺写；dynamic alignment gate 必须早于任何 gather/store；process/test failure 不能替代稳定 diagnostic。
+- 具体演算：`half A[17,19]×B[19,13]` 的 ND→ZN direct path 应拒绝；显式 pad 到 `Kp=32,Np=16` 时，A/B neutral fill 分别增加 442 B/530 B，MMA 从 4199 增至 8704 次乘加（约 2.07 倍）。
+- 直接测试事实：ND→ZN 现有 12 个 case、ND→NZ 现有 3 个 case 均为 aligned shape，host 先把 destination 清零；`tpushpop_vc` 的 `128×64×64 float` E2E 全对齐且只做数值容差比较。
+- 最小建议：先补 ND→ZN dynamic `PTO_ASSERT`、source/destination poison raw-byte matrix 与显式 padded `TMATMUL` E2E；等 Cube read/mask trace 和成本证据齐全后再决定是否开放 masked tail producer。
+- 新知识债：compile-fail/negative harness、assert diagnostic parity、B8/B16/B32 poison matrix、ND→NZ valid-column 对称检查、explicit/auto sync parity、C padding census、Cube trace 与 neutral-fill benchmark。
+- 下一章：**从 ISA 合法域到 PTOAS Verifier——让 layout、dynamic valid guard 与 fill ownership 在 EmitC 前闭合。**
