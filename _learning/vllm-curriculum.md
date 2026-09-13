@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 29 章已对照 UniProc、Multiproc、Ray V2 与 external launcher，确认 expected-rank set 的所有权、device-fence evidence 与 process isolation evidence 必须分层；下一章用 MP 单 rank native hang 把 proposed progress contract 落成可执行的故障注入协议。
+- 当前主线：第 30 章已把 MP 单 rank native hang 落成 grace→SIGTERM→SIGKILL 的可观测时间线，并确认外层 monotonic process deadline 与内层 wall-clock 5+4 秒窗口会互相截断；下一章统一 `AsyncLLM/MPClient → EngineCore → MultiprocExecutor` 的 remaining-budget contract。
 
 ## 已完成章节
 
@@ -42,6 +42,7 @@
 | 2026-09-07 27 | `AsyncLLM.shutdown → process manager deadline → Core progress/fatal wire → Python/Rust receiver → rank-scoped aggregate` | [`199cb9b9`](https://github.com/vllm-project/vllm/commit/199cb9b964822e59ab9b58d88e7be31eb419a2ae) | [ShutdownReport 跨进程协议]({{ '/articles/vllm-shutdown-report-wire-protocol/' | relative_url }}) |
 | 2026-09-09 28 | `child record-before-destroy → parent latest view → durable checkpoint → deadline 合成 missing final` | [`a97dacb7`](https://github.com/vllm-project/vllm/commit/a97dacb7106ee49f39f3d1fc6ae1800ff724e01d) | [Progress Snapshot 与 Parent-owned Durable Sink]({{ '/articles/vllm-shutdown-progress-snapshot-durable-sink/' | relative_url }}) |
 | 2026-09-11 29 | `Worker device fence → Executor expected-rank set → MP/Ray/external launcher terminal aggregate` | [`84030bbe`](https://github.com/vllm-project/vllm/commit/84030bbe3d74d99bad477a3d2e37a973ccd8865c) | [Worker→Executor 的 Rank-scoped Shutdown Ack]({{ '/articles/vllm-shutdown-worker-executor-rank-ack/' | relative_url }}) |
+| 2026-09-13 30 | `death-pipe EOF → Worker native hang → grace → SIGTERM → SIGKILL → missing-final synthesis` | [`e52be1a6`](https://github.com/vllm-project/vllm/commit/e52be1a62d3879b1202f4f355d3c3472b560c6f2) | [Multiproc 单 Rank Native Hang]({{ '/articles/vllm-multiproc-single-rank-native-hang/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -622,9 +623,24 @@
 - 新知识债：实际 schema、独立 progress channel、MP/Ray/external launcher adapter、Worker owner census、单一剩余预算、Python/Rust golden、KILL 前 checkpoint，以及真实 CUDA/NCCL hang E2E。
 - 下一章：**Multiproc 单 Rank native hang 故障注入——progress snapshot、共享 deadline 与 grace→TERM→KILL 的可观测顺序。**
 
+## 第 30 章课程账本增量
+
+- 源码基线：[`e52be1a6`](https://github.com/vllm-project/vllm/commit/e52be1a62d3879b1202f4f355d3c3472b560c6f2)；该提交迁移 DSv4 TileLang kernel，与本文 shutdown 路径无直接修改。
+- 已覆盖文件：`vllm/v1/engine/async_llm.py`、`engine/core_client.py`、`engine/utils.py`、`engine/core.py`、`v1/utils.py`、`executor/multiproc_executor.py`、`worker/worker_base.py`、`worker/gpu_worker.py`、`worker/gpu/model_runner.py`、`tests/v1/executor/test_executor.py`、`vllm/envs.py`。
+- 已覆盖符号：`AsyncLLM.shutdown`、`MPClient.shutdown`、`CoreEngineProcManager.shutdown`、`get_engine_process_shutdown_timeout`、generic `shutdown`、`run_engine_core`、`EngineCore.shutdown`、`MultiprocExecutor.shutdown/_ensure_worker_termination`、`WorkerProc.make_worker_process/monitor_death_pipe/worker_main/shutdown`、`GPUWorker.shutdown`、`GPUModelRunner.shutdown`。
+- 新确认不变量：
+  1. death-pipe EOF 是退出请求，不是 cleanup acknowledgement；response MQ 在真实 Worker cleanup 前关闭，不能承载 post-cleanup final。
+  2. 内层 Worker 路径默认等待 5 秒 graceful、TERM 后再等 4 秒、随后 KILL；KILL 后未 join，因此函数返回不等于 child 已被 reap。
+  3. 外层 EngineCore process manager 使用一次 `time.monotonic()` deadline；内层使用 `time.time()` 并重新分配 5+4 秒，两者不是一条端到端预算。
+  4. 单 rank KILL 只产生 isolation evidence；若最后 snapshot 是 `model_runner_sync.started`，其终态必须是 `abandoned_by_deadline/completion_unknown`。
+  5. progress 必须由 parent 在 KILL 前保存；expected/final/missing 集合必须按 rank 量化，不能用 `alive_count==0` 代替。
+- 直接测试事实：`test_multiproc_executor_worker_termination_timeout` 用 fake clock 验证 timeout=6 时 exits_at=5 不 TERM、exits_at=7 会 TERM；未覆盖 KILL、join/reap、TP>1、真实 child、progress frame、outer-deadline 抢先或 native hang。
+- 新知识债：实际 schema、独立有界 sideband、KILL 前 checkpoint、KILL 后 join/reap、单一 remaining budget、Python/Rust golden，以及真实 CUDA/NCCL hang E2E。
+- 下一章：**一条 deadline 穿过三层——`AsyncLLM/MPClient → EngineCore → MultiprocExecutor` 的 remaining-budget contract 与 golden timeline。**
+
 ## 下一批候选章节
 
-1. 下一主线：Multiproc 单 rank native hang 故障注入——progress snapshot、共享 deadline 与 grace→TERM→KILL 的可观测顺序。
+1. 下一主线：一条 deadline 穿过三层——`AsyncLLM/MPClient → EngineCore → MultiprocExecutor` 的 remaining-budget contract 与 golden timeline。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
