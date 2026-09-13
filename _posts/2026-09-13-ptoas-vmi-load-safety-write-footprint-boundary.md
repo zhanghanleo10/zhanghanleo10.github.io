@@ -77,6 +77,8 @@ candidate physical read envelope ⊆ proven readable envelope
 
 当前 `load-safety=error` 执行这个严格模型。`warn` 和默认 `policy` 在证明失败时仍允许生成 full-chunk read，只改变 diagnostic 强度。设计文档甚至明确记录：越过 UB 末端可能 trap/hang，默认 policy 接受这一风险。这是**编译策略**，不是硬件安全证明。
 
+这里还要消除一个措辞歧义：当前实现仍会构造 `safeReadProof`，以便在未证明时给出具体 reason；“policy 不要求证明”是指 acceptance 不以 `proof.proven` 为前提，不等于 compiler 完全跳过 proof analysis。
+
 对 store，副作用不可在事后“忽略”。正确 lowering 必须同时满足：
 
 ```text
