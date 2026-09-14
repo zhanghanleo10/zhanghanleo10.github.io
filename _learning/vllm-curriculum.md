@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 30 章已把 MP 单 rank native hang 落成 grace→SIGTERM→SIGKILL 的可观测时间线，并确认外层 monotonic process deadline 与内层 wall-clock 5+4 秒窗口会互相截断；下一章统一 `AsyncLLM/MPClient → EngineCore → MultiprocExecutor` 的 remaining-budget contract。
+- 当前主线：第 31 章已追通 `shutdown_timeout` 的生命周期，确认 raw duration 只在 parent process manager 内变成 local monotonic deadline，Core 只用配置选择 abort/drain，Worker 又新开 wall-clock 5+4 秒；下一章把同一 remaining-budget golden 扩展到 MP/Ray/external launcher，并覆盖 late ack 与 reap failure。
 
 ## 已完成章节
 
@@ -43,6 +43,7 @@
 | 2026-09-09 28 | `child record-before-destroy → parent latest view → durable checkpoint → deadline 合成 missing final` | [`a97dacb7`](https://github.com/vllm-project/vllm/commit/a97dacb7106ee49f39f3d1fc6ae1800ff724e01d) | [Progress Snapshot 与 Parent-owned Durable Sink]({{ '/articles/vllm-shutdown-progress-snapshot-durable-sink/' | relative_url }}) |
 | 2026-09-11 29 | `Worker device fence → Executor expected-rank set → MP/Ray/external launcher terminal aggregate` | [`84030bbe`](https://github.com/vllm-project/vllm/commit/84030bbe3d74d99bad477a3d2e37a973ccd8865c) | [Worker→Executor 的 Rank-scoped Shutdown Ack]({{ '/articles/vllm-shutdown-worker-executor-rank-ack/' | relative_url }}) |
 | 2026-09-13 30 | `death-pipe EOF → Worker native hang → grace → SIGTERM → SIGKILL → missing-final synthesis` | [`e52be1a6`](https://github.com/vllm-project/vllm/commit/e52be1a62d3879b1202f4f355d3c3472b560c6f2) | [Multiproc 单 Rank Native Hang]({{ '/articles/vllm-multiproc-single-rank-native-hang/' | relative_url }}) |
+| 2026-09-14 31 | `AsyncLLM/MPClient raw duration → parent local deadline → Core drain → Worker fresh 5+4s` | [`9f03b510`](https://github.com/vllm-project/vllm/commit/9f03b510c33575fe40c320b2d266a289e8a4b83a) | [跨层剩余预算契约]({{ '/articles/vllm-cross-layer-remaining-budget-contract/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -638,9 +639,26 @@
 - 新知识债：实际 schema、独立有界 sideband、KILL 前 checkpoint、KILL 后 join/reap、单一 remaining budget、Python/Rust golden，以及真实 CUDA/NCCL hang E2E。
 - 下一章：**一条 deadline 穿过三层——`AsyncLLM/MPClient → EngineCore → MultiprocExecutor` 的 remaining-budget contract 与 golden timeline。**
 
+
+## 第 31 章课程账本增量
+
+- 源码基线：[`9f03b510`](https://github.com/vllm-project/vllm/commit/9f03b510c33575fe40c320b2d266a289e8a4b83a)；该提交修复 DSv4 kernel bug，与 shutdown 无直接修改；从第 30 章基线到本提交，本文核对的 11 个实现/测试文件 blob 均未变化。
+- 已覆盖文件：`vllm/entrypoints/launchers/launcher.py`、`entrypoints/cli/serve.py`、`v1/engine/async_llm.py`、`engine/core_client.py`、`engine/utils.py`、`engine/core.py`、`v1/utils.py`、`executor/multiproc_executor.py`、`utils/system_utils.py`、`tests/v1/engine/test_startup_watch_processes.py`、`tests/entrypoints/launchers/test_shutdown.py`。
+- 已覆盖符号：`launcher.handle_shutdown`、`AsyncLLM.shutdown`、`MPClient.shutdown`、`CoreEngineProcManager.shutdown`、`get_engine_process_shutdown_timeout`、generic `shutdown`、`EngineCoreProc._handle_shutdown/run_engine_core`、`EngineCore.shutdown`、`MultiprocExecutor.shutdown/_ensure_worker_termination`、`kill_process_tree`、multi-API `to_timeout`。
+- 新确认不变量：
+  1. `AsyncLLM.shutdown(timeout)` 当前不是整函数 deadline：renderer 前置耗时和 manager 后置 background cleanup 都未从 timeout 扣除。
+  2. Core 的正 `shutdown_timeout` 只选择 drain mode，本地没有 elapsed/deadline 检查；强时间上界由 parent KILL 提供。
+  3. generic process manager 的一次 monotonic deadline 能防止 DP=N 等待膨胀成 `N×timeout`，但只覆盖 join loop；TERM 发送、KILL 后 join/reap 和 child owner phase 未形成同一预算。
+  4. Worker 的 `time.time()` 5+4 秒是 fresh local window，会被 parent deadline 截断；interval 应使用 monotonic，并从 outer remaining 扣减。
+  5. 跨进程传 relative remaining 与 generation，parent 保留权威 deadline/KILL；不得比较不同 clock domain 的裸 monotonic timestamp。
+- 直接测试事实：process-timeout 参数矩阵验证 ROCm `0/0→15`、outer remaining 不续期和幂等；Worker fake-clock 只验证 grace 后是否 TERM；serving E2E 验证 drain/abort、短 timeout 与多 API child 收敛，但使用 10–15 秒 buffer，未证明 `elapsed≤B₀`、phase partial order 或 reap。
+- 新知识债：实际 `ShutdownBudget` schema、request-drain/teardown 双字段、独立 sideband、shared fake-monotonic golden、MP/Ray/external adapter、KILL 前 checkpoint、KILL 后 join/reap、clock-jump、Python/Rust parity 与真实 CUDA/NCCL hang E2E。
+- 下一章：**同一条时间线，三个 backend——MP/Ray/external launcher 的 deadline golden、late ack 与 reap failure matrix。**
+
+
 ## 下一批候选章节
 
-1. 下一主线：一条 deadline 穿过三层——`AsyncLLM/MPClient → EngineCore → MultiprocExecutor` 的 remaining-budget contract 与 golden timeline。
+1. 下一主线：同一条时间线，三个 backend——MP/Ray/external launcher 的 deadline golden、late ack 与 reap failure matrix。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
