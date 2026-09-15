@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-14。
+最后更新：2026-09-15。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 35 已审计现有 backend-local `VMIMemoryAccessPlan` 与 `PTOAddressAnalysis` 的事实边界：地址分析能证明 root、typed offset、byte/unit delta、部分 difference/alignment，却不拥有 allocation、coverage、fill 或 alias 结论；下一步追踪 allocation provenance 穿过 view/phi/loop 时的 extent、guard owner 与 dynamic range proof。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 36 已把 allocation provenance 穿过 view/phi/loop 的规则具体化：`subview/addptr` 只派生 base/offset，phi 合并 owner 候选，loop 还需 range/no-wrap；只有 `maxOffset + physicalEnvelope ≤ ownerGuard` 才能生成无检查 fast path。下一步把这份 certificate 接入 shared `MemoryAccessIntent`，审计 VPTO/EmitC candidate、fallback 与 diagnostic parity。
 
 ## 已完成章节
 
@@ -60,6 +60,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-12 | A5 fractal-tail 四层验证协议 | static reject → dynamic fail-closed → raw-bit poison → consumer E2E | [课程 33]({% post_url 2026-09-12-pto-isa-a5-fractal-tail-validation-protocol %}) |
 | 2026-09-13 | VMI→VPTO load-safety 与 exact-store 边界 | semantic footprint → physical envelope → policy/exact coverage → residual audit | [课程 34]({% post_url 2026-09-13-ptoas-vmi-load-safety-write-footprint-boundary %}) |
 | 2026-09-14 | MemoryAccessPlan 与 PTOAddressAnalysis 的证明边界 | semantic intent → backend candidate → typed address facts → ownership certificate | [课程 35]({% post_url 2026-09-14-ptoas-memory-access-plan-address-analysis-boundary %}) |
+| 2026-09-15 | view/phi/loop 的 Allocation Provenance | owner candidates + dynamic range + physical envelope → allocation coverage certificate | [课程 36]({% post_url 2026-09-15-ptoas-allocation-provenance-view-phi-loop %}) |
 
 ## ISA 知识地图
 
@@ -120,6 +121,7 @@ permalink: /learning/pto-curriculum/
 
 | VMI→VPTO physical memory legality | VMI logical value 经 layout assignment 后按 1:N 物理化；load 可在 `policy/warn` 下接受未证明的 full-chunk over-read，store 必须保持 exact semantic footprint；readable guard、defined fill 与 consumer observation 是三份证明 | 已讲透当前 VPTO 主路径；shared/EmitC contract 待补 |
 | PTOAddressAnalysis / MemoryAccessPlan | `PTOAddressAnalysis` 从 VPTO address-semantics op 构造 root、typed element/op offset，证明 byte/unit delta、同 root difference 与有限 remainder/alignment；它不证明 allocation extent、alias、coverage 或 fill。现有 `VMIMemoryAccessPlan` 是 VMIToVPTO 内部瞬时 plan，应演进为 shared intent + backend candidate，而非复制第二套地址求解器 | 分析能力边界已讲透；shared IR/provenance/parity 待实现 |
+| Allocation provenance through view/phi/loop | `subview` 平移 base但不新建 owner，`addptr` 不产生 coverage；phi 保留可达 owner集合，loop需证明 backedge owner稳定、offset range/no-wrap，并联合 backend envelope 检查 `maxOffset+envelope≤guard` | 证明规则已闭合；shared certificate与negative matrix待实现 |
 
 ## 六仓版本与覆盖矩阵
 
@@ -127,13 +129,16 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [37ea0a0](https://github.com/hw-native-sys/pto-isa/commit/37ea0a0a3c79f5bcec19d23c6dcf8a7d9346dfdb) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A5 ND→NZ/ZN producer contract、dynamic alignment gap、raw-bit poison 四层协议与显式 padded TMATMUL consumer matrix | ISA 深挖 24 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [566d6af](https://github.com/hw-native-sys/PTOAS/commit/566d6af8c017e7f44402fb2c4e8d204d8f195b9a) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI；新增 VMI→VPTO memory plan、PTOAddressAnalysis typed root/offset/delta/unit/alignment、AddressSemantics、shared intent/backend candidate 边界与 VPTO/EmitC seam | 跨仓深挖 14 |
+| PTOAS | [48b6cf4](https://github.com/hw-native-sys/PTOAS/commit/48b6cf451632c892f6e206b7bd7332e9041231b8) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI；新增 VMI→VPTO memory plan、typed address/value evolution、dynamic subview→EmitC、Tile subview inference、SoftPostUpdate控制流边界，以及 view/phi/loop owner/range/coverage规则 | 跨仓深挖 15 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
 ## 已确认接口与不变量
 
+- Allocation coverage 必须把 owner/guard、dynamic offset range、backend physical envelope 与 lifetime组合；地址 recurrence、descriptor lowering或same-root任一项都不能单独替代该证明。
+- `memref.subview` 保留owner并平移base，view extent不新建allocation；`pto.addptr`只增加typed offset；phi-like合流保留所有可达owner候选；`scf.for`必须证明initial/backedge owner集合稳定及range/no-wrap。
+- 证明结果必须区分 `Proven / Disproven / Unknown`；`Unknown`只能走runtime guard、exact fallback或fail closed，不能被默认offset/对齐降格为fast path。
 - `PTOAddressAnalysis` 只提供 current access 的 root、typed offset/unit、element width，以及可证明的 byte/unit delta、同 root difference 与 remainder/alignment；它不拥有 read/write direction、allocation extent、alias、coverage 或 padding definedness。
 - 当前 `VMIMemoryAccessPlan` 已包含 direction、segment address/coverage/transfer/readSafety、valueType、paddingValue 与 layoutSupport，但它只在 `VMIToVPTO` 内瞬时存在；`paddingValue` 尚未 materialize，EmitC 不消费该 plan。
 - 跨 backend plan 的最小结构是 shared intent + backend candidate：前者冻结 semantic coverage 与 allocation/guard/fill provenance，后者给出 target、transfer、alignment 与 physical envelope；合法性分别检查 `Pread⊆guard`、`consumerRead⊆semantic∪fill`、`Pwrite=semantic` 与 owner lifetime。
@@ -344,7 +349,7 @@ permalink: /learning/pto-curriculum/
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
-- Shared `MemoryAccessPlan` 的 intent IR、allocation/guard/fill provenance、VPTO/EmitC candidate parity、proof invalidation 与真实 A5 fault/poison/exact-fallback 性能矩阵。
+- Shared `MemoryAccessIntent` 与 `AllocationCertificate` 尚未落地；缺 function/alloc owner导入、view/phi/loop provenance lattice、dynamic range×envelope verifier、VPTO/EmitC parity、proof invalidation，以及真实 A5 fault/poison/exact-fallback 性能矩阵。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -354,7 +359,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：追踪 allocation provenance 穿过 `memref/subview/addptr/phi/loop` 时的 root、extent、guard owner、generation 与 dynamic range proof。
+1. 主线：把 `AllocationCertificate` 接入 shared `MemoryAccessIntent`，对齐 VPTO/EmitC 的 physical candidate、runtime/exact fallback 与 diagnostic golden。
 2. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 实现 generation-aware cross-dispatch CI contract。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -544,3 +549,15 @@ permalink: /learning/pto-curriculum/
 - 新知识债：shared intent IR、allocation/guard/fill provenance、view/phi/loop owner closure、dynamic range×envelope proof、padding materialization、VPTO/EmitC parity、proof invalidation 与 A5 fault/poison/perf。
 - 下一章：**Allocation provenance 穿过 view/phi/loop——memref/subview/addptr 的 root、extent、guard owner 与 dynamic range proof 何时失效。**
 
+
+
+## 第 36 章课程账本增量
+
+- 源码基线：PTOAS [48b6cf45](https://github.com/hw-native-sys/PTOAS/commit/48b6cf451632c892f6e206b7bd7332e9041231b8)；最新提交新增 dynamic subview→EmitC 回归和代码质量修复，AddressAnalysis/ValueEvolution 主体相对课程35基线无语义改动。
+- 新覆盖文件：PTOAddressAnalysis.h/.cpp、PTOValueEvolutionAnalysis.h/.cpp、PTOToEmitC/Memref/Subview.cpp、PTOSubViewInference.cpp、VPTOSoftPostUpdate.cpp，以及 dynamic subview、address recurrence、nested control-flow/loop lit。
+- 新覆盖符号：PTOAddressExpr、getAddresses/getPointerDelta、resolveSourceStrides/computeTotalOffset/computeOffsetPointer、SubViewOp inference/verify、isDirectlyInForBody，以及 ValueEvolution 的 range/no-wrap/Unknown reason。
+- 新确认不变量：root是SSA地址锚点而非allocation identity；view平移base但不新建owner；addptr不产生coverage；phi保留owner候选；loop需联合owner稳定、range/no-wrap和\`maxOffset+physicalEnvelope≤guard\`；mutation或owner lifetime结束后旧certificate失效。
+- 具体演算：\`f32 A[8,64]\` 为2048 B，单行physical envelope为256 B；\`r∈[0,7]\`时末端恰为2048 B，若允许\`r=8\`则末端2304 B。相同256 B地址递推在不同allocation extent下结论不同，现有AddressAnalysis无法独立区分。
+- 直接测试事实：address_analysis覆盖typed recurrence/range/no-wrap与Unknown；dynamic subview tests覆盖pointer/shape/stride legalization；SoftPostUpdate negative-control-flow保持\`scf.if\`内访问不变。它们尚未验证owner extent、lifetime或真实physical-byte guard。
+- 新知识债：shared certificate/intent IR、ABI owner/extent导入、predicate-aware phi、loop range×envelope negative matrix、async generation/lifetime、VPTO/EmitC golden与A5 canary/fault/perf。
+- 下一章：**同一访问，两种后端——把 AllocationCertificate 接到 shared MemoryAccessIntent，审计 VPTO 与 EmitC 的 candidate、fallback和diagnostic parity。**
