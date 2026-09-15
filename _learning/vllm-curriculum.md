@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 31 章已追通 `shutdown_timeout` 的生命周期，确认 raw duration 只在 parent process manager 内变成 local monotonic deadline，Core 只用配置选择 abort/drain，Worker 又新开 wall-clock 5+4 秒；下一章把同一 remaining-budget golden 扩展到 MP/Ray/external launcher，并覆盖 late ack 与 reap failure。
+- 当前主线：第 32 章已把 MP process、Ray actor 与 external-launcher rank 映射到统一的 shutdown evidence lattice，确认 cleanup 与 containment 是正交证据；下一章下钻独立 sideband、bounded backpressure、Python/Rust wire golden 与 collector crash recovery。
 
 ## 已完成章节
 
@@ -44,6 +44,7 @@
 | 2026-09-11 29 | `Worker device fence → Executor expected-rank set → MP/Ray/external launcher terminal aggregate` | [`84030bbe`](https://github.com/vllm-project/vllm/commit/84030bbe3d74d99bad477a3d2e37a973ccd8865c) | [Worker→Executor 的 Rank-scoped Shutdown Ack]({{ '/articles/vllm-shutdown-worker-executor-rank-ack/' | relative_url }}) |
 | 2026-09-13 30 | `death-pipe EOF → Worker native hang → grace → SIGTERM → SIGKILL → missing-final synthesis` | [`e52be1a6`](https://github.com/vllm-project/vllm/commit/e52be1a62d3879b1202f4f355d3c3472b560c6f2) | [Multiproc 单 Rank Native Hang]({{ '/articles/vllm-multiproc-single-rank-native-hang/' | relative_url }}) |
 | 2026-09-14 31 | `AsyncLLM/MPClient raw duration → parent local deadline → Core drain → Worker fresh 5+4s` | [`9f03b510`](https://github.com/vllm-project/vllm/commit/9f03b510c33575fe40c320b2d266a289e8a4b83a) | [跨层剩余预算契约]({{ '/articles/vllm-cross-layer-remaining-budget-contract/' | relative_url }}) |
+| 2026-09-15 32 | `MP process / Ray actor / torchrun rank → backend adapter → late-ack gate → terminal aggregate` | [`a7576447`](https://github.com/vllm-project/vllm/commit/a7576447b86454f5c5729958d921271392ced47f) | [三 Backend Shutdown Golden]({{ '/articles/vllm-shutdown-backend-golden-late-ack-reap/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -304,6 +305,17 @@
 - `_join_processes_with_timeout`
 - `dump_engine_exception/prepare_object_to_dump`
 
+- `Executor.get_class`
+- `RayWorkerHandle.actor/rank/local_rank/node_id/run_ref`
+- `RayWorkerHandle.run`
+- `RayExecutorV2.start_worker_monitor/_join_monitor_thread/shutdown`
+- `RayDistributedExecutor.shutdown/check_health`
+- `CoreEngineActorManager.shutdown`
+- `ExecutorWithExternalLauncher._init_executor/_distributed_args`
+- `UniProcExecutor.shutdown/check_health`
+- `test_ray_v2_executor_worker_death/test_ray_v2_executor_shutdown`
+- `tests/distributed/test_torchrun_example.py`
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -454,6 +466,12 @@
 143. collector 必须先比较 generation，再在同一 `(generation, engine_index, rank)` 内比较 `report_seq`；旧代高 sequence 不得覆盖当前代。
 144. parent deadline 到达时必须保留每个 expected rank 的最近证据，并为缺 final 合成 `abandoned_by_deadline/completion_unknown`，不得缩小 expected set。
 145. shutdown progress 必须是有界 Host 控制帧；原始 prompt/tensor、无界 repr 和未经定义的 child monotonic timestamp 不能进入稳定 wire contract。
+146. cleanup evidence 与 containment evidence 是正交维度；`isolated/reaped` 不能升级为 `completed`。
+147. backend adapter 只能统一 `request_cleanup/observe_progress/isolate/confirm_gone/checkpoint_terminal` 的语义，不能假设 MP `join`、Ray actor state 和 torchrun rank exit 是同一原语。
+148. Ray V2 的 `run_ref→rank` 能定位 actor death，但 `ray.kill`、`RayActorError` 与 run-ref ready 都只证明 actor isolation，不证明 device cleanup final。
+149. external launcher 每个进程的 `rpc_rank=0` 是本地 RPC 身份；跨 rank aggregate 必须使用全局 `RANK`，expected-set 和强杀权属于 torchrun/elastic supervisor。
+150. late ack 能否进入结果取决于 terminal checkpoint 前是否 durable-accepted，而不是 sender 声称的本地发送时间；terminal 发布后只能进入诊断区。
+151. adapter 无法确认进程/actor/rank 已消失时，containment 也必须保持 unknown；不能因为已调用 kill 就释放可能被旧 generation 触碰的共享资源。
 
 ## 前置依赖与版本注意
 
@@ -517,7 +535,7 @@
 - `vllm:request_success{finished_reason="error"}` 的命名可能被 dashboard 误聚合；HTTP 2xx 与 engine error 的跨指标告警规则尚未建立。
 - 缺少 alive Worker withheld-response 的跨层测试：`execute_model` deadline 到期后应断言 `TimeoutError → ENGINE_CORE_DEAD → all collectors`，并验证 Scheduler/KV/connector/device context 随进程退出归零。
 - TP=1 UniProc alive GPU/NCCL hang 目前缺少独立 supervisor/progress watchdog；`VLLM_ENGINE_ITERATION_TIMEOUT_S` 的 V1 语义需要删除、接线或明确弃用。
-- Multiproc、Ray V2、legacy Ray 和 external launcher 对 execution deadline、process death、callback 可抢占性与 termination ownership 尚无统一 contract。
+- MP、Ray V2、legacy Ray 与 external launcher 的 shutdown evidence lattice 已统一；仍缺实际 adapter、Ray cleanup RPC/state confirmation、external supervisor expected-set、terminal-after-late policy 和 shared golden harness。
 - 300 秒静态阈值在长 prefill、首次 compile/capture、大 TP collective 与严格 SLO 之间缺少分布式 trace 和 workload-aware 配置准则。
 
 - fatal dump 缺少 Tensor/anon_repr 隐私矩阵、原异常保留、matched batch-queue plan 与 make_stats drain/reset 的直接测试。
@@ -656,9 +674,25 @@
 - 下一章：**同一条时间线，三个 backend——MP/Ray/external launcher 的 deadline golden、late ack 与 reap failure matrix。**
 
 
+## 第 32 章课程账本增量
+
+- 源码基线：[`a7576447`](https://github.com/vllm-project/vllm/commit/a7576447b86454f5c5729958d921271392ced47f)；该提交修复 ROCm/Ray NIXL 初始化，与本文 shutdown 路径无直接修改。
+- 已覆盖文件：`vllm/v1/executor/abstract.py`、`uniproc_executor.py`、`multiproc_executor.py`、`ray_executor.py`、`ray_executor_v2.py`、`v1/engine/utils.py`、`distributed/parallel_state.py`、`tests/distributed/test_ray_v2_executor.py`、`test_torchrun_example.py`、`tests/v1/executor/test_executor.py`、`.buildkite/test_areas/distributed.yaml`。
+- 已覆盖符号：`Executor.get_class`、`RayWorkerHandle`、`RayExecutorV2.start_worker_monitor/_join_monitor_thread/shutdown`、`RayDistributedExecutor.shutdown/check_health`、`CoreEngineActorManager.shutdown`、`ExecutorWithExternalLauncher._distributed_args`、`UniProcExecutor.shutdown`、`WorkerProcHandle`。
+- 新确认不变量：
+  1. cleanup 与 containment 是正交证据；KILL/actor death/rank exit 不能补写 owner `completed`。
+  2. late ack 只有在 terminal checkpoint 前 durable-accepted 才能进入 aggregate；之后只保留为 `late_after_terminal` 诊断。
+  3. MP 拥有 OS child；Ray 拥有 actor/run-ref；external Executor只拥有当前进程 Worker，跨 rank owner 必须上移到 torchrun supervisor。
+  4. global identity 必须使用 `RANK`；external launcher 中各进程相同的 `rpc_rank=0` 不可用于 expected-set。
+  5. adapter 无法确认 gone/reaped 时，containment 也必须保持 unknown，并 poison 可能被旧 generation 触碰的共享资源。
+- 直接测试事实：Ray V2 TP=2 shutdown 测试只验证 actor RPC 失败与 MQ 引用清空；worker-death 测试只验证 callback/is_failed；torchrun examples 验证 TP/PP/DP/EP 正常输出一致性，不覆盖单 rank hang、late ack、旧 generation 或 reap failure。
+- 新知识债：实际 `ShutdownEvent` schema、独立 durable sideband、有界覆盖策略、MP KILL 后 join、Ray state confirmation、torchrun supervisor adapter、Python/Rust wire golden、collector crash recovery 与真实 CUDA/NCCL hang。
+- 下一章：**ShutdownEvent 走哪条线——独立 sideband、bounded backpressure、Python/Rust wire golden 与 collector crash recovery。**
+
+
 ## 下一批候选章节
 
-1. 下一主线：同一条时间线，三个 backend——MP/Ray/external launcher 的 deadline golden、late ack 与 reap failure matrix。
+1. 下一主线：ShutdownEvent 走哪条线——独立 sideband、bounded backpressure、Python/Rust wire golden 与 collector crash recovery。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
