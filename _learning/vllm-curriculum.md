@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 32 章已把 MP process、Ray actor 与 external-launcher rank 映射到统一的 shutdown evidence lattice，确认 cleanup 与 containment 是正交证据；下一章下钻独立 sideband、bounded backpressure、Python/Rust wire golden 与 collector crash recovery。
+- 当前主线：第 33 章已从现有 output sentinel 与 Worker response MQ 的生命周期推导出独立 ShutdownEvent sideband，闭合 bounded mailbox、durable ACK 与 collector crash recovery；下一章下钻 WAL frame、CRC/torn write、atomic terminal checkpoint 与 crash-at-every-write 测试。
 
 ## 已完成章节
 
@@ -45,6 +45,7 @@
 | 2026-09-13 30 | `death-pipe EOF → Worker native hang → grace → SIGTERM → SIGKILL → missing-final synthesis` | [`e52be1a6`](https://github.com/vllm-project/vllm/commit/e52be1a62d3879b1202f4f355d3c3472b560c6f2) | [Multiproc 单 Rank Native Hang]({{ '/articles/vllm-multiproc-single-rank-native-hang/' | relative_url }}) |
 | 2026-09-14 31 | `AsyncLLM/MPClient raw duration → parent local deadline → Core drain → Worker fresh 5+4s` | [`9f03b510`](https://github.com/vllm-project/vllm/commit/9f03b510c33575fe40c320b2d266a289e8a4b83a) | [跨层剩余预算契约]({{ '/articles/vllm-cross-layer-remaining-budget-contract/' | relative_url }}) |
 | 2026-09-15 32 | `MP process / Ray actor / torchrun rank → backend adapter → late-ack gate → terminal aggregate` | [`a7576447`](https://github.com/vllm-project/vllm/commit/a7576447b86454f5c5729958d921271392ced47f) | [三 Backend Shutdown Golden]({{ '/articles/vllm-shutdown-backend-golden-late-ack-reap/' | relative_url }}) |
+| 2026-09-16 33 | `owner milestone → bounded mailbox → parent collector → WAL/fsync → durable ACK` | [`1fd119de`](https://github.com/vllm-project/vllm/commit/1fd119def5a841ada882fa3f33919b96783f9d50) | [ShutdownEvent Sideband 与 Durable Collector]({{ '/articles/vllm-shutdown-event-sideband-durable-collector/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -315,6 +316,10 @@
 - `UniProcExecutor.shutdown/check_health`
 - `test_ray_v2_executor_worker_death/test_ray_v2_executor_shutdown`
 - `tests/distributed/test_torchrun_example.py`
+- `rust::engine-core-client::tests::python_compat`
+- `WorkerProc.shutdown`（response MQ 与真实 Worker cleanup 的生命周期边界）
+- `ZmqEventPublisher`（bounded queue/HWM/in-memory replay pattern）
+- `ShutdownEvent/ShutdownMailbox/DurableCollector`（本文提出的设计接口，尚未合入）
 
 ## 已确认不变量
 
@@ -472,6 +477,13 @@
 149. external launcher 每个进程的 `rpc_rank=0` 是本地 RPC 身份；跨 rank aggregate 必须使用全局 `RANK`，expected-set 和强杀权属于 torchrun/elastic supervisor。
 150. late ack 能否进入结果取决于 terminal checkpoint 前是否 durable-accepted，而不是 sender 声称的本地发送时间；terminal 发布后只能进入诊断区。
 151. adapter 无法确认进程/actor/rank 已消失时，containment 也必须保持 unknown；不能因为已调用 kill 就释放可能被旧 generation 触碰的共享资源。
+152. 当前 `ENGINE_CORE_DEAD` 与普通输出共用 socket，且 fatal sentinel 先于 `EngineCore.shutdown()`；它不能承载 post-cleanup final。
+153. MP `WorkerProc.shutdown` 在真实 `worker.shutdown()` 前关闭 response MQ，因此业务 RPC 通道在生命周期上不能承担 Worker cleanup terminal evidence。
+154. shutdown sideband producer 必须 non-blocking 且 bounded；progress 可以 latest-wins，terminal 必须拥有不可被 progress 驱逐的独立容量。
+155. child 写 terminal slot、collector 内存接受与 WAL durable ACK 是 L0/L1/L2 三种证据；只有 L2 final 可改变 terminal aggregate。
+156. collector 按 `(generation, global_rank, owner, seq)` 幂等收敛；terminal checkpoint 后的 late/old event 只能进入诊断区。
+157. parent-owned WAL replay 只接受 length/CRC 合法的 durable 前缀；torn/CRC-invalid record 之后不能拼接成功证据。
+158. Python/Rust wire schema 必须 versioned、bounded、numeric-code based；不能把任意 exception repr、prompt 或 Tensor 放入稳定 shutdown protocol。
 
 ## 前置依赖与版本注意
 
@@ -540,7 +552,8 @@
 
 - fatal dump 缺少 Tensor/anon_repr 隐私矩阵、原异常保留、matched batch-queue plan 与 make_stats drain/reset 的直接测试。
 - 缺少 deterministic、versioned、bounded 的 structured crash envelope；当前 dict/set 字段顺序不稳定，日志不适合作为机器重放格式。
-- 尚未实现 `ShutdownProgress`、独立控制通道与 parent-owned collector；缺 owner/rank latest snapshot、KV block refcount/free-list 摘要、durability 等级，以及 SIGKILL/native crash 下的可恢复 checkpoint。
+- 尚未实现 `ShutdownEvent`、独立 bounded mailbox 与 parent-owned durable collector；缺 owner/rank latest snapshot、WAL frame/CRC/repair、durable ACK、terminal checkpoint、三 backend adapter，以及 SIGKILL/native crash 下的可恢复 checkpoint。
+- 缺 Python/Rust ShutdownEvent 双向 golden、progress-flood 不覆盖 terminal、collector crash-at-every-write、ENOSPC/fsync failure 和敏感 detail 审计测试。
 - `scheduled_spec_decode_tokens` 与 connector/mm metadata 的字段级敏感性尚未形成统一审计和日志大小上限。
 
 - ModelRunner exception 的现有 E2E 已覆盖 fatal fan-out、new-admission 拒绝和 GPU memory threshold，但缺 owner-specific resource census；进程销毁不能替代 F4 精确断言。
@@ -689,10 +702,24 @@
 - 新知识债：实际 `ShutdownEvent` schema、独立 durable sideband、有界覆盖策略、MP KILL 后 join、Ray state confirmation、torchrun supervisor adapter、Python/Rust wire golden、collector crash recovery 与真实 CUDA/NCCL hang。
 - 下一章：**ShutdownEvent 走哪条线——独立 sideband、bounded backpressure、Python/Rust wire golden 与 collector crash recovery。**
 
+## 第 33 章课程账本增量
+
+- 源码基线：[`1fd119de`](https://github.com/vllm-project/vllm/commit/1fd119def5a841ada882fa3f33919b96783f9d50)；该提交限制 chunked embedding 的 max-length padding，与本文 shutdown 路径无直接修改。
+- 已覆盖文件：`vllm/v1/engine/core.py`、`engine/core_client.py`、`engine/utils.py`、`v1/utils.py`、`executor/multiproc_executor.py`、`distributed/kv_events.py`、`rust/src/engine-core-client/src/transport.rs`、`protocol/output.rs`、`tests/python_compat.py`、`tests/v1/executor/test_executor.py`、`tests/v1/test_serial_utils.py`。
+- 已覆盖符号：`EngineCoreProc.run_engine_core/_send_engine_dead/process_output_sockets`、`BackgroundResources.validate_alive`、`CoreEngineProcManager.shutdown`、generic `shutdown`、`WorkerProc.shutdown`、Rust `run_output_loop`、Python/Rust output fixture、`ZmqEventPublisher`；`ShutdownEvent/ShutdownMailbox/DurableCollector` 为本文提出、尚未合入的接口。
+- 新确认不变量：
+  1. 当前 fatal sentinel 与普通输出同 socket 且先于 cleanup，clean shutdown 又无结构化 final；output path 不能作为 post-cleanup evidence channel。
+  2. Worker response MQ 在真实 Worker cleanup 前关闭；sideband 必须由比 child 活得更久的 parent/supervisor 持有。
+  3. progress 可按 `(generation, rank, owner)` latest-wins；terminal 必须有独立 slot，producer 不得因 telemetry 无限阻塞 teardown。
+  4. child slot write、collector memory accept、WAL durable ACK 分属 L0/L1/L2；只有 L2 final 可进入 aggregate。
+  5. replay 只接受 length/CRC 合法前缀并按 seq 幂等收敛；terminal checkpoint 后的 late event 不改写结果。
+- 直接测试事实：MP fake-clock 只验证 grace→TERM；Rust sentinel test 只验证 sticky unhealthy；普通 EngineCoreOutputs 已有 Python/Rust 双向 fixture 模式；KV event publisher 提供 bounded/replay 参考但仅为进程内内存。当前没有 ShutdownEvent wire、mailbox concurrency、collector crash 或 disk-failure 测试。
+- 新知识债：实际 schema/mailbox/WAL、CRC/torn-write repair、fsync/ACK 顺序、atomic terminal checkpoint、MP/Ray/torchrun adapter、KILL 后 join/reap、Python/Rust golden、ENOSPC 降级、敏感 detail 审计与真实 CUDA/NCCL hang。
+- 下一章：**一条记录何时算 Durable——WAL Frame、CRC/Torn Write、Atomic Terminal Checkpoint 与 Crash-at-every-write 测试。**
 
 ## 下一批候选章节
 
-1. 下一主线：ShutdownEvent 走哪条线——独立 sideband、bounded backpressure、Python/Rust wire golden 与 collector crash recovery。
+1. 下一主线：一条记录何时算 Durable——WAL frame、CRC/torn write、atomic terminal checkpoint 与 crash-at-every-write 测试。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
