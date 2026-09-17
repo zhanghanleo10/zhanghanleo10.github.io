@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 33 章已从现有 output sentinel 与 Worker response MQ 的生命周期推导出独立 ShutdownEvent sideband，闭合 bounded mailbox、durable ACK 与 collector crash recovery；下一章下钻 WAL frame、CRC/torn write、atomic terminal checkpoint 与 crash-at-every-write 测试。
+- 当前主线：第 34 章已把 durable ACK 落成 `framed append → WAL fsync → atomic terminal checkpoint`，区分 write 可见、frame 完整、持久前缀与终态发布；下一章处理 ENOSPC/EIO、group commit、reserved sync budget 与 containment deadline 的冲突。
 
 ## 已完成章节
 
@@ -46,6 +46,7 @@
 | 2026-09-14 31 | `AsyncLLM/MPClient raw duration → parent local deadline → Core drain → Worker fresh 5+4s` | [`9f03b510`](https://github.com/vllm-project/vllm/commit/9f03b510c33575fe40c320b2d266a289e8a4b83a) | [跨层剩余预算契约]({{ '/articles/vllm-cross-layer-remaining-budget-contract/' | relative_url }}) |
 | 2026-09-15 32 | `MP process / Ray actor / torchrun rank → backend adapter → late-ack gate → terminal aggregate` | [`a7576447`](https://github.com/vllm-project/vllm/commit/a7576447b86454f5c5729958d921271392ced47f) | [三 Backend Shutdown Golden]({{ '/articles/vllm-shutdown-backend-golden-late-ack-reap/' | relative_url }}) |
 | 2026-09-16 33 | `owner milestone → bounded mailbox → parent collector → WAL/fsync → durable ACK` | [`1fd119de`](https://github.com/vllm-project/vllm/commit/1fd119def5a841ada882fa3f33919b96783f9d50) | [ShutdownEvent Sideband 与 Durable Collector]({{ '/articles/vllm-shutdown-event-sideband-durable-collector/' | relative_url }}) |
+| 2026-09-17 34 | `framed append → WAL fsync → CRC recovery → atomic terminal checkpoint` | [`95f4925c`](https://github.com/vllm-project/vllm/commit/95f4925c3a03df8cfcaa21633ccc9dd5b426c7a4) | [WAL Frame 与 Atomic Terminal Checkpoint]({{ '/articles/vllm-shutdown-wal-frame-atomic-terminal-checkpoint/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -485,12 +486,21 @@
 157. parent-owned WAL replay 只接受 length/CRC 合法的 durable 前缀；torn/CRC-invalid record 之后不能拼接成功证据。
 158. Python/Rust wire schema 必须 versioned、bounded、numeric-code based；不能把任意 exception repr、prompt 或 Tensor 放入稳定 shutdown protocol。
 
+159. shutdown durability 至少分为 collector memory accept、page-cache write、WAL sync 与 terminal checkpoint publish；只有对应 sync 成功后的 offset 才能进入 durable high-water。
+160. WAL recovery 必须在首个 length/CRC/schema 非法 frame 处停止；搜索后续 magic 继续拼接可能把 payload 随机字节伪造成成功证据。
+161. frame CRC 只证明字节完整，不证明 generation、rank、owner、seq 或状态迁移合法；恢复必须在 CRC 后继续执行协议校验。
+162. sync 后 ACK 前 crash 允许 producer 重发；同 key/seq 且 payload 相同应幂等收敛，不同 payload 必须作为 conflicting duplicate fail closed。
+163. atomic terminal publish 需要 temp-file sync、rename 与 parent-directory sync；rename 的原子可见性不能单独证明断电持久性。
+164. terminal checkpoint 只能引用已同步 WAL prefix，并保存 expected set 与 high-water；replay 不得从实际出现的 ranks 反推 expected set，也不得用 reap 合成 device cleanup completed。
+
 ## 前置依赖与版本注意
 
 - 本课程以每章记录的 `main` commit 为准，不把 v0.22.1 专题中的实现自动视为当前事实。
 - 直接向 InputProcessor 传 raw prompt、向 LLMEngine 传 `EngineCoreRequest` 均处于 v0.18 移除迁移期。
 
 ## 尚未解释的知识债
+
+- 缺少实际 `ShutdownWAL/TerminalCheckpoint`、frame/version/reason-code schema、short-write/CRC repair、WAL rotation、directory-fsync、ENOSPC/EIO 降级和 crash-at-every-write harness。
 
 - 缺少不可变、owner-specific 的 `ShutdownCensus` schema 与跨进程 shutdown generation；Core/Worker 死亡后只能标记 census unavailable，不能伪造全零。
 - 缺少 BlockPool 守恒审计：非 null block refcount、free queue membership、request tables、deferred frees 与 Connector holds 尚无一次性一致性断言。
@@ -717,9 +727,24 @@
 - 新知识债：实际 schema/mailbox/WAL、CRC/torn-write repair、fsync/ACK 顺序、atomic terminal checkpoint、MP/Ray/torchrun adapter、KILL 后 join/reap、Python/Rust golden、ENOSPC 降级、敏感 detail 审计与真实 CUDA/NCCL hang。
 - 下一章：**一条记录何时算 Durable——WAL Frame、CRC/Torn Write、Atomic Terminal Checkpoint 与 Crash-at-every-write 测试。**
 
+## 第 34 章课程账本增量
+
+- 源码基线：[`95f4925c`](https://github.com/vllm-project/vllm/commit/95f4925c3a03df8cfcaa21633ccc9dd5b426c7a4)；该提交调整 ROCm modular-kernel 测试，与本文 shutdown 路径无直接修改。
+- 已覆盖文件：`vllm/v1/engine/async_llm.py`、`engine/core_client.py`、`engine/core.py`、`engine/utils.py`、`v1/utils.py`、`executor/multiproc_executor.py`、`distributed/kv_events.py`、`v1/serial_utils.py`、`tests/v1/executor/test_executor.py`、`tests/v1/shutdown/test_forward_error.py`、`tests/distributed/test_kv_cache_events.py`。
+- 已覆盖符号：`AsyncLLM.shutdown`、`MPClient.shutdown`、`CoreEngineProcManager.shutdown`、`CoreEngineProc.run_engine_core/_send_engine_dead`、`EngineCore.shutdown`、`MultiprocExecutor.shutdown/_ensure_worker_termination`、`ZmqEventPublisher`；`ShutdownWalFrame/ShutdownWalWriter/TerminalCheckpoint` 为本文提出、尚未合入的接口。
+- 新确认不变量：
+  1. `write()` 返回只形成 page-cache evidence；durable ACK 不得早于覆盖该 frame 的 WAL sync。
+  2. recovery 只接受 length/CRC/schema 合法的连续前缀，并在首个坏 frame 停止；CRC 正确后仍需验证 generation/identity/seq/state transition。
+  3. WAL sync 后 ACK 前的重发必须幂等；同 key/seq 不同 payload 是协议冲突，不能 last-write-wins。
+  4. terminal checkpoint 必须引用已同步 `durable_end`，并经 temp sync、rename、directory sync 后才可发布和 freeze。
+  5. durable session header 保存 frozen expected set；replay 不得把没出现过的 rank 从分母删除，也不得用 child reap 合成 device cleanup completed。
+- 直接测试事实：Worker termination fake-clock 只验证 grace→TERM；forward-error E2E 验证 `EngineDeadError` 与显存回落；KV event 测试验证 hash/msgpack wire compatibility。当前没有 WAL、CRC/torn-write、atomic checkpoint、directory-fsync 或 crash-at-every-write 测试。
+- 新知识债：实际 WAL/frame/checkpoint schema、stable reason taxonomy、short-write/EINTR、repair/rotation、ENOSPC/EIO 降级、MP/Ray/torchrun adapter、KILL 后 join/reap、Python/Rust golden 与真实 CUDA/NCCL hang。
+- 下一章：**Durability 失败不能拖住 KILL——ENOSPC/EIO、Group Commit、Reserved Sync Budget 与 Containment Deadline。**
+
 ## 下一批候选章节
 
-1. 下一主线：一条记录何时算 Durable——WAL frame、CRC/torn write、atomic terminal checkpoint 与 crash-at-every-write 测试。
+1. 下一主线：Durability 失败不能拖住 KILL——ENOSPC/EIO、group commit、reserved sync budget 与 containment deadline。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
