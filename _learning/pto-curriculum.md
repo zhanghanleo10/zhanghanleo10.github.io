@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-16。
+最后更新：2026-09-17。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 37 已确认 VPTO 与 EmitC 目前并非从同一个 logical VMI access 分叉：VPTO 拥有 pass-local `VMIMemoryAccessPlan`，EmitC 消费已成形的 Tile-level `pto.tload/tstore`。跨 backend 的最小契约应共享 `MemoryAccessIntent + AllocationCertificate`，分别生成 candidate，再统一验证 physical envelope、exact write、owner lifetime 与 stable diagnostic。下一步把 `Proven / Disproven / Unknown`、direct/fallback/reject 和 reason code 落成 cross-backend golden。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 38 已把 memory proof 从单一 `bool + string` 拆成 `Proven / Disproven / Unknown`，并与 `Direct / Fallback / Reject`、`Strict / PolicyRelaxed` 正交；当前主干尚未实现 shared verdict，VPTO 的 VMI lowering 与 EmitC Tile lowering仍需通过 shared intent/certificate/candidate seam 接通。下一步研究 address/layout/range mutation 与 owner generation 变化后 verdict 的失效协议。
 
 ## 已完成章节
 
@@ -62,6 +62,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-14 | MemoryAccessPlan 与 PTOAddressAnalysis 的证明边界 | semantic intent → backend candidate → typed address facts → ownership certificate | [课程 35]({% post_url 2026-09-14-ptoas-memory-access-plan-address-analysis-boundary %}) |
 | 2026-09-15 | view/phi/loop 的 Allocation Provenance | owner candidates + dynamic range + physical envelope → allocation coverage certificate | [课程 36]({% post_url 2026-09-15-ptoas-allocation-provenance-view-phi-loop %}) |
 | 2026-09-16 | VPTO/EmitC 的 shared MemoryAccessIntent 边界 | semantic intent + allocation certificate → backend candidate → direct/fallback/reject | [课程 37]({% post_url 2026-09-16-ptoas-memory-access-intent-backend-parity %}) |
+| 2026-09-17 | 跨 Backend 的 MemoryAccessVerdict | candidate + guard → Proven/Disproven/Unknown → direct/fallback/reject | [课程 38]({% post_url 2026-09-17-ptoas-memory-access-verdict-cross-backend-golden %}) |
 
 ## ISA 知识地图
 
@@ -123,7 +124,8 @@ permalink: /learning/pto-curriculum/
 | VMI→VPTO physical memory legality | VMI logical value 经 layout assignment 后按 1:N 物理化；load 可在 `policy/warn` 下接受未证明的 full-chunk over-read，store 必须保持 exact semantic footprint；readable guard、defined fill 与 consumer observation 是三份证明 | 已讲透当前 VPTO 主路径；shared/EmitC contract 待补 |
 | PTOAddressAnalysis / MemoryAccessPlan | `PTOAddressAnalysis` 从 VPTO address-semantics op 构造 root、typed element/op offset，证明 byte/unit delta、同 root difference 与有限 remainder/alignment；它不证明 allocation extent、alias、coverage 或 fill。现有 `VMIMemoryAccessPlan` 是 VMIToVPTO 内部瞬时 plan，应演进为 shared intent + backend candidate，而非复制第二套地址求解器 | 分析能力边界已讲透；shared IR/provenance/parity 待实现 |
 | Allocation provenance through view/phi/loop | `subview` 平移 base但不新建 owner，`addptr` 不产生 coverage；phi 保留可达 owner集合，loop需证明 backedge owner稳定、offset range/no-wrap，并联合 backend envelope 检查 `maxOffset+envelope≤guard` | 证明规则已闭合；shared certificate与negative matrix待实现 |
-| VPTO/EmitC memory-access parity | 当前 VPTO 运行 VMI semantic pipeline并内部生成 plan/proof，EmitC 从 Tile-level `pto.tload/tstore` 直接生成 `TLOAD/TSTORE`；parity 应比较 semantic result、proof class 与 stable diagnostic，不要求指令相同 | 当前不对称已讲透；shared seam/candidate adapter/golden待实现 |
+| VPTO/EmitC memory-access parity | 当前 VPTO 运行 VMI semantic pipeline并内部生成 plan/proof，EmitC 从 Tile-level `pto.tload/tstore` 直接生成 `TLOAD/TSTORE`；parity 比较 shared intent/certificate、candidate-specific verdict 自洽性与 semantic result，不要求指令或 proof class 必然相同 | 当前不对称、三值 proof 与 golden contract 已讲透；shared seam/candidate adapter待实现 |
+| MemoryAccessVerdict | `Proven/Disproven/Unknown`、`Direct/Fallback/Reject` 与 `Strict/PolicyRelaxed` 三轴正交；policy acceptance 不升级 proof；stable reason code 与 interval/witness 分离 | contract 已定义；IR/schema/golden/invalidation待实现 |
 
 ## 六仓版本与覆盖矩阵
 
@@ -131,12 +133,16 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [37ea0a0](https://github.com/hw-native-sys/pto-isa/commit/37ea0a0a3c79f5bcec19d23c6dcf8a7d9346dfdb) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A5 ND→NZ/ZN producer contract、dynamic alignment gap、raw-bit poison 四层协议与显式 padded TMATMUL consumer matrix | ISA 深挖 24 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [64a183e](https://github.com/hw-native-sys/PTOAS/commit/64a183e02addaed0f5c35d684709dd35c1b2715f) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI；新增 VPTO VMI semantic pipeline与 EmitC Tile path 分叉、`VMIMemoryAccessPlan`/read-safety、VSLDB/VLDS/VSTS candidate、TLOAD/TSTORE conversion，以及 shared intent/certificate parity边界 | 跨仓深挖 16 |
+| PTOAS | [fde3b35](https://github.com/hw-native-sys/PTOAS/commit/fde3b353ecc791861658e5c9a5503f61281553ed) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI；新增 VPTO/EmitC memory path、`VMIMemoryAccessPlan/VMIMemorySafeReadProof`、full/stateful read proof、load-safety policy、exact store coverage，以及 shared intent/verdict/golden边界 | 跨仓深挖 17 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
 ## 已确认接口与不变量
+
+- `Proven/Disproven/Unknown` 描述证据，`Direct/Fallback/Reject` 描述后端决策，`Strict/PolicyRelaxed` 描述接受模式；三者不可互相替代。
+- missing extent/range/alignment 是 `Unknown`；已知 candidate envelope 超过 guard 是 `Disproven`；`load-safety=policy` 放行时 proof 不得升级为 `Proven`。
+- 跨 backend parity 固定 shared intent/certificate并验证每个 candidate/verdict 自洽；candidate envelope不同可以得到不同 proof class，但最终 semantic result必须一致。
 
 - 当前 VPTO backend 执行 `appendVMISemanticPipeline→VMIToVPTO`，EmitC backend 则从 Tile-level `pto.tload/tstore` 进入 `PTOToEmitC`；两者尚未消费同一个 shared `MemoryAccessIntent`。
 - 跨 backend parity 比较 semantic result、`Proven/Disproven/Unknown` proof class 与 stable reason code，不要求生成相同 instruction sequence；candidate-specific fallback 能力可以不同。
@@ -280,7 +286,7 @@ permalink: /learning/pto-curriculum/
 
 ## 待验证推断
 
-- shared pre-backend seam 应把现有 backend-local `VMIMemoryAccessPlan` 演进为 intent/candidate 两阶段 contract，而不是保留平行同义 plan；课程37已闭合最小字段与验证式，但稳定 IR/interface、VPTO/EmitC candidate adapter、reason taxonomy 与 proof invalidation 尚未实现。
+- shared pre-backend seam 应把现有 backend-local `VMIMemoryAccessPlan` 演进为 intent/candidate/verdict contract，而不是保留平行同义 plan；课程38已闭合 proof/decision/mode 三轴、最小 reason taxonomy 与 cross-backend golden 不变量，但稳定 IR/interface、VPTO/EmitC candidate adapter 与 proof invalidation 尚未实现。
 - `!pto.ptr` 的 allocation extent/guard provenance 若能跨 view/phi/loop 与 PlanMemory generation 保留，dynamic offset range analysis 有望让更多 load 在 strict 模式通过；需要实现、owner-lifetime 规则和 lit 证明。
 - full-chunk policy path 比 exact gather/scalar fallback 更利于设备流水只是基于 IR 数量的推断，尚缺 A5 bandwidth、cycle 与 register-pressure 对照。
 - 当前英文 `TRESHAPE` 规范已把 A2/A3/A5 保证限制在 source valid region，中文规范尚未同步该段；这应视为文档一致性缺口，而不是两套已确认语义。
@@ -354,7 +360,7 @@ permalink: /learning/pto-curriculum/
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
-- Shared `MemoryAccessIntent` 与 `AllocationCertificate` 尚未落地；课程37已明确当前 VPTO/EmitC 抽象层不对称及 candidate contract，仍缺 function/alloc owner导入、shared seam IR、EmitC physical-envelope adapter、stable reason code、proof invalidation、cross-backend golden，以及真实 A5 guard-page/canary/poison/exact-fallback 性能矩阵。
+- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程38已定义三值 proof、stable reason code 与 candidate-specific parity，仍缺 function/alloc owner导入、shared seam IR、EmitC physical-envelope adapter、guarded/exact fallback、proof invalidation、cross-backend executable golden，以及真实 A5 guard-page/canary/poison/exact-fallback 性能矩阵。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -578,3 +584,15 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：VMI lit覆盖VPTO backend选择、all-active与negative-offset的strict/warn/policy；EmitC lit覆盖`16×16xf32` TLOAD/TSTORE、L2 bypass与TSTORE overload。当前没有same-intent、same-certificate的双backend golden。
 - 新知识债：shared intent/certificate IR、ABI owner/extent导入、EmitC physical-envelope adapter、guarded/exact fallback、stable reason taxonomy、analysis invalidation、A5 guard-page/canary/poison与candidate性能矩阵。
 - 下一章：**同一个 Intent，三类结论——把 `Proven / Disproven / Unknown`、stable reason code、direct/fallback/reject 做成 VPTO/EmitC cross-backend golden，并定义 padding poison 与 canary E2E。**
+
+
+## 第 38 章课程账本增量
+
+- 源码基线：PTOAS [`fde3b353`](https://github.com/hw-native-sys/PTOAS/commit/fde3b353ecc791861658e5c9a5503f61281553ed)；课程37后13个提交主要加入generic scalar lowering等变化，本文涉及的VMI memory internals、EmitC `TLoad.cpp/TStore.cpp` 与直接测试blob未变。
+- 新覆盖文件：`VMIToVPTOConversionInternals.cpp`、`VMIToVPTOMemoryInternals.cpp`、VMI pattern internals、EmitC `TLoad.cpp/TStore.cpp`、`ptoas_pipeline.cpp`、safe-tail/short-load/policy与EmitC load-store lit。
+- 新覆盖符号：`VMIMemorySafeReadProof`、`computeSafeFullReadProof`、`computeSafeStatefulReadProof`、`verifyFullOrSafeReadVRegChunks`、`applyLoadSafetyPolicy`、`checkStorePhysicalCoverage`、`PTOTLoadToTLOAD`、`PTOTStoreToTSTORE`。
+- 新确认不变量：proof class、lowering decision 与 safety mode 三轴正交；policy acceptance 不升级 proof；missing fact 属于Unknown，known counterexample属于Disproven；candidate-specific proof可以跨backend不同，但intent/certificate、语义结果与verdict自洽性必须一致。
+- 具体演算：`vreg<100xf32>` semantic payload为400 B、full-carrier candidate为512 B；guard 512 B得到Proven，guard 508 B得到已知4 B shortage/Disproven，raw pointer无extent得到Unknown。
+- 直接测试事实：safe-tail memref验证512 B/非零offset可lower；short-load negative验证`[0,288)`超出`[0,284)`；raw pointer/dynamic offset验证missing facts会拒绝；EmitC tests只验证调用、overload与cache hint。当前没有structured verdict或same-intent双backend golden。
+- 新知识债：shared intent/certificate/verdict IR、ABI extent导入、EmitC candidate adapter、reason schema version、generic guarded/exact fallback、proof invalidation、A5 guard-page/canary/poison与性能矩阵。
+- 下一章：**一份 Proof 能活多久——address/layout/range mutation、owner generation 与 `MemoryAccessVerdict` invalidation。**
