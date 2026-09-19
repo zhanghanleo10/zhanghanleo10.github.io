@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-18。
+最后更新：2026-09-19。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 39 已闭合 memory proof 的时间边界：当前 VMI safe-read proof 是调用内短命对象；函数级 ValueEvolution/AddressAnalysis cache 只对当前 IR 快照有效，rewrite 后必须丢弃或重建。建议的 shared verdict 还必须绑定 address/layout/range/candidate、owner identity/generation、target 与 policy。下一步研究 `Unknown` 后的 runtime guard、exact fallback 与 loop guard hoisting 成本模型。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 40 已闭合 `Unknown` 的处置边界：当前 `vldas+vldus` 只解决非对齐物理化，`policy/warn` 接受未证明 full-carrier read，strict mode 仍 fail closed；建议的 runtime guard 必须绑定 owner extent/range/candidate/generation，guard false 只能进入 exact fallback 或 reject。下一步追踪 function ABI 如何导入 owner identity、extent、alignment 与 generation。
 
 ## 已完成章节
 
@@ -64,6 +64,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-16 | VPTO/EmitC 的 shared MemoryAccessIntent 边界 | semantic intent + allocation certificate → backend candidate → direct/fallback/reject | [课程 37]({% post_url 2026-09-16-ptoas-memory-access-intent-backend-parity %}) |
 | 2026-09-17 | 跨 Backend 的 MemoryAccessVerdict | candidate + guard → Proven/Disproven/Unknown → direct/fallback/reject | [课程 38]({% post_url 2026-09-17-ptoas-memory-access-verdict-cross-backend-golden %}) |
 | 2026-09-18 | MemoryAccessVerdict 的失效边界 | dependency snapshot → mutation → invalidate → recompute | [课程 39]({% post_url 2026-09-18-ptoas-memory-access-verdict-invalidation %}) |
+| 2026-09-19 | Unknown 的 runtime guard 与 exact fallback | Unknown → guard/policy → stateful fast path or exact fallback/reject → hoist | [课程 40]({% post_url 2026-09-19-ptoas-unknown-runtime-guard-exact-fallback-hoisting %}) |
 
 ## ISA 知识地图
 
@@ -128,6 +129,7 @@ permalink: /learning/pto-curriculum/
 | VPTO/EmitC memory-access parity | 当前 VPTO 运行 VMI semantic pipeline并内部生成 plan/proof，EmitC 从 Tile-level `pto.tload/tstore` 直接生成 `TLOAD/TSTORE`；parity 比较 shared intent/certificate、candidate-specific verdict 自洽性与 semantic result，不要求指令或 proof class 必然相同 | 当前不对称、三值 proof 与 golden contract 已讲透；shared seam/candidate adapter待实现 |
 | MemoryAccessVerdict | `Proven/Disproven/Unknown`、`Direct/Fallback/Reject` 与 `Strict/PolicyRelaxed` 三轴正交；policy acceptance 不升级 proof；stable reason code 与 interval/witness 分离 | contract 已定义；IR/schema/golden待实现 |
 | Proof invalidation | verdict 只对 intent/address/layout/range/candidate/owner generation/target/policy 的依赖快照有效；rewrite 后旧 analysis 不可消费。当前 VMI proof 调用内销毁，`VPTOSoftPostUpdate` 用 analyze-then-rewrite 与 fresh per-block analysis 避免 stale cache | 当前机制与建议 fingerprint 已分层讲透；shared revision/generation 与 differential golden 待实现 |
+| Unknown recovery / guard hoisting | `vldas+vldus` 是 alignment/legalization fallback，不是 exact safety fallback；runtime guard 需 owner extent、整循环 range、candidate envelope、no-wrap 与 generation，false path 只能 exact 或 reject。现有 `VPTOGuardedLICM` 只提升纯 scalar/address 子表达式 | 决策与成本模型已闭合；ABI certificate、guard/slow-path IR 与设备矩阵待实现 |
 
 ## 六仓版本与覆盖矩阵
 
@@ -135,7 +137,7 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [37ea0a0](https://github.com/hw-native-sys/pto-isa/commit/37ea0a0a3c79f5bcec19d23c6dcf8a7d9346dfdb) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A5 ND→NZ/ZN producer contract、dynamic alignment gap、raw-bit poison 四层协议与显式 padded TMATMUL consumer matrix | ISA 深挖 24 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [8a0a568](https://github.com/hw-native-sys/PTOAS/commit/8a0a5689b39c94288a734aeba8d248b5cdb2fa73) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；新增 `PTOValueEvolutionAnalysis` cache、`PTOAddressAnalysis::getAddresses`、`VPTOSoftPostUpdate` analyze-then-rewrite/fresh analysis，以及 VMI proof lifetime 与 shared verdict invalidation contract | 跨仓深挖 18 |
+| PTOAS | [9b81c7a](https://github.com/hw-native-sys/PTOAS/commit/9b81c7a9614a179b534532a42ec36273b910244f) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；新增 PtrType non-strict stateful `vldas+vldus` seam、strict envelope proof、`getUnavailableReadFallbackReason` 与 `VPTOGuardedLICM` 的 hoist 边界，并推导 runtime guard/exact fallback contract | 跨仓深挖 19 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -149,6 +151,9 @@ permalink: /learning/pto-curriculum/
 - 当前 `VMIMemorySafeReadProof` 在一次 VMI lowering decision 内构造并立即消费，没有跨 pass 持久化；未来 shared verdict 若进入 IR/cache/side table，必须同时实现 dependency fingerprint 与 invalidation。
 - pointer 数值相等不证明 allocation continuity；owner lifetime 结束或相同地址被新 generation 复用时，旧 extent/guard certificate 必须失效。
 - policy change 可以改变 `Direct/Fallback/Reject`，但不能把旧或不足的 proof 升级为 `Proven`；mutation 后必须先重建事实，再应用 policy。
+- stateful `vldas+vldus` 解决非对齐 instruction selection，不保证 physical read set 等于 semantic read set；`policy/warn` 的 early success 仍是 Unknown 的显式放行。
+- runtime guard 必须验证 `owner/range/candidate/no-wrap/generation` 的同一快照；guard false 只有 exact fallback 或 reject，不能回到相同 over-read candidate。
+- loop safety guard 只有在 owner、extent、trip count、stride、candidate 与 generation 覆盖全部迭代且保持不变时才能提升；`VPTOGuardedLICM` 的 scalar/address LICM 不能替代该证明。
 
 - 当前 VPTO backend 执行 `appendVMISemanticPipeline→VMIToVPTO`，EmitC backend 则从 Tile-level `pto.tload/tstore` 进入 `PTOToEmitC`；两者尚未消费同一个 shared `MemoryAccessIntent`。
 - 跨 backend parity 比较 semantic result、`Proven/Disproven/Unknown` proof class 与 stable reason code，不要求生成相同 instruction sequence；candidate-specific fallback 能力可以不同。
@@ -292,7 +297,7 @@ permalink: /learning/pto-curriculum/
 
 ## 待验证推断
 
-- shared pre-backend seam 应把现有 backend-local `VMIMemoryAccessPlan` 演进为 intent/candidate/verdict contract，而不是保留平行同义 plan；课程38已闭合 proof/decision/mode 三轴、最小 reason taxonomy 与 cross-backend golden 不变量，但稳定 IR/interface、VPTO/EmitC candidate adapter 与 proof invalidation 尚未实现。
+- shared pre-backend seam 应把现有 backend-local `VMIMemoryAccessPlan` 演进为 intent/candidate/verdict contract，而不是保留平行同义 plan；课程40已闭合 Unknown 的 guard/policy/exact/reject 决策与 hoist 条件，但稳定 IR/interface、ABI certificate、VPTO/EmitC candidate adapter、runtime guard 与 exact slow path 尚未实现。
 - `!pto.ptr` 的 allocation extent/guard provenance 若能跨 view/phi/loop 与 PlanMemory generation 保留，dynamic offset range analysis 有望让更多 load 在 strict 模式通过；需要实现、owner-lifetime 规则和 lit 证明。
 - full-chunk policy path 比 exact gather/scalar fallback 更利于设备流水只是基于 IR 数量的推断，尚缺 A5 bandwidth、cycle 与 register-pressure 对照。
 - 当前英文 `TRESHAPE` 规范已把 A2/A3/A5 保证限制在 source valid region，中文规范尚未同步该段；这应视为文档一致性缺口，而不是两套已确认语义。
@@ -366,7 +371,7 @@ permalink: /learning/pto-curriculum/
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
-- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程38已定义三值 proof、stable reason code 与 candidate-specific parity，仍缺 function/alloc owner导入、shared seam IR、EmitC physical-envelope adapter、guarded/exact fallback、proof invalidation、cross-backend executable golden，以及真实 A5 guard-page/canary/poison/exact-fallback 性能矩阵。
+- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程40已定义三值 proof 后的 policy/guard/exact/reject 与 hoisting contract，仍缺 function ABI owner/extent/alignment/generation 导入、shared seam IR、EmitC physical-envelope adapter、guard/slow-path materialization、scratch PlanMemory、cross-backend executable golden，以及真实 A5 guard-page/canary/poison/双版本 loop 性能矩阵。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -376,7 +381,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：研究 `Unknown` 后的 runtime guard、exact fallback 与 loop guard hoisting；固定 guard 条件、fallback 语义、graphability 与编译/设备成本模型，并补 cross-backend golden。
+1. 主线：追踪 function ABI、pointer/view/PlanMemory 如何导入 owner identity、extent、alignment 与 generation，形成可由 runtime guard 消费的 `AllocationCertificate`。
 2. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 实现 generation-aware cross-dispatch CI contract。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -614,3 +619,15 @@ permalink: /learning/pto-curriculum/
 - 新设计推导：shared verdict fingerprint 应覆盖 intent/address/layout/range/candidate/owner identity+generation/target/policy；无法比较时重算或降为 Unknown，不能沿用旧 Proven。
 - 新知识债：shared revision/generation schema、ABI owner extent 导入、stable reason code、analysis preservation verifier、mutation-differential golden、guarded/exact fallback、A5 guard-page/canary/poison 与编译时 profile。
 - 下一章：**Unknown 之后怎么继续——Runtime Guard、Exact Fallback 与 Guard Hoisting 的成本模型。**
+
+
+## 第 40 章课程账本增量
+
+- 源码基线：PTOAS [`9b81c7a9`](https://github.com/hw-native-sys/PTOAS/commit/9b81c7a9614a179b534532a42ec36273b910244f)；相对课程 39 的 `8a0a5689` 前进 13 个提交，直接相关已合入提交为 [`c62ffd96`](https://github.com/hw-native-sys/PTOAS/commit/c62ffd96bae3d8cd3ca8e371f501ed335a25b176)。
+- 新覆盖文件：`VMIToVPTOMemoryInternals.cpp`、`VMIToVPTOPatternInternals1.cpp`、`VMIToVPTOConversionInternals.cpp`、`VMIToVPTOPatternInternals9.cpp`、`VPTOGuardedLICM.cpp`、VMI load/store ISA 与 physical-memory legalization design，以及 strict/policy/stateful/guarded-LICM lit 和 unaligned vmula simulator case。
+- 新覆盖符号：`getStatefulReadContract`、`computeSafeStatefulReadProof`、`checkSupportedContiguousLoadAddress`、`applyLoadSafetyPolicy`、`OneToNVMILoadOpPattern::materializeUnalignedContiguousParts`、`VPTOGuardedLICM`。
+- 新确认不变量：stateful fallback 解决 alignment/legalization，不是 exact safety fallback；non-strict policy 接受 Unknown 不升级 proof；guard false 只能 exact/reject；hoisted loop guard 必须覆盖最大 physical envelope、no-wrap 与稳定 owner generation。
+- 具体演算：四次 `vreg<100xf32>`、32 B 步长时 semantic end 最大 496 B，512 B carrier end 最大 608 B；`E=512` 可 exact 但不可 fast，`E=640` 可一次 guard 后全走 fast。
+- 直接测试事实：strict memref test 区分 288 B candidate 与 284 B allocation；raw PtrType test 验证 `vldas/vldus` 且无 `vsldb`；negative-offset test 区分 error/warn/policy；unaligned vmula case验证三种 remainder 的数值；GuardedLICM tests 固定可提升与不可投机边界。当前无 executable runtime guard 或 exact slow path。
+- 新知识债：function ABI owner/extent/alignment/generation、shared guard token、exact point/gather/scratch fallback、scratch PlanMemory、fast/slow loop cloning、stable reason code、VPTO/EmitC golden、A5 guard-page/canary/poison 与性能矩阵。
+- 下一章：**Extent 从哪里来——把 owner identity、extent、alignment 与 generation 从 function ABI 导入 AllocationCertificate。**
