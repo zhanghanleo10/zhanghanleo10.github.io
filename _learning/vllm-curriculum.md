@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 34 章已把 durable ACK 落成 `framed append → WAL fsync → atomic terminal checkpoint`，区分 write 可见、frame 完整、持久前缀与终态发布；下一章处理 ENOSPC/EIO、group commit、reserved sync budget 与 containment deadline 的冲突。
+- 当前主线：第 35 章已把 durability failure 与 containment deadline 分离：`ENOSPC/EIO/slow fsync` 只能降低 evidence verdict，不能阻塞或续期 `TERM → KILL → reap`；下一章补齐 KILL 后 join/reap、PID reuse 与 descendant tree 的可观测终态。
 
 ## 已完成章节
 
@@ -47,6 +47,7 @@
 | 2026-09-15 32 | `MP process / Ray actor / torchrun rank → backend adapter → late-ack gate → terminal aggregate` | [`a7576447`](https://github.com/vllm-project/vllm/commit/a7576447b86454f5c5729958d921271392ced47f) | [三 Backend Shutdown Golden]({{ '/articles/vllm-shutdown-backend-golden-late-ack-reap/' | relative_url }}) |
 | 2026-09-16 33 | `owner milestone → bounded mailbox → parent collector → WAL/fsync → durable ACK` | [`1fd119de`](https://github.com/vllm-project/vllm/commit/1fd119def5a841ada882fa3f33919b96783f9d50) | [ShutdownEvent Sideband 与 Durable Collector]({{ '/articles/vllm-shutdown-event-sideband-durable-collector/' | relative_url }}) |
 | 2026-09-17 34 | `framed append → WAL fsync → CRC recovery → atomic terminal checkpoint` | [`95f4925c`](https://github.com/vllm-project/vllm/commit/95f4925c3a03df8cfcaa21633ccc9dd5b426c7a4) | [WAL Frame 与 Atomic Terminal Checkpoint]({{ '/articles/vllm-shutdown-wal-frame-atomic-terminal-checkpoint/' | relative_url }}) |
+| 2026-09-19 35 | `ENOSPC/EIO/slow fsync → sync cutoff → TERM/KILL/reap reserve → degraded terminal` | [`729ebac4`](https://github.com/vllm-project/vllm/commit/729ebac4983e1510e035bc579142b0fc210a49a3) | [Durability Failure 与 Containment Deadline]({{ '/articles/vllm-shutdown-durability-failure-containment-deadline/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -492,6 +493,10 @@
 162. sync 后 ACK 前 crash 允许 producer 重发；同 key/seq 且 payload 相同应幂等收敛，不同 payload 必须作为 conflicting duplicate fail closed。
 163. atomic terminal publish 需要 temp-file sync、rename 与 parent-directory sync；rename 的原子可见性不能单独证明断电持久性。
 164. terminal checkpoint 只能引用已同步 WAL prefix，并保存 expected set 与 high-water；replay 不得从实际出现的 ranks 反推 expected set，也不得用 reap 合成 device cleanup completed。
+165. durability 是 evidence enhancement，不是 containment prerequisite；collector 的 `ENOSPC/EIO/slow fsync` 不得阻塞或续期 supervisor deadline。
+166. ACK 只覆盖 successful sync prefix；short write、sync `EIO` 或阻塞不能推进 `durable_end`，CRC 也不能把未同步 tail 升级为 durable。
+167. `sync_cutoff <= contain_deadline - reap_reserve`；group commit 只能消费 cutoff 之前的预算，尾部时间归 TERM/KILL/reap owner。
+168. durability verdict 与 containment verdict 正交：证据可降级为 unknown/failed，而 expected-rank set 与隔离动作仍必须完整保留。
 
 ## 前置依赖与版本注意
 
@@ -500,7 +505,7 @@
 
 ## 尚未解释的知识债
 
-- 缺少实际 `ShutdownWAL/TerminalCheckpoint`、frame/version/reason-code schema、short-write/CRC repair、WAL rotation、directory-fsync、ENOSPC/EIO 降级和 crash-at-every-write harness。
+- 缺少实际 `ShutdownEvent/ShutdownWAL/TerminalCheckpoint`、独立 collector process、stable durability reason、short-write/EINTR loop、preallocation/rotation、group-commit benchmark、ENOSPC/EIO/blocked-fsync fault matrix 和 crash-at-every-write harness。
 
 - 缺少不可变、owner-specific 的 `ShutdownCensus` schema 与跨进程 shutdown generation；Core/Worker 死亡后只能标记 census unavailable，不能伪造全零。
 - 缺少 BlockPool 守恒审计：非 null block refcount、free queue membership、request tables、deferred frees 与 Connector holds 尚无一次性一致性断言。
@@ -725,7 +730,7 @@
   5. replay 只接受 length/CRC 合法前缀并按 seq 幂等收敛；terminal checkpoint 后的 late event 不改写结果。
 - 直接测试事实：MP fake-clock 只验证 grace→TERM；Rust sentinel test 只验证 sticky unhealthy；普通 EngineCoreOutputs 已有 Python/Rust 双向 fixture 模式；KV event publisher 提供 bounded/replay 参考但仅为进程内内存。当前没有 ShutdownEvent wire、mailbox concurrency、collector crash 或 disk-failure 测试。
 - 新知识债：实际 schema/mailbox/WAL、CRC/torn-write repair、fsync/ACK 顺序、atomic terminal checkpoint、MP/Ray/torchrun adapter、KILL 后 join/reap、Python/Rust golden、ENOSPC 降级、敏感 detail 审计与真实 CUDA/NCCL hang。
-- 下一章：**一条记录何时算 Durable——WAL Frame、CRC/Torn Write、Atomic Terminal Checkpoint 与 Crash-at-every-write 测试。**
+- 下一章：**KILL 之后谁收尸——join/reap、PID reuse 与 Process Tree Containment Final。**
 
 ## 第 34 章课程账本增量
 
@@ -742,9 +747,19 @@
 - 新知识债：实际 WAL/frame/checkpoint schema、stable reason taxonomy、short-write/EINTR、repair/rotation、ENOSPC/EIO 降级、MP/Ray/torchrun adapter、KILL 后 join/reap、Python/Rust golden 与真实 CUDA/NCCL hang。
 - 下一章：**Durability 失败不能拖住 KILL——ENOSPC/EIO、Group Commit、Reserved Sync Budget 与 Containment Deadline。**
 
+## 第 35 章课程账本增量
+
+- 源码基线：[`729ebac4`](https://github.com/vllm-project/vllm/commit/729ebac4983e1510e035bc579142b0fc210a49a3)；相对第 34 章前进 141 个 commit，本文直接相关 shutdown 文件未变化。
+- 已覆盖文件：`vllm/entrypoints/cli/serve.py`、`entrypoints/launchers/launcher.py`、`vllm/v1/engine/async_llm.py`、`engine/core_client.py`、`engine/utils.py`、`v1/utils.py`、`executor/multiproc_executor.py`、`distributed/kv_events.py`、`tests/v1/executor/test_executor.py`、`tests/v1/engine/test_startup_watch_processes.py`、`tests/v1/shutdown/test_forward_error.py`。
+- 已覆盖符号：`serve.run_server` 的 `shutdown_by/to_timeout`、API server `handle_shutdown`、`AsyncLLM.shutdown`、`MPClient.shutdown`、`CoreEngineProcManager.shutdown`、`get_engine_process_shutdown_timeout`、`v1.utils.shutdown`、`MultiprocExecutor.shutdown/_ensure_worker_termination`、`ZmqEventPublisher.shutdown`；`ShutdownBudget/DurabilityState` 为建议接口。
+- 新确认不变量：durability 不得阻塞或续期 containment；ACK 只覆盖 successful sync prefix；`sync_cutoff` 必须给 TERM/KILL/reap 留 reserve；durability 与 containment verdict 正交。
+- 直接测试事实：fake-clock 仅覆盖 grace→TERM；process-timeout 测试覆盖 ROCm cleanup grace 与 remaining-budget 不重开；forward-error E2E 验证错误传播和显存阈值。当前没有 ENOSPC/EIO、blocked fsync、group commit 或 KILL→reap 测试。
+- 新知识债：独立 collector、stable reason taxonomy、short-write/EINTR、preallocation/rotation、group-commit benchmark、MP/Ray/torchrun adapter、KILL 后 join/reap、Python/Rust golden 与真实 CUDA/NCCL hang×disk-failure E2E。
+- 下一章：**KILL 之后谁收尸——join/reap、PID reuse 与 Process Tree Containment Final。**
+
 ## 下一批候选章节
 
-1. 下一主线：Durability 失败不能拖住 KILL——ENOSPC/EIO、group commit、reserved sync budget 与 containment deadline。
+1. 下一主线：KILL 之后谁收尸——join/reap、PID reuse 与 Process Tree Containment Final。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
@@ -783,3 +798,11 @@
 - 已闭合：进程退出、Host metadata 清零、device completion 与跨 rank aggregate 已被拆成不同证据；SIGKILL 后缺失 final 只能成为 abandoned/unknown。
 - 当前最大盲区：`ShutdownProgress` 仍是设计，尚未从 Worker/ModelRunner 的 fence 与资源 census 实际聚合到 Executor/Core，也没有 MP/Ray/external launcher 的同构测试。
 - 后续路线调整：先建立 schema、collector、Python/Rust golden 和跨 backend fault matrix，再回访 alive-but-stalled Worker、Connector 与真实 GPU/NCCL hang。
+
+
+## 第五次七章知识图谱回顾（第 29–35 章）
+
+- 已打通：`Worker device final → expected-rank aggregate → native hang escalation → cross-layer remaining budget → backend-specific containment → bounded sideband → WAL durable prefix → durability fail-open`。
+- 已闭合：cleanup evidence、process isolation、durable ACK 与 terminal completeness 是四种不同证据；diagnostic failure 不得续期 containment。
+- 当前最大盲区：`ShutdownEvent/ShutdownWAL` 仍是设计，MP Worker 的 `5s + 4s` 仍未接收顶层 remaining budget，KILL 后也没有显式 join/reap。
+- 后续路线调整：先补 zombie-free terminal 与 MP/Ray/external launcher adapter，再做 Python/Rust golden、真实 CUDA/NCCL hang 和磁盘故障联合矩阵。
