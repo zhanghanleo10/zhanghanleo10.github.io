@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 35 章已把 durability failure 与 containment deadline 分离：`ENOSPC/EIO/slow fsync` 只能降低 evidence verdict，不能阻塞或续期 `TERM → KILL → reap`；下一章补齐 KILL 后 join/reap、PID reuse 与 descendant tree 的可观测终态。
+- 当前主线：第 36 章已把 KILL 后终态拆为 `signal sent → exit observed → direct child reaped → descendant domain contained`，并确认当前三条 shutdown 路径缺少同步的 KILL 后 join/reap；下一章把 `ProcessFinal` 接到 MP、Ray 与 external launcher 的 backend-specific owner。
 
 ## 已完成章节
 
@@ -48,6 +48,7 @@
 | 2026-09-16 33 | `owner milestone → bounded mailbox → parent collector → WAL/fsync → durable ACK` | [`1fd119de`](https://github.com/vllm-project/vllm/commit/1fd119def5a841ada882fa3f33919b96783f9d50) | [ShutdownEvent Sideband 与 Durable Collector]({{ '/articles/vllm-shutdown-event-sideband-durable-collector/' | relative_url }}) |
 | 2026-09-17 34 | `framed append → WAL fsync → CRC recovery → atomic terminal checkpoint` | [`95f4925c`](https://github.com/vllm-project/vllm/commit/95f4925c3a03df8cfcaa21633ccc9dd5b426c7a4) | [WAL Frame 与 Atomic Terminal Checkpoint]({{ '/articles/vllm-shutdown-wal-frame-atomic-terminal-checkpoint/' | relative_url }}) |
 | 2026-09-19 35 | `ENOSPC/EIO/slow fsync → sync cutoff → TERM/KILL/reap reserve → degraded terminal` | [`729ebac4`](https://github.com/vllm-project/vllm/commit/729ebac4983e1510e035bc579142b0fc210a49a3) | [Durability Failure 与 Containment Deadline]({{ '/articles/vllm-shutdown-durability-failure-containment-deadline/' | relative_url }}) |
+| 2026-09-20 36 | `KILL sent → exit observed → direct-child reap → descendant-domain final` | [`a7fda4c8`](https://github.com/vllm-project/vllm/commit/a7fda4c88bfc421d31e33acc5e01e86ebe467ad8) | [join/reap 与 Process Tree Final]({{ '/articles/vllm-kill-join-reap-process-tree-containment-final/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -323,6 +324,14 @@
 - `ZmqEventPublisher`（bounded queue/HWM/in-memory replay pattern）
 - `ShutdownEvent/ShutdownMailbox/DurableCollector`（本文提出的设计接口，尚未合入）
 
+- `kill_process_tree`
+- `v1.utils.shutdown/_shutdown_subprocesses`
+- `_SubprocessWrapper.join/monitor_subprocess`
+- `MultiprocExecutor._ensure_worker_termination`
+- `WorkerProc.make_worker_process`
+- `DPSupervisor._shutdown_children`
+- `_join_processes_with_timeout`
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -497,6 +506,11 @@
 166. ACK 只覆盖 successful sync prefix；short write、sync `EIO` 或阻塞不能推进 `durable_end`，CRC 也不能把未同步 tail 升级为 durable。
 167. `sync_cutoff <= contain_deadline - reap_reserve`；group commit 只能消费 cutoff 之前的预算，尾部时间归 TERM/KILL/reap owner。
 168. durability verdict 与 containment verdict 正交：证据可降级为 unknown/failed，而 expected-rank set 与隔离动作仍必须完整保留。
+169. `SIGKILL` 只证明 supervisor 发起强制终止；`exitcode/sentinel`、`join/waitpid` 与 descendant-domain empty 分别是 S1/S2/S3 证据，不能互相替代。
+170. KILL 后必须消费同一 containment deadline 的 `reap_reserve`；逐进程等待不能为每个 rank 重开完整 timeout。
+171. direct-child `join` 只证明该 child 已 reap；递归 PID 快照不能稳定证明 shutdown 期间没有新 fork、逃逸或重新托管的后代。
+172. 裸 PID 不是 generation-safe identity；跨枚举与发信号的正确性需要 process handle、`pid+create_time` 校验或 pidfd/cgroup 等更强原语。
+173. containment terminal 只有在 owned direct handles 已回收且 descendant verdict 明确后才能冻结；超时必须记录 `kill_sent_reap_timeout/tree_unknown`，不能记录 complete。
 
 ## 前置依赖与版本注意
 
@@ -504,6 +518,8 @@
 - 直接向 InputProcessor 传 raw prompt、向 LLMEngine 传 `EngineCoreRequest` 均处于 v0.18 移除迁移期。
 
 ## 尚未解释的知识债
+
+- 缺少实际 `ProcessFinal`、KILL 后 shared-deadline join/reap、generation-safe PID identity、process-group/cgroup owner、zombie/fork-race/PID-reuse 故障注入，以及 MP/Ray/external launcher 的 zombie-free golden。
 
 - 缺少实际 `ShutdownEvent/ShutdownWAL/TerminalCheckpoint`、独立 collector process、stable durability reason、short-write/EINTR loop、preallocation/rotation、group-commit benchmark、ENOSPC/EIO/blocked-fsync fault matrix 和 crash-at-every-write harness。
 
@@ -757,9 +773,19 @@
 - 新知识债：独立 collector、stable reason taxonomy、short-write/EINTR、preallocation/rotation、group-commit benchmark、MP/Ray/torchrun adapter、KILL 后 join/reap、Python/Rust golden 与真实 CUDA/NCCL hang×disk-failure E2E。
 - 下一章：**KILL 之后谁收尸——join/reap、PID reuse 与 Process Tree Containment Final。**
 
+## 第 36 章课程账本增量
+
+- 源码基线：[`a7fda4c8`](https://github.com/vllm-project/vllm/commit/a7fda4c88bfc421d31e33acc5e01e86ebe467ad8)；相对第 35 章前进 22 个 commit，本文直接相关 process shutdown 文件未变化。
+- 已覆盖文件：`vllm/utils/system_utils.py`、`vllm/v1/utils.py`、`vllm/v1/executor/multiproc_executor.py`、`vllm/entrypoints/launchers/dp_supervisor.py`、`tests/v1/executor/test_executor.py`、`tests/entrypoints/launchers/test_shutdown.py`、`tests/entrypoints/launchers/test_dp_supervisor.py`、`tests/v1/fault_tolerance/test_fault_tolerance_e2e.py`。
+- 已覆盖符号：`kill_process_tree`、`shutdown/_shutdown_subprocesses`、`_SubprocessWrapper`、`MultiprocExecutor._ensure_worker_termination/shutdown`、`WorkerProc.make_worker_process`、`DPSupervisor._shutdown_children`、`_join_processes_with_timeout`；`ProcessFinal` 为建议接口。
+- 新确认不变量：signal、exit、reap 与 process-domain empty 是四级不同证据；KILL 后必须消费预留的 shared deadline；direct-child join 与 descendant containment 正交；裸 PID 不是 generation-safe identity。
+- 直接测试事实：Worker fake-clock 测试只验证 grace→TERM；shutdown E2E 把 zombie 排除出 still-alive；DP supervisor 单测只验证 timeout 传递；fault-tolerance E2E 验证 Worker KILL 的故障检测。当前没有 KILL→join、zombie、fork race、PID reuse 或 descendant-domain empty 测试。
+- 新知识债：实际 `ProcessFinal`、KILL 后 join/reap、pidfd/process group/cgroup ownership、subreaper、stable reason、MP/Ray/external adapter，以及真实 native hang×process-tree E2E。
+- 下一章：**同一个 ProcessFinal，三种 Owner——MP、Ray 与 External Launcher 的 zombie-free adapter 和 golden matrix。**
+
 ## 下一批候选章节
 
-1. 下一主线：KILL 之后谁收尸——join/reap、PID reuse 与 Process Tree Containment Final。
+1. 下一主线：同一个 ProcessFinal，三种 Owner——MP、Ray 与 External Launcher 的 zombie-free adapter 和 golden matrix。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
