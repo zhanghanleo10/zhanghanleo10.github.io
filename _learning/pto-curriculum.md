@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-20。
+最后更新：2026-09-21。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 41 已确认 pointer、view 与 allocation certificate 的事实边界：pointer-first ABI 只有地址/类型/空间，shape/stride 只是 view claim；外部 allocation 必须由可信 runtime 导入 owner/extent/alignment/generation，PlanMemory 自有 local buffer 则可静态生成 certificate。下一步追踪 certificate 穿过 call/cast/subview/phi 与 async launch 的传播、lease 和 verifier。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 42 已把 AllocationCertificate 的跨边界传播拆成 identity、range、lifetime 三个 closure：direct call 映射 actual/formal，cast 只改表示但必须抗 rewrite，subview 收窄同一 owner，phi/select 若 owner 或 generation 冲突则不能合成单一 certificate；若 backend 执行越过 owner scope，还需要 completion-scoped lease。下一步研究 completion 丢失、cancel、quarantine 与 generation fencing。
 
 ## 已完成章节
 
@@ -66,6 +66,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-18 | MemoryAccessVerdict 的失效边界 | dependency snapshot → mutation → invalidate → recompute | [课程 39]({% post_url 2026-09-18-ptoas-memory-access-verdict-invalidation %}) |
 | 2026-09-19 | Unknown 的 runtime guard 与 exact fallback | Unknown → guard/policy → stateful fast path or exact fallback/reject → hoist | [课程 40]({% post_url 2026-09-19-ptoas-unknown-runtime-guard-exact-fallback-hoisting %}) |
 | 2026-09-20 | Function ABI 与 AllocationCertificate | pointer/view/PlanMemory → owner/extent/alignment/generation → guard | [课程 41]({% post_url 2026-09-20-ptoas-function-abi-allocation-certificate %}) |
+| 2026-09-21 | Owner Closure 与 Generation Lease | ABI certificate → call/cast/subview/phi closure → launch lease | [课程 42]({% post_url 2026-09-21-ptoas-allocation-certificate-owner-closure-lease %}) |
 
 ## ISA 知识地图
 
@@ -139,7 +140,7 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [37ea0a0](https://github.com/hw-native-sys/pto-isa/commit/37ea0a0a3c79f5bcec19d23c6dcf8a7d9346dfdb) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A5 ND→NZ/ZN producer contract、dynamic alignment gap、raw-bit poison 四层协议与显式 padded TMATMUL consumer matrix | ISA 深挖 24 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [9b81c7a](https://github.com/hw-native-sys/PTOAS/commit/9b81c7a9614a179b534532a42ec36273b910244f) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；新增 pointer-first entry、`PtrType`、`PTOVPTOPtrBoundary`、AddressAnalysis alignment assumption 与 PlanMemory static bytes/alignment/offset 的 certificate 来源边界 | 跨仓深挖 20 |
+| PTOAS | [61e14673](https://github.com/hw-native-sys/PTOAS/commit/61e14673eb6b5f040a7cf0c64d5286d755abcdf4) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；新增 pointer-first certificate 来源、direct call/cast/subview/phi 的 owner-closure 边界，以及 `pto.simt_launch` 当前 verifier 不含 completion/lease 的事实 | 跨仓深挖 21 |
 | pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -375,7 +376,7 @@ permalink: /learning/pto-curriculum/
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
-- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程40已定义三值 proof 后的 policy/guard/exact/reject 与 hoisting contract，仍缺 function ABI owner/extent/alignment/generation 导入、shared seam IR、EmitC physical-envelope adapter、guard/slow-path materialization、scratch PlanMemory、cross-backend executable golden，以及真实 A5 guard-page/canary/poison/双版本 loop 性能矩阵。
+- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–42 已定义 ABI certificate 来源以及 call/cast/subview/phi 的 identity/range/lifetime closure，仍缺 trusted registry、shared token IR、predicate-sensitive owner set、rewrite preservation、PlanMemory generation、completion/cancel/quarantine、EmitC adapter、guard/slow-path、cross-backend golden，以及真实 A5 guard-page/canary/poison/双版本 loop 性能矩阵。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -385,7 +386,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：追踪 `AllocationCertificate` 穿过 call/cast/subview/phi 与 async launch 的 owner closure、generation lease 和 verifier，任何丢失、冲突或过期事实都降为 `Unknown`。
+1. 主线：研究 completion 丢失或 launch 失败后的 async lease 终态，以 cancel、quarantine 与 generation fencing 阻止迟到设备访问污染已复用 slot。
 2. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 实现 generation-aware cross-dispatch CI contract。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -646,3 +647,15 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：address analysis固定range/no-wrap/unit/Unknown；strict memory alignment test区分raw pointer缺证据与static memref envelope；short-load alignment验证联合remainder/stateful lowering；33-byte boundary test明确bare `PtrType`不能证明whole-register over-read。当前无可执行certificate导入。
 - 新知识债：shared `AllocationCertificate` IR、trusted host registry/ABI、call/cast/subview/phi传播、PlanMemory reuse epoch、async lease、stable reason code、VPTO/EmitC golden、A5 guard-page/canary/poison与性能矩阵。
 - 下一章：**Certificate 怎样穿过调用边界——call/cast/subview/phi 的 owner closure、async lease 与 verifier。**
+
+## 第 42 章课程账本增量
+
+- 源码基线：PTOAS [`61e14673`](https://github.com/hw-native-sys/PTOAS/commit/61e14673eb6b5f040a7cf0c64d5286d755abcdf4)；相对课程 41 的 `9b81c7a9` 前进 7 个提交，最新变化以 sync/VMI/codecheck 为主，尚无 `AllocationCertificate` 或 lease 实现。
+- 新覆盖文件：kernel entry/subkernel 文档、`ExpandTileOp.cpp`、`Passes.td`、`FoldTileBufIntrinsics.cpp`、`PTOAddressAnalysis.{h,cpp}`、`PTOPlanMemoryModern.cpp`、`PTOOutlineSIMTSections.cpp`、`VPTOSimtLaunch.cpp`，以及 call/cast/subview/phi/SIMT 直接测试。
+- 新覆盖符号：`func::CallOp` bridge、`VPTOPtrCastCleanup`、`getAddresses`、`RootInfo/ReuseGroup`、`recordIfBranchExclusivity`、`SimtLaunchOp::verify`。
+- 新确认不变量：certificate 传播必须闭合 identity、range 与 lifetime；same pointer bits/same planned offset 不证明 same owner；不同 owner/generation 的 phi 不能合成单一 certificate；slot generation 复用必须晚于真实 device completion。
+- 具体演算：`f32[4,100]`、stride `[128,1]`、owner extent 2048 B；第 3 行 base delta 1536 B，semantic end 1936 B，512 B carrier end 2048 B。地址复用到 extent 1936 B 的新 generation 后，旧 proof 失效，exact 仍安全而 carrier 越界 112 B。
+- 直接测试事实：PlanMemory phi-family test 验证 0/512 B 地址规划与互斥分支复用；TileOp test 验证 cast bridge 被删除；dynamic subview test验证 shape/stride materialization；SIMT verifier只验证callee/arity/type，均未覆盖 certificate generation 或 completion lease。
+- 第六次七章回顾：课程 36–42 已串联 `allocation provenance → shared intent → verdict/action → invalidation → runtime recovery → ABI source → cross-boundary closure`。
+- 新知识债：shared certificate/token IR、trusted registry、call ABI、predicate-sensitive owner set、rewrite preservation、PlanMemory epoch、completion/cancel/quarantine、VPTO/EmitC golden 与 A5 fault tests。
+- 下一章：**Completion 丢了怎么办——Async Lease、Cancel、Quarantine 与 Generation Fencing。**
