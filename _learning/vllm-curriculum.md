@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 36 章已把 KILL 后终态拆为 `signal sent → exit observed → direct child reaped → descendant domain contained`，并确认当前三条 shutdown 路径缺少同步的 KILL 后 join/reap；下一章把 `ProcessFinal` 接到 MP、Ray 与 external launcher 的 backend-specific owner。
+- 当前主线：第 37 章已把统一 `ProcessFinal` 接到 MP、Ray V2 与 external launcher 的真实 owner，明确 backend-neutral verdict 与 backend-specific evidence 必须正交；下一章研究 owner 自身崩溃后的 takeover、generation fencing 与双重回收防护。
 
 ## 已完成章节
 
@@ -49,6 +49,7 @@
 | 2026-09-17 34 | `framed append → WAL fsync → CRC recovery → atomic terminal checkpoint` | [`95f4925c`](https://github.com/vllm-project/vllm/commit/95f4925c3a03df8cfcaa21633ccc9dd5b426c7a4) | [WAL Frame 与 Atomic Terminal Checkpoint]({{ '/articles/vllm-shutdown-wal-frame-atomic-terminal-checkpoint/' | relative_url }}) |
 | 2026-09-19 35 | `ENOSPC/EIO/slow fsync → sync cutoff → TERM/KILL/reap reserve → degraded terminal` | [`729ebac4`](https://github.com/vllm-project/vllm/commit/729ebac4983e1510e035bc579142b0fc210a49a3) | [Durability Failure 与 Containment Deadline]({{ '/articles/vllm-shutdown-durability-failure-containment-deadline/' | relative_url }}) |
 | 2026-09-20 36 | `KILL sent → exit observed → direct-child reap → descendant-domain final` | [`a7fda4c8`](https://github.com/vllm-project/vllm/commit/a7fda4c88bfc421d31e33acc5e01e86ebe467ad8) | [join/reap 与 Process Tree Final]({{ '/articles/vllm-kill-join-reap-process-tree-containment-final/' | relative_url }}) |
+| 2026-09-21 37 | `MP direct child / Ray actor / external rank → owner-specific terminal → GroupFinal` | [`9b49f923`](https://github.com/vllm-project/vllm/commit/9b49f92344312c41ad61e05282c8e6a2d9bafb7f) | [三种 Owner 的 ProcessFinal]({{ '/articles/vllm-process-final-backend-owner-adapters/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -331,6 +332,14 @@
 - `WorkerProc.make_worker_process`
 - `DPSupervisor._shutdown_children`
 - `_join_processes_with_timeout`
+- `Executor.get_class`
+- `WorkerProcHandle.proc`
+- `RayWorkerHandle.run_ref`
+- `RayExecutorV2.start_worker_monitor/shutdown`
+- `ExecutorWithExternalLauncher._distributed_args`
+- `UniProcExecutor.shutdown`
+- `WorkerWrapperBase.global_rank`
+- `ProcessFinal/GroupFinal`（本文提出的设计接口，尚未合入）
 
 ## 已确认不变量
 
@@ -511,6 +520,11 @@
 171. direct-child `join` 只证明该 child 已 reap；递归 PID 快照不能稳定证明 shutdown 期间没有新 fork、逃逸或重新托管的后代。
 172. 裸 PID 不是 generation-safe identity；跨枚举与发信号的正确性需要 process handle、`pid+create_time` 校验或 pidfd/cgroup 等更强原语。
 173. containment terminal 只有在 owned direct handles 已回收且 descendant verdict 明确后才能冻结；超时必须记录 `kill_sent_reap_timeout/tree_unknown`，不能记录 complete。
+174. MP、Ray 与 external launcher 可以共享 `ProcessFinal` 语义，但不能共享 `join()` 原语；终态证据必须由真实 owner 生产。
+175. MP parent 持有 direct `BaseProcess` handle，因此有权 join/reap；Ray runtime 与 external supervisor 分别拥有 actor OS process 和 rank group，vLLM driver/rank 只能请求并观察。
+176. backend-neutral verdict 与 backend-specific evidence 正交；`direct_reaped`、`actor_terminal`、`launcher_reaped` 不能压成无来源的 success bool。
+177. external launcher 的 rank-local cleanup 不能升级为 group containment；expected set 必须按 `global_rank/RANK` 聚合，并由 supervisor 发布 group final。
+178. final identity 至少绑定 `(generation, owner_scope, global_rank, evidence_ref)`；旧 PID、旧 actor 或旧 launcher attempt 的迟到 terminal 必须被拒绝。
 
 ## 前置依赖与版本注意
 
@@ -519,7 +533,7 @@
 
 ## 尚未解释的知识债
 
-- 缺少实际 `ProcessFinal`、KILL 后 shared-deadline join/reap、generation-safe PID identity、process-group/cgroup owner、zombie/fork-race/PID-reuse 故障注入，以及 MP/Ray/external launcher 的 zombie-free golden。
+- 缺少实际 `ProcessFinal/GroupFinal`、MP KILL 后 shared-deadline join/reap、Ray actor terminal/state confirmation、external supervisor adapter、generation-safe evidence identity、process-group/cgroup owner，以及跨 backend zombie/node-loss/launcher-crash golden。
 
 - 缺少实际 `ShutdownEvent/ShutdownWAL/TerminalCheckpoint`、独立 collector process、stable durability reason、short-write/EINTR loop、preallocation/rotation、group-commit benchmark、ENOSPC/EIO/blocked-fsync fault matrix 和 crash-at-every-write harness。
 
@@ -783,9 +797,19 @@
 - 新知识债：实际 `ProcessFinal`、KILL 后 join/reap、pidfd/process group/cgroup ownership、subreaper、stable reason、MP/Ray/external adapter，以及真实 native hang×process-tree E2E。
 - 下一章：**同一个 ProcessFinal，三种 Owner——MP、Ray 与 External Launcher 的 zombie-free adapter 和 golden matrix。**
 
+## 第 37 章课程账本增量
+
+- 源码基线：[`9b49f923`](https://github.com/vllm-project/vllm/commit/9b49f92344312c41ad61e05282c8e6a2d9bafb7f)；相对第 36 章前进 29 个 commit，本文直接相关 executor/launcher shutdown 文件未变化。
+- 已覆盖文件：`vllm/v1/executor/abstract.py`、`multiproc_executor.py`、`ray_executor.py`、`ray_executor_v2.py`、`uniproc_executor.py`、`vllm/v1/engine/utils.py`、`vllm/v1/worker/worker_base.py`、`tests/distributed/test_ray_v2_executor.py`、`tests/distributed/test_torchrun_example.py`、`tests/v1/executor/test_executor.py`。
+- 已覆盖符号：`Executor.get_class`、`WorkerProcHandle.proc`、`MultiprocExecutor.shutdown/_ensure_worker_termination`、`RayWorkerHandle.run_ref`、`RayExecutorV2.start_worker_monitor/shutdown`、`CoreEngineActorManager.shutdown`、`ExecutorWithExternalLauncher._distributed_args`、`UniProcExecutor.shutdown`、`WorkerWrapperBase.global_rank`；`MemberFinal/GroupFinal` 为建议接口。
+- 新确认不变量：统一终态语义不能抹平 owner-specific evidence；MP parent、Ray runtime 与 external supervisor 分别拥有 direct child、actor process 和 rank group；external rank 只能发布 local cleanup；final 必须绑定 generation 与 owner token。
+- 直接测试事实：MP fake-clock 只覆盖 grace→TERM；Ray V2 TP=2 shutdown 通过 `RayActorError` 验证 actor terminal；torchrun example 只验证配置、参数和输出跨 rank 一致；当前没有一套跨 backend shutdown golden。
+- 新知识债：实际 schema、MP join、Ray state/restart generation、torchrun/Slurm/Kubernetes adapter、durable final、Python/Rust wire golden，以及 zombie、node loss、launcher crash、native hang 与 restart 联合 E2E。
+- 下一章：**Owner 自己死了怎么办——manager、Ray control plane 与 external supervisor 的 takeover、generation fencing 和双重回收防护。**
+
 ## 下一批候选章节
 
-1. 下一主线：同一个 ProcessFinal，三种 Owner——MP、Ray 与 External Launcher 的 zombie-free adapter 和 golden matrix。
+1. 下一主线：Owner 自己死了怎么办——manager、Ray control plane 与 external supervisor 的 takeover、generation fencing 和双重回收防护。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
