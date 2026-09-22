@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-21。
+最后更新：2026-09-22。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 42 已把 AllocationCertificate 的跨边界传播拆成 identity、range、lifetime 三个 closure：direct call 映射 actual/formal，cast 只改表示但必须抗 rewrite，subview 收窄同一 owner，phi/select 若 owner 或 generation 冲突则不能合成单一 certificate；若 backend 执行越过 owner scope，还需要 completion-scoped lease。下一步研究 completion 丢失、cancel、quarantine 与 generation fencing。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 43 已沿真实 async SDMA 链串起 `AsyncSession → TPUT/TGET_ASYNC → AsyncEvent → Wait/Test`：当前 EmitC backend 能观察 completion，VPTO 明确 fail-closed，但 event 尚未绑定 allocation owner、range 或 generation，也没有 cancel/quarantine 协议。下一步研究 Lease Registry 的所有权、PlanMemory reuse epoch 与 crash recovery。
 
 ## 已完成章节
 
@@ -67,6 +67,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-19 | Unknown 的 runtime guard 与 exact fallback | Unknown → guard/policy → stateful fast path or exact fallback/reject → hoist | [课程 40]({% post_url 2026-09-19-ptoas-unknown-runtime-guard-exact-fallback-hoisting %}) |
 | 2026-09-20 | Function ABI 与 AllocationCertificate | pointer/view/PlanMemory → owner/extent/alignment/generation → guard | [课程 41]({% post_url 2026-09-20-ptoas-function-abi-allocation-certificate %}) |
 | 2026-09-21 | Owner Closure 与 Generation Lease | ABI certificate → call/cast/subview/phi closure → launch lease | [课程 42]({% post_url 2026-09-21-ptoas-allocation-certificate-owner-closure-lease %}) |
+| 2026-09-22 | Async Lease、Cancel 与 Generation Fencing | session/event → completion unknown → quarantine → safe reuse | [课程 43]({% post_url 2026-09-22-ptoas-async-lease-cancel-quarantine-generation-fencing %}) |
 
 ## ISA 知识地图
 
@@ -302,6 +303,8 @@ permalink: /learning/pto-curriculum/
 
 ## 待验证推断
 
+- PTOAS 现有 `AsyncSession/AsyncEvent/Wait/Test` 已证明 submit 与 completion 被分离，但 event 未绑定 owner/range/generation；课程43推导的 quarantine 与 generation fencing 尚未在 runtime 或 IR 中实现。需要 late DMA、丢回执、重复 final、session reset 与 registry crash 测试验证。
+
 - shared pre-backend seam 应把现有 backend-local `VMIMemoryAccessPlan` 演进为 intent/candidate/verdict contract，而不是保留平行同义 plan；课程41已定义 ABI certificate 的最小字段与双来源，但 shared IR/interface、trusted runtime registry、call/phi/async传播、VPTO/EmitC candidate adapter、runtime guard 与 exact slow path 尚未实现。
 - `!pto.ptr` 的 allocation extent/guard provenance 若能跨 view/phi/loop 与 PlanMemory generation 保留，dynamic offset range analysis 有望让更多 load 在 strict 模式通过；需要实现、owner-lifetime 规则和 lit 证明。
 - full-chunk policy path 比 exact gather/scalar fallback 更利于设备流水只是基于 IR 数量的推断，尚缺 A5 bandwidth、cycle 与 register-pressure 对照。
@@ -376,7 +379,7 @@ permalink: /learning/pto-curriculum/
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
-- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–42 已定义 ABI certificate 来源以及 call/cast/subview/phi 的 identity/range/lifetime closure，仍缺 trusted registry、shared token IR、predicate-sensitive owner set、rewrite preservation、PlanMemory generation、completion/cancel/quarantine、EmitC adapter、guard/slow-path、cross-backend golden，以及真实 A5 guard-page/canary/poison/双版本 loop 性能矩阵。
+- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–43 已定义 ABI certificate 来源、call/cast/subview/phi closure，并用真实 async SDMA Session/Event 证明 completion 与 reuse 之间仍缺 owner-range-generation lease。后续仍欠 trusted registry、shared token IR、predicate-sensitive owner set、rewrite preservation、PlanMemory generation、cancel/quarantine、EmitC/VPTO parity、guard/slow-path、cross-backend golden，以及真实 late-write/A5 guard-page/canary/poison/性能矩阵。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -659,3 +662,16 @@ permalink: /learning/pto-curriculum/
 - 第六次七章回顾：课程 36–42 已串联 `allocation provenance → shared intent → verdict/action → invalidation → runtime recovery → ABI source → cross-boundary closure`。
 - 新知识债：shared certificate/token IR、trusted registry、call ABI、predicate-sensitive owner set、rewrite preservation、PlanMemory epoch、completion/cancel/quarantine、VPTO/EmitC golden 与 A5 fault tests。
 - 下一章：**Completion 丢了怎么办——Async Lease、Cancel、Quarantine 与 Generation Fencing。**
+
+## 第 43 章课程账本增量
+
+- 源码基线：PTOAS [`85af360e`](https://github.com/hw-native-sys/PTOAS/commit/85af360eed58068801d21c5e2c740e14f47b146b)；相对课程 42 的 `61e14673` 前进 10 个提交，最新变化没有加入 cancel、quarantine 或 generation 协议。直接相关历史提交为 [`f4ca9eb8`](https://github.com/hw-native-sys/PTOAS/commit/f4ca9eb8e320c1df35eaa739a6b4b85d53a2b8ed)。
+- 新覆盖文件：`PTOTypeDefs.td`、`PTOOps.td`、`PTOAsyncCommunicationVerification.cpp`、`PTOSimtVerificationAndAsyncEffects.cpp`、`PTOCollectivePipelineEffectsAndConvertAssembly.cpp`、EmitC `AsyncSession.cpp`、`PTOValidateVPTOIR.cpp`，以及 async EmitC/invalid-shape/VPTO-negative lit。
+- 新覆盖符号：`AsyncSessionType/AsyncEventType`、`BuildAsyncSessionOp`、`TPutAsyncOp/TGetAsyncOp`、`WaitAsyncEventOp/TestAsyncEventOp`、`verifyAsyncTransferOp`、`PTOAsyncTransferToEmitC/PTOAsyncEventToEmitC`。
+- 新确认不变量：`timeout ≠ cancel requested ≠ cancel confirmed ≠ completion`；`Test=false` 不授权复用；release 必须匹配 owner+generation+event；completion unknown 必须 quarantine；软件 generation 若没有 non-reuse/reset 等执行 fence，不能阻止真实迟到 DMA。
+- 具体演算：`partition_tensor_view<128xf32>` 传输 512 B；owner D/generation 11 在 cancel 后若立即复用为 generation 12，迟到 PUT 会覆盖新数据。安全路径把 D/11 隔离到同 generation completion 或可信 session/device reset。
+- 直接测试事实：`async_put_get_emitc.pto` 验证 Session/PUT/GET/Wait/Test 的 EmitC 形状；`async_put_invalid_non_1d.pto` 拒绝 `4x32xf32`；`async_session_unsupported.pto` 固定 VPTO fail-closed。三者都没有设备完成时序或故障注入。
+- 新知识债：shared `AsyncLeaseToken`、event→owner-range binding、stable status/reason schema、runtime quarantine registry、PlanMemory reuse epoch、cancel/late-ack idempotence、session reset evidence、VPTO parity、late-write canary 与性能矩阵。
+- 下一章：**谁拥有 Lease Registry——PlanMemory reuse epoch、runtime allocation registry、crash recovery 与 backend golden。**
+
+
