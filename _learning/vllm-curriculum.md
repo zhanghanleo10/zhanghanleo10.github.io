@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 37 章已把统一 `ProcessFinal` 接到 MP、Ray V2 与 external launcher 的真实 owner，明确 backend-neutral verdict 与 backend-specific evidence 必须正交；下一章研究 owner 自身崩溃后的 takeover、generation fencing 与双重回收防护。
+- 当前主线：第 38 章已把 owner failure detector、durable takeover authority、`owner_epoch` 与 backend-specific member token 串成一条可证明链；下一章将用 crash-at-every-boundary golden 验证 create/register/kill/reap/final/checkpoint 各边界的接管语义。
 
 ## 已完成章节
 
@@ -50,6 +50,7 @@
 | 2026-09-19 35 | `ENOSPC/EIO/slow fsync → sync cutoff → TERM/KILL/reap reserve → degraded terminal` | [`729ebac4`](https://github.com/vllm-project/vllm/commit/729ebac4983e1510e035bc579142b0fc210a49a3) | [Durability Failure 与 Containment Deadline]({{ '/articles/vllm-shutdown-durability-failure-containment-deadline/' | relative_url }}) |
 | 2026-09-20 36 | `KILL sent → exit observed → direct-child reap → descendant-domain final` | [`a7fda4c8`](https://github.com/vllm-project/vllm/commit/a7fda4c88bfc421d31e33acc5e01e86ebe467ad8) | [join/reap 与 Process Tree Final]({{ '/articles/vllm-kill-join-reap-process-tree-containment-final/' | relative_url }}) |
 | 2026-09-21 37 | `MP direct child / Ray actor / external rank → owner-specific terminal → GroupFinal` | [`9b49f923`](https://github.com/vllm-project/vllm/commit/9b49f92344312c41ad61e05282c8e6a2d9bafb7f) | [三种 Owner 的 ProcessFinal]({{ '/articles/vllm-process-final-backend-owner-adapters/' | relative_url }}) |
+| 2026-09-22 38 | `owner failure detector → durable CAS takeover → owner_epoch/member token → fenced final` | [`79468c20`](https://github.com/vllm-project/vllm/commit/79468c20ef23227d4e051f807e10fd54fb24e24f) | [Owner Takeover 与 Generation Fencing]({{ '/articles/vllm-owner-takeover-generation-fencing/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -807,9 +808,24 @@
 - 新知识债：实际 schema、MP join、Ray state/restart generation、torchrun/Slurm/Kubernetes adapter、durable final、Python/Rust wire golden，以及 zombie、node loss、launcher crash、native hang 与 restart 联合 E2E。
 - 下一章：**Owner 自己死了怎么办——manager、Ray control plane 与 external supervisor 的 takeover、generation fencing 和双重回收防护。**
 
+## 第 38 章课程账本增量
+
+- 源码基线：[`79468c20`](https://github.com/vllm-project/vllm/commit/79468c20ef23227d4e051f807e10fd54fb24e24f)；相对第 37 章前进 63 个 commit，本文直接相关 owner/shutdown 实现没有语义变化。
+- 已覆盖文件：`vllm/v1/engine/core_client.py`、`engine/utils.py`、`v1/utils.py`、`v1/fault_tolerance/engine_core_sentinel.py`、`executor/uniproc_executor.py`、`tests/distributed/test_ray_v2_executor.py`、`tests/v1/fault_tolerance/test_fault_tolerance_e2e.py`、`tests/distributed/test_torchrun_example.py`。
+- 已覆盖符号：`CoreEngineProcManager.__init__/shutdown/monitor_engine_liveness`、`CoreEngineActorManager.__init__/monitor_engine_liveness/shutdown`、`MPClient.shutdown`、`wait_for_completion_or_failure`、`EngineCoreSentinel.on_fault/retry`、`ExecutorWithExternalLauncher._distributed_args`；`OwnerLease/owner_epoch/member_token` 为建议接口。
+- 新确认不变量：
+  1. failure detector 只能把 owner 标为 suspect，不能授予 cleanup authority；takeover 必须由 durable CAS 产生单调 epoch。
+  2. fencing 必须同时约束 destructive action 与 final acceptance；只过滤迟到 final 不能阻止旧 owner 误杀新 generation。
+  3. MP direct-child reap 权不能从裸 PID 事后恢复；新 owner 若无 subreaper/supervisor evidence，只能发布 containment unknown。
+  4. Ray actor handle/run-ref/placement-group 与 external launcher job/attempt 必须进入 member token；rank/PID 单独不足以跨 restart 标识成员。
+  5. `EngineCoreSentinel.retry` 恢复的是存活 EngineCore 内的 UNHEALTHY 状态；executor DEAD、manager crash、control-plane loss 与 launcher restart 属于更高层 owner 问题。
+- 直接测试事实：Ray V2 覆盖 actor death monitor 与正常 shutdown terminal；FT E2E 覆盖 alive EngineCore 的 UNHEALTHY retry、Worker KILL 后 victim DEAD 与 retry rejection；torchrun example 仅覆盖正常 SPMD 一致性。当前没有 manager/driver/launcher crash takeover、旧 epoch、registry partition 或 PID/rank reuse golden。
+- 新知识债：实际 durable registry/schema、MP subreaper/process-group/cgroup、Ray stable actor/restart identity、launcher attempt adapter、destructive-action epoch enforcement、clock jump/partition/late GPU work，以及 crash-at-every-boundary E2E。
+- 下一章：**Crash-at-every-boundary——create/register/kill/reap/final/checkpoint 的接管 Golden。**
+
 ## 下一批候选章节
 
-1. 下一主线：Owner 自己死了怎么办——manager、Ray control plane 与 external supervisor 的 takeover、generation fencing 和双重回收防护。
+1. 下一主线：Crash-at-every-boundary——create/register/kill/reap/final/checkpoint 的接管 Golden。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
