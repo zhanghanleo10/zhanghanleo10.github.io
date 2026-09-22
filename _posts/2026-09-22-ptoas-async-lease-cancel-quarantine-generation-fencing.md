@@ -66,21 +66,13 @@ flowchart LR
 
 对异步传输 (e)，建议把复用条件写成：
 
-[
-Reusable(owner,g)
-iff
-Terminal(e,owner,g)
-land
-NoFutureAccess(e,owner,g)
-]
+`Reusable(owner, g) iff Terminal(e, owner, g) AND NoFutureAccess(e, owner, g)`
 
 `Test=false` 只证明“观察时尚未得到 completed”；timeout 只证明调用方不再等待；cancel request 只证明请求已发送。三者都不能推出 `NoFutureAccess`。
 
 安全 lease 至少需要键：
 
-[
-LeaseKey=(owner\_id, generation, event\_id)
-]
+`LeaseKey = (owner_id, generation, event_id)`
 
 并记录 src/dst byte interval、direction、session、submit epoch 与终态证据。这里的 generation 不是 pointer bit，也不是 function argument 序号，而是 allocation 每次重新发放时单调变化的身份。
 
@@ -157,16 +149,14 @@ partition_tensor_view<128xf32> src/dst (GM)
 
 现有 [`async_put_get_emitc.pto`](https://github.com/hw-native-sys/PTOAS/blob/85af360eed58068801d21c5e2c740e14f47b146b/test/lit/pto/async_put_get_emitc.pto) 使用 `128xf32`：
 
-[
-128	imes4=512	ext{ B}
-]
+`128 × 4 = 512 B`
 
 假设 local src 为 owner `S/generation=7`，remote dst 为 `D/generation=11`：
 
-1. (t=0)：提交 `TPUT_ASYNC`，得到 event `E42`，lease 固定为 `(S,7,E42)` 与 `(D,11,E42)`，范围均为 ([0,512))。
-2. (t=2	ext{ ms})：`Test(E42)=false`；调用方达到 deadline 并发出 cancel。
-3. **错误路径**：allocator 立即把 D 的相同地址发给 generation 12。旧 E42 在 (t=5	ext{ ms}) 才完成，512 B 迟到写会覆盖 D/12。
-4. **安全路径**：D/11 进入 quarantine，不进入 free list；新请求只能拿另一块地址。若 (t=5	ext{ ms}) 收到与 `E42,D,11` 匹配的 completion，才释放旧 lease。若 session/设备 reset 提供“旧命令不再可能访问”的证据，也可由 `Isolated` 结束 lease。
+1. `t=0`：提交 `TPUT_ASYNC`，得到 event `E42`，lease 固定为 `(S,7,E42)` 与 `(D,11,E42)`，范围均为 `[0,512)`。
+2. `t=2 ms`：`Test(E42)=false`；调用方达到 deadline 并发出 cancel。
+3. **错误路径**：allocator 立即把 D 的相同地址发给 generation 12。旧 E42 在 `t=5 ms` 才完成，512 B 迟到写会覆盖 D/12。
+4. **安全路径**：D/11 进入 quarantine，不进入 free list；新请求只能拿另一块地址。若 `t=5 ms` 收到与 `E42,D,11` 匹配的 completion，才释放旧 lease。若 session/设备 reset 提供“旧命令不再可能访问”的证据，也可由 `Isolated` 结束 lease。
 
 迟到的 generation 11 ACK 只能关闭 generation 11；即使物理地址相同，也不能释放 generation 12。这就是 generation fencing。
 
@@ -237,4 +227,3 @@ partition_tensor_view<128xf32> src/dst (GM)
 - 新覆盖：async session/event ODS、异步 verifier、MemoryEffects、EmitC SDMA lowering、VPTO fail-closed 与三组直接 lit。
 - 新不变量：`timeout ≠ cancel confirmed ≠ completion`；unknown 必须 quarantine；release 必须匹配 owner+generation+event；software generation 不能替代硬件/隔离 fence。
 - 下一步：把建议状态机落到 allocation registry 与 PlanMemory epoch，并定义 crash/replay 的 stable golden。
-
