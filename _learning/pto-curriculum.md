@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-22。
+最后更新：2026-09-23。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 43 已沿真实 async SDMA 链串起 `AsyncSession → TPUT/TGET_ASYNC → AsyncEvent → Wait/Test`：当前 EmitC backend 能观察 completion，VPTO 明确 fail-closed，但 event 尚未绑定 allocation owner、range 或 generation，也没有 cancel/quarantine 协议。下一步研究 Lease Registry 的所有权、PlanMemory reuse epoch 与 crash recovery。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 44 已把 PTOAS 的静态 `RootInfo/ReuseGroup/offsets` 与 pypto 的 runtime Buffer ownership 接起来：compiler 只产出 slot/range plan，真正能授权复用的是同时控制 allocation free list、generation 与 backend completion evidence 的 runtime Lease Registry。下一步把 `AsyncLeaseToken`、register-before-submit WAL 与 crash-at-every-boundary golden 落成稳定协议。
 
 ## 已完成章节
 
@@ -68,6 +68,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-20 | Function ABI 与 AllocationCertificate | pointer/view/PlanMemory → owner/extent/alignment/generation → guard | [课程 41]({% post_url 2026-09-20-ptoas-function-abi-allocation-certificate %}) |
 | 2026-09-21 | Owner Closure 与 Generation Lease | ABI certificate → call/cast/subview/phi closure → launch lease | [课程 42]({% post_url 2026-09-21-ptoas-allocation-certificate-owner-closure-lease %}) |
 | 2026-09-22 | Async Lease、Cancel 与 Generation Fencing | session/event → completion unknown → quarantine → safe reuse | [课程 43]({% post_url 2026-09-22-ptoas-async-lease-cancel-quarantine-generation-fencing %}) |
+| 2026-09-23 | Lease Registry、PlanMemory Epoch 与 Crash Recovery | static slot plan + Buffer identity + terminal evidence → safe reuse | [课程 44]({% post_url 2026-09-23-ptoas-lease-registry-planmemory-epoch-crash-recovery %}) |
 
 ## ISA 知识地图
 
@@ -134,6 +135,8 @@ permalink: /learning/pto-curriculum/
 | Proof invalidation | verdict 只对 intent/address/layout/range/candidate/owner generation/target/policy 的依赖快照有效；rewrite 后旧 analysis 不可消费。当前 VMI proof 调用内销毁，`VPTOSoftPostUpdate` 用 analyze-then-rewrite 与 fresh per-block analysis 避免 stale cache | 当前机制与建议 fingerprint 已分层讲透；shared revision/generation 与 differential golden 待实现 |
 | Unknown recovery / guard hoisting | `vldas+vldus` 是 alignment/legalization fallback，不是 exact safety fallback；runtime guard 需 owner extent、整循环 range、candidate envelope、no-wrap 与 generation，false path 只能 exact 或 reject。现有 `VPTOGuardedLICM` 只提升纯 scalar/address 子表达式 | 决策与成本模型已闭合；ABI certificate、guard/slow-path IR 与设备矩阵待实现 |
 | Function ABI / allocation certificate | `PtrType` 只有 element type 与 memory space；shape/stride 是 view claim；外部 owner facts 由 trusted runtime 导入，PlanMemory 可从 static bytes/alignment/offset 生成 invocation/reuse-scoped certificate | 契约与来源已定义；shared IR、registry、propagation、lease 与跨 backend golden 待实现 |
+| Async lease 与 generation fence | `AsyncEvent` 分离 submit/completion，但未绑定 owner/range/generation；timeout、`Test=false`、cancel requested 都不授权复用。只有同代 completion、confirmed cancel 或可信 execution-domain reset 可结束 quarantine | 当前 EmitC 链与 VPTO fail-closed 已确认；token/cancel/quarantine 实现待补 |
+| Runtime Lease Registry | PlanMemory 只产出静态 root/reuse-group/offset；pypto 已用 retained Buffer/object identity 拒绝同地址 stale free。权威 registry 必须位于控制真实 allocation/free list 且能消费 backend terminal evidence 的 runtime owner | 所有权边界与 crash fail-closed 已闭合；durable schema/golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
@@ -141,12 +144,17 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [37ea0a0](https://github.com/hw-native-sys/pto-isa/commit/37ea0a0a3c79f5bcec19d23c6dcf8a7d9346dfdb) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A5 ND→NZ/ZN producer contract、dynamic alignment gap、raw-bit poison 四层协议与显式 padded TMATMUL consumer matrix | ISA 深挖 24 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [61e14673](https://github.com/hw-native-sys/PTOAS/commit/61e14673eb6b5f040a7cf0c64d5286d755abcdf4) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；新增 pointer-first certificate 来源、direct call/cast/subview/phi 的 owner-closure 边界，以及 `pto.simt_launch` 当前 verifier 不含 completion/lease 的事实 | 跨仓深挖 21 |
-| pypto | [ba15fd6](https://github.com/hw-native-sys/pypto/commit/ba15fd66f929de7c03d04f4a4cae7f5751d56bc2) | create_l1/gather_row、Tensor→Tile、gm_pipe_layout、TileLoadOp::DeduceTileLoadType、MakeTileLoadCodegenPTO、EmitPartitionViewPTO、FlattenTileNDTo2D、dynamic shape tests | 跨仓深挖 2 |
+| PTOAS | [66bd855](https://github.com/hw-native-sys/PTOAS/commit/66bd855ed4a860df11c14393a6e64219c48aa723) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；新增 AsyncSession/Event 生命周期、`RootInfo/ReuseGroup/offsets` 与静态 slot plan 对 runtime lease 的边界 | 跨仓深挖 23 |
+| pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
 ## 已确认接口与不变量
+
+- compiler `PlanMemory` 只拥有静态 root/lifetime/reuse group/offset 事实，不能以 SSA `freeIndex` 或相同 planned offset 授权 runtime allocation 复用。
+- runtime lease release 必须等待所有相交 range 的同 execution-domain、同 owner generation terminal evidence；证据丢失或 registry crash 时默认 quarantine。
+- pypto 当前以 retained Buffer/对象身份区分同地址的新旧 allocation，证明 pointer equality 不足；但该机制尚未关联 async event/range，不能单独阻止迟到 DMA。
+- `reuse_epoch`/generation 只用于拒绝 stale evidence；若没有 non-reuse、quarantine 或可信 domain reset，它们不能成为物理执行 fence。
 
 - pointer、view 与 allocation certificate 是三个层次：raw pointer 只有地址/类型/空间，shape/stride 只是索引映射；外部 allocation facts 必须来自 trusted runtime/allocator，PlanMemory-owned local buffer 可静态生成 certificate。
 - function argument index 不能作为 owner identity；两个参数可能 alias，同一参数也可能是 interior pointer。对齐保证必须显式有界，PlanMemory slot reuse 或 host free/reallocate 后必须更换 generation。
@@ -303,7 +311,7 @@ permalink: /learning/pto-curriculum/
 
 ## 待验证推断
 
-- PTOAS 现有 `AsyncSession/AsyncEvent/Wait/Test` 已证明 submit 与 completion 被分离，但 event 未绑定 owner/range/generation；课程43推导的 quarantine 与 generation fencing 尚未在 runtime 或 IR 中实现。需要 late DMA、丢回执、重复 final、session reset 与 registry crash 测试验证。
+- PTOAS 现有 `AsyncSession/AsyncEvent/Wait/Test` 已证明 submit 与 completion 被分离，但 event 未绑定 owner/range/generation；课程44已确定 runtime Lease Registry 的所有权边界，shared token、durable register-before-submit、quarantine free-list integration 与 recovery fence 仍未实现。需要 late DMA、丢回执、重复 final、session reset、registry crash 与容量耗尽测试验证。
 
 - shared pre-backend seam 应把现有 backend-local `VMIMemoryAccessPlan` 演进为 intent/candidate/verdict contract，而不是保留平行同义 plan；课程41已定义 ABI certificate 的最小字段与双来源，但 shared IR/interface、trusted runtime registry、call/phi/async传播、VPTO/EmitC candidate adapter、runtime guard 与 exact slow path 尚未实现。
 - `!pto.ptr` 的 allocation extent/guard provenance 若能跨 view/phi/loop 与 PlanMemory generation 保留，dynamic offset range analysis 有望让更多 load 在 strict 模式通过；需要实现、owner-lifetime 规则和 lit 证明。
@@ -675,3 +683,15 @@ permalink: /learning/pto-curriculum/
 - 下一章：**谁拥有 Lease Registry——PlanMemory reuse epoch、runtime allocation registry、crash recovery 与 backend golden。**
 
 
+
+
+## 第 44 章课程账本增量
+
+- 源码基线：PTOAS [`66bd855e`](https://github.com/hw-native-sys/PTOAS/commit/66bd855ed4a860df11c14393a6e64219c48aa723)，pypto [`e5927cff`](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6)；PTOAS 相对课程43前进6个提交，未新增 async lease/generation 语义。
+- 新覆盖文件：`PTOPlanMemoryModern.cpp`、`multi_tile_n4_planmem_e2e.pto`、`plan_memory_reused_tstore_sync_level2.pto`、pypto `runtime_base.py`、`device_tensor.py`、`distributed_runner.py` 及 runtime ownership tests。
+- 新覆盖符号：`RootInfo/ReuseGroup/buildSlotOffsets/materializePlannedOffsets`、`Worker.alloc_tensor/free_tensor/_owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers/malloc/free`。
+- 新确认不变量：compiler plan 不授权 runtime reuse；权威 registry 必须同时控制 allocation identity/free list 并消费 backend terminal evidence；所有相交 lease 终态前 range 必须 quarantine；software epoch 不替代 execution fence。
+- 具体演算：两个 `16×16xf16` root 共用 `[0,512)`；generation 41 的 512 B async write completion unknown 时，不得把地址发给 generation 42。只有同域同代 completion 或可信 reset fence 后，reuse epoch 才从8推进到9。
+- 直接测试事实：PTOAS 固定四个512 B slot地址与物理重叠后的 barrier；pypto用同一 `0xDEAD0000` 的不同 Buffer 验证旧 DeviceTensor 不能 free 新 allocation，并在 submit 前拒绝 foreign owner。尚无 event→range 或 crash recovery golden。
+- 新知识债：`AsyncLeaseToken/SlotKey` schema、durable register-before-submit WAL、interval conflict index、backend reset evidence、quarantine budget、EmitC/VPTO adapter，以及 A3/A5 late-write/canary/fault/perf matrix。
+- 下一章：**一条 Lease 怎样可恢复——`AsyncLeaseToken`、register-before-submit WAL 与 Crash-at-every-boundary Golden。**
