@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 38 章已把 owner failure detector、durable takeover authority、`owner_epoch` 与 backend-specific member token 串成一条可证明链；下一章将用 crash-at-every-boundary golden 验证 create/register/kill/reap/final/checkpoint 各边界的接管语义。
+- 当前主线：第 39 章已把 fenced takeover 拆成 create/register/kill/reap/final/checkpoint 六个可注入崩溃边界，并定义 intent-before-action、owner-specific evidence 与 replay oracle；下一章将把同一 golden 落到 MP、Ray 与 external launcher 的 deterministic failpoint。
 
 ## 已完成章节
 
@@ -51,6 +51,7 @@
 | 2026-09-20 36 | `KILL sent → exit observed → direct-child reap → descendant-domain final` | [`a7fda4c8`](https://github.com/vllm-project/vllm/commit/a7fda4c88bfc421d31e33acc5e01e86ebe467ad8) | [join/reap 与 Process Tree Final]({{ '/articles/vllm-kill-join-reap-process-tree-containment-final/' | relative_url }}) |
 | 2026-09-21 37 | `MP direct child / Ray actor / external rank → owner-specific terminal → GroupFinal` | [`9b49f923`](https://github.com/vllm-project/vllm/commit/9b49f92344312c41ad61e05282c8e6a2d9bafb7f) | [三种 Owner 的 ProcessFinal]({{ '/articles/vllm-process-final-backend-owner-adapters/' | relative_url }}) |
 | 2026-09-22 38 | `owner failure detector → durable CAS takeover → owner_epoch/member token → fenced final` | [`79468c20`](https://github.com/vllm-project/vllm/commit/79468c20ef23227d4e051f807e10fd54fb24e24f) | [Owner Takeover 与 Generation Fencing]({{ '/articles/vllm-owner-takeover-generation-fencing/' | relative_url }}) |
+| 2026-09-24 39 | `create/register/kill/reap/final/checkpoint → crash-at-every-boundary → replay oracle` | [`9ef37771`](https://github.com/vllm-project/vllm/commit/9ef37771beac1c1ce6a8b7ceae1f7ebeb6f51800) | [Takeover 的六边界 Golden]({{ '/articles/vllm-takeover-crash-boundary-golden/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -342,6 +343,14 @@
 - `WorkerWrapperBase.global_rank`
 - `ProcessFinal/GroupFinal`（本文提出的设计接口，尚未合入）
 
+- `vllm.v1.utils.shutdown`（TERM、shared-deadline join、KILL tree 边界）
+- `CoreEngineProcManager.__init__/shutdown`（partial start 与 manager finalizer）
+- `MultiprocExecutor._ensure_worker_termination`（grace→TERM→KILL）
+- `CoreEngineActorManager.shutdown`（actor kill 与 placement-group removal）
+- `ExecutorWithExternalLauncher.shutdown`（rank-local cleanup boundary）
+- `OwnerLease/KillIntent/MemberFinal/GroupFinal`（建议协议）
+- deterministic failpoint / replay oracle（建议测试接口）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -526,6 +535,12 @@
 176. backend-neutral verdict 与 backend-specific evidence 正交；`direct_reaped`、`actor_terminal`、`launcher_reaped` 不能压成无来源的 success bool。
 177. external launcher 的 rank-local cleanup 不能升级为 group containment；expected set 必须按 `global_rank/RANK` 聚合，并由 supervisor 发布 group final。
 178. final identity 至少绑定 `(generation, owner_scope, global_rank, evidence_ref)`；旧 PID、旧 actor 或旧 launcher attempt 的迟到 terminal 必须被拒绝。
+179. create 与 register 是两个提交点；create 成功而 register 未持久化时，registry absence 不能证明 member 不存在，必须 discovery 或 quarantine。
+180. destructive action 必须遵守 durable intent-before-action；动作已生效而 ACK 丢失时，恢复只能重放同一 operation，不能生成无 generation 的新 kill。
+181. operation id 只在同一 member generation 与 owner epoch 内有效；同 id 同 payload 可幂等，同 id 不同 payload 必须 fail closed。
+182. terminal observation、MP direct reap、durable member final 与 group checkpoint 是四个单调证据层，不能跨层推断。
+183. takeover golden 必须在 create/register/kill/reap/final/checkpoint 的前后确定性崩溃；只靠 sleep 驱动的 E2E 不能证明 ACK-loss 窗口。
+184. checkpoint 只能聚合 durable、generation-matched finals；volatile cache、PID absence 或旧 epoch late-final 不能补齐 expected member set。
 
 ## 前置依赖与版本注意
 
@@ -534,7 +549,8 @@
 
 ## 尚未解释的知识债
 
-- 缺少实际 `ProcessFinal/GroupFinal`、MP KILL 后 shared-deadline join/reap、Ray actor terminal/state confirmation、external supervisor adapter、generation-safe evidence identity、process-group/cgroup owner，以及跨 backend zombie/node-loss/launcher-crash golden。
+- 缺少实际 `OwnerLease/KillIntent/ProcessFinal/GroupFinal` durable registry、register-before-create token、orphan discovery、destructive-action epoch enforcement，以及 create/register/kill/reap/final/checkpoint 的 deterministic failpoint/replay oracle。
+- 缺少 MP KILL 后 shared-deadline join/reap、Ray actor terminal/state confirmation、external supervisor adapter、generation-safe evidence identity、process-group/cgroup owner，以及跨 backend zombie/node-loss/launcher-crash golden。
 
 - 缺少实际 `ShutdownEvent/ShutdownWAL/TerminalCheckpoint`、独立 collector process、stable durability reason、short-write/EINTR loop、preallocation/rotation、group-commit benchmark、ENOSPC/EIO/blocked-fsync fault matrix 和 crash-at-every-write harness。
 
@@ -823,9 +839,23 @@
 - 新知识债：实际 durable registry/schema、MP subreaper/process-group/cgroup、Ray stable actor/restart identity、launcher attempt adapter、destructive-action epoch enforcement、clock jump/partition/late GPU work，以及 crash-at-every-boundary E2E。
 - 下一章：**Crash-at-every-boundary——create/register/kill/reap/final/checkpoint 的接管 Golden。**
 
+## 第 39 章课程账本增量
+
+- 源码基线：[`9ef37771`](https://github.com/vllm-project/vllm/commit/9ef37771beac1c1ce6a8b7ceae1f7ebeb6f51800)；相对第 38 章前进 116 个 commit，本文直接相关 shutdown/owner 路径没有改变结论的语义变化。
+- 已覆盖文件：`vllm/v1/engine/utils.py`、`vllm/v1/utils.py`、`vllm/v1/executor/multiproc_executor.py`、`uniproc_executor.py`、`tests/v1/engine/test_startup_watch_processes.py`、`tests/v1/executor/test_executor.py`、`tests/v1/engine/test_core_engine_actor_manager.py`、`tests/entrypoints/launchers/test_shutdown.py`。
+- 已覆盖符号：`CoreEngineProcManager.__init__/shutdown`、`v1.utils.shutdown`、`WorkerProcHandle.proc`、`MultiprocExecutor._ensure_worker_termination/shutdown`、`CoreEngineActorManager.shutdown`、`ExecutorWithExternalLauncher.shutdown`；`CreateIntent/OwnerLease/KillIntent/MemberFinal/GroupFinal` 与 failpoint/replay oracle 为建议接口。
+- 新确认不变量：
+  1. create 不等于 register；未注册的已创建 member 只能通过可发现 token 收敛，否则必须 quarantine。
+  2. destructive action 必须 intent-before-action，并绑定 `MemberKey + owner_epoch + op_seq`；旧 epoch 或 token 不匹配的重放必须拒绝。
+  3. terminal observed、direct reap、durable final、atomic checkpoint 分属不同证据层；同 operation id 冲突必须 fail closed。
+  4. crash-at-every-boundary 需要确定性 failpoint 和 replay oracle；sleep-only E2E 只能校准 backend 事实，不能穷举 ACK-loss 窗口。
+- 直接测试事实：EngineCore timeout 测试覆盖 finalizer 幂等与 timeout 选择；Worker fake-clock 测试覆盖 grace→TERM；shutdown E2E 把 zombie 排除出 still-alive；Ray actor manager 测试只走正常 cleanup。当前没有 create/register、KILL→reap、final/checkpoint、旧 epoch 或同 op 冲突注入。
+- 新知识债：durable registry/CAS、register-before-create backend token、orphan discovery、MP/Ray/launcher failpoint adapter、KILL→join、Ray/launcher terminal oracle、WAL torn checkpoint、registry partition 与 late GPU work E2E。
+- 下一章：**同一个 Golden，三种 Backend——MP、Ray 与 External Launcher 的 deterministic failpoint 与 replay oracle。**
+
 ## 下一批候选章节
 
-1. 下一主线：Crash-at-every-boundary——create/register/kill/reap/final/checkpoint 的接管 Golden。
+1. 下一主线：同一个 Golden，三种 Backend——MP、Ray 与 External Launcher 的 deterministic failpoint 与 replay oracle。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
