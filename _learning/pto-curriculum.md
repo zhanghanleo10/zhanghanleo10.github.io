@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-24。
+最后更新：2026-09-25。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 45 已沿 PTOAS 的 `AsyncSession → TPUT/TGET_ASYNC → AsyncEvent → Wait/Test` 把单条 lease 落成 owner-range-generation token，并证明 register-before-submit 只消除 untracked submit：恢复出的 `PREPARED` 必须按 `MAY_HAVE_SUBMITTED` 隔离。下一步研究 backend recovery adapter、session/device reset evidence 与 late-write canary。
+当前阶段：ISA 语义与 compiler lowering 交替推进。课程 46 已下钻 pto-isa 的 `AsyncSession → staged SQE → doorbell → postDone → AsyncEvent`，确认 aggregate `DEFER` 可在 publish 前返回 valid future handle，并把恢复路径闭合为 backend operation key、同代 completion query、scoped reset evidence 或 quarantine；late-write canary 只验证 reset 实现，不能替代正式 fence。下一步研究 interval conflict index、quarantine 容量水位与 admission backpressure。
 
 ## 已完成章节
 
@@ -70,6 +70,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-22 | Async Lease、Cancel 与 Generation Fencing | session/event → completion unknown → quarantine → safe reuse | [课程 43]({% post_url 2026-09-22-ptoas-async-lease-cancel-quarantine-generation-fencing %}) |
 | 2026-09-23 | Lease Registry、PlanMemory Epoch 与 Crash Recovery | static slot plan + Buffer identity + terminal evidence → safe reuse | [课程 44]({% post_url 2026-09-23-ptoas-lease-registry-planmemory-epoch-crash-recovery %}) |
 | 2026-09-24 | AsyncLeaseToken、register-before-submit WAL 与 Crash Golden | owner-range-generation token → PREPARED → submit/event → durable completion → retire | [课程 45]({% post_url 2026-09-24-ptoas-async-lease-token-register-before-submit-wal %}) |
+| 2026-09-25 | Backend Recovery Adapter、Session Reset 与 Late-write Canary | durable token → backend operation key → completion query/reset/quarantine → canary | [课程 46]({% post_url 2026-09-25-pto-async-backend-recovery-reset-canary %}) |
 
 ## ISA 知识地图
 
@@ -91,6 +92,7 @@ permalink: /learning/pto-curriculum/
 | Event | 精确表达 producer/consumer pipeline 依赖，不是全局 barrier | 已讲透基础 |
 | Pipe mapping | TLOAD→MTE2、TADD→V、Vec TSTORE→MTE3、TMATMUL→M | 已讲基础 |
 | Event ID 生命周期 | Record 后必须有 Wait；ID 有限并按 pipe pair 管理 | 已讲基础 |
+| AsyncEvent/aggregate SDMA recovery | SDMA handle 只编码 `postId+queueCount`；`DEFER` 可在 doorbell 前返回 future handle。恢复必须绑定 domain/session/workspace generation 与 owner-range，按 physical post 共同 retire；query 不可用时只能可信 reset 或 quarantine | 已讲透恢复边界；runtime adapter/canary 待实现 |
 | TPipe/TPUSH/TPOP | A2/A3 跨 Cube/Vector Tile 传递包含 GM payload ring 与 ready/free credit | 已讲基础 |
 | DIR_BOTH ownership | C2V/V2C 必须使用两条不重叠 ring；总 footprint=`2×SlotNum×SlotSize` | 已讲透核心缺陷 |
 | Credit batching | 初始 SlotNum 个 entries 免等待；之后 consumer 每 SyncPeriod 个 pop 发一个 credit，producer 每 SyncPeriod 个 wrap 前消费一个 | 已讲透 depth=8/40 entries |
@@ -143,9 +145,9 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [37ea0a0](https://github.com/hw-native-sys/pto-isa/commit/37ea0a0a3c79f5bcec19d23c6dcf8a7d9346dfdb) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 A5 ND→NZ/ZN producer contract、dynamic alignment gap、raw-bit poison 四层协议与显式 padded TMATMUL consumer matrix | ISA 深挖 24 |
+| pto-isa | [327cd586](https://github.com/hw-native-sys/pto-isa/commit/327cd5869f3a7c4d2c6a1b945b2aed06e7665c5d) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `AsyncEvent` handle、`AsyncSession/SdmaRuntimeContext`、aggregate `DEFER`/batch publish、doorbell、postDone 与 Host workspace 的 recovery/reset/canary 边界 | ISA 深挖 25 |
 | simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
-| PTOAS | [0a3e017](https://github.com/hw-native-sys/PTOAS/commit/0a3e0173121a21fea61c9580bf4781cbe32f261d) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；新增 async op/type verifier、MemoryEffects、EmitC SDMA lowering，以及 token/WAL recovery 边界 | 跨仓深挖 24 |
+| PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -156,6 +158,10 @@ permalink: /learning/pto-curriculum/
 - register-before-submit 消除的是“设备可能已接受、registry 却完全没有记录”的 untracked submit；它不能区分 crash-before-submit 与 submit 生效后、状态记录前崩溃，故恢复的 durable `PREPARED` 必须视为 `MAY_HAVE_SUBMITTED`。
 - `Wait()==true` 是进程内 completion evidence，不是 durable reuse authority；只有同代 `COMPLETED` record 持久化，或可信 backend query/reset fence，才允许 retire/quarantine release。
 - recovery 必须先重建 outstanding-range quarantine，再开放 allocator free list；否则扫描 WAL 期间就可能把旧 dst 发给新 generation。
+- SDMA `AsyncEvent.handle` 只编码 `postId + queueCount`；valid handle 不证明 descriptor 已跨过 doorbell，aggregate `DEFER` 可返回尚未 publish 的 future event。
+- completion query 必须绑定 backend、execution domain、session/workspace generation、physical post 与 owner-range；相同地址或相同 postDone 数值不能证明同一历史。
+- logical leases 共享一个 physical post 时，若 backend 没有 per-SQE completion，必须按整个 post 共同 retire；任一 queue 未完成都不能提前释放子 range。
+- `DomainReset` 与 `Completed` 是两类证据；stream destroy/workspace free 调用本身不证明旧 SQ/CQ 已停止写。late-write canary 用于验证 reset/fault path，不能单独授权复用。
 
 - compiler `PlanMemory` 只拥有静态 root/lifetime/reuse group/offset 事实，不能以 SSA `freeIndex` 或相同 planned offset 授权 runtime allocation 复用。
 - runtime lease release 必须等待所有相交 range 的同 execution-domain、同 owner generation terminal evidence；证据丢失或 registry crash 时默认 quarantine。
@@ -393,7 +399,7 @@ permalink: /learning/pto-curriculum/
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
-- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–45 已从 ABI certificate、owner closure 推进到 runtime registry 与 recoverable lease protocol。后续仍欠真实 `AsyncLeaseToken/RangeRef` schema、register-before-submit WAL/CRC/checkpoint、backend recovery adapter、trusted reset evidence、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、guard/slow-path、cross-backend golden，以及真实 late-write/A5 guard-page/canary/poison/性能矩阵。
+- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–46 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease 与 backend recovery boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、interval conflict index、quarantine backpressure、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/A5 guard-page/canary/poison/性能矩阵。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -403,7 +409,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：研究 WAL 存在但 opaque event 随进程消失后的 backend recovery adapter，以 operation-key query、session/device reset evidence 与 late-write canary 闭合 quarantine release。
+1. 主线：研究 quarantine range 的 interval conflict index、容量水位与 admission backpressure，明确何时拒绝新 async、升级 scoped/device reset，以及如何避免压力下静默复用。
 2. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 实现 generation-aware cross-dispatch CI contract。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -713,3 +719,15 @@ permalink: /learning/pto-curriculum/
 - 新知识债：真实 token/status schema、WAL frame/CRC/torn-write recovery、group commit/checkpoint、interval conflict index、backend operation key/query/reset、quarantine backpressure、EmitC/VPTO adapter，以及 A3/A5 late-write canary。
 - 下一章：**WAL 还在，Event 已没了——Backend Recovery Adapter、Session Reset Evidence 与 Late-write Canary。**
 
+
+
+## 第 46 章课程账本增量
+
+- 源码基线：PTOAS [`f5eff3ee`](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b)，pto-isa [`327cd586`](https://github.com/hw-native-sys/pto-isa/commit/327cd5869f3a7c4d2c6a1b945b2aed06e7665c5d)；直接相关 pto-isa 提交为 aggregate submit [`513e9e73`](https://github.com/hw-native-sys/pto-isa/commit/513e9e730fd1651323d4ed04e04f203f6921d9b0)。
+- 新覆盖文件：PTOAS EmitC `AsyncSession.cpp`、async verifier/effects/lit；pto-isa `comm_types.hpp`、`async_types.hpp`、`sdma_async_batch.hpp`、`sdma_async_detail_post.hpp`、`pto_comm_inst.hpp`、Host `SdmaWorkspaceManager` 与 A2/A3/A5 async PUT tests。
+- 新覆盖符号：`AsyncEvent`、`AsyncSession/SdmaRuntimeContext`、`MakeSdmaDeferredEvent`、`SdmaDeferAsyncPut`、`PublishSdmaBatch`、`SdmaEventCheck`、`Wait/Test`，并定义建议的 `BackendOperationKey/RecoveryVerdict`。
+- 新确认不变量：valid future handle 不证明 publish；completion query 必须绑定 domain/session/workspace generation；aggregate logical lease 按 physical post 共同 retire；reset witness 与 completion witness 不可互换；canary 只验证 reset 实现。
+- 具体演算：A2/A3、两个 `16×i32`、每段 64 B、`batchSize=2`；第一次 DEFER 返回 `(1<<58)|1` 但未 ring doorbell，第二次触发同一 physical post，generation 41 的 128 B 若过早交给 generation 42 会被迟到 DMA 污染。
+- 直接测试事实：A2/A3 aggregate suite 覆盖 batch/queue/intermediate event 与 poison 终值，A5 suite 覆盖 64/256/512 B 和多 rank 同步 fallback；均未覆盖 crash、event 重建、workspace reuse、reset scope 或 late-write canary。
+- 新知识债：真实 operation-key/verdict schema、SDMA/URMA/RDMA adapter、可信 reset API 与 durable witness、interval index、quarantine 水位/backpressure、VPTO parity，以及 A3/A5 failpoint/canary 真机矩阵。
+- 下一章：**Quarantine 不能无限长——Interval Conflict Index、容量水位与 Admission Backpressure。**
