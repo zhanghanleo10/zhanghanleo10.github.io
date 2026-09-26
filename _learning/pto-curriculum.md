@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-25。
+最后更新：2026-09-26。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler lowering 交替推进。课程 46 已下钻 pto-isa 的 `AsyncSession → staged SQE → doorbell → postDone → AsyncEvent`，确认 aggregate `DEFER` 可在 publish 前返回 valid future handle，并把恢复路径闭合为 backend operation key、同代 completion query、scoped reset evidence 或 quarantine；late-write canary 只验证 reset 实现，不能替代正式 fence。下一步研究 interval conflict index、quarantine 容量水位与 admission backpressure。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 47 已转入 simpler 的真实 `WorkspaceManager`：以 `RegionKey + run_epoch + whole allocation` 区分 current backing、run reference 与 obsolete generation，并用 `workspace_budget_bytes` 将未知 completion 的安全代价变成可见 admission refusal。当前实现是 whole-block ledger，不是 subrange interval index；下一步追踪 structured admission verdict、recovery-priority queue 与 deadlock-free wakeup。
 
 ## 已完成章节
 
@@ -71,6 +71,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-23 | Lease Registry、PlanMemory Epoch 与 Crash Recovery | static slot plan + Buffer identity + terminal evidence → safe reuse | [课程 44]({% post_url 2026-09-23-ptoas-lease-registry-planmemory-epoch-crash-recovery %}) |
 | 2026-09-24 | AsyncLeaseToken、register-before-submit WAL 与 Crash Golden | owner-range-generation token → PREPARED → submit/event → durable completion → retire | [课程 45]({% post_url 2026-09-24-ptoas-async-lease-token-register-before-submit-wal %}) |
 | 2026-09-25 | Backend Recovery Adapter、Session Reset 与 Late-write Canary | durable token → backend operation key → completion query/reset/quarantine → canary | [课程 46]({% post_url 2026-09-25-pto-async-backend-recovery-reset-canary %}) |
+| 2026-09-26 | WorkspaceManager 整块隔离与预算准入 | completion facts → run reference → whole-block quarantine → hard-budget refusal | [课程 47]({% post_url 2026-09-26-simpler-workspace-quarantine-budget-admission %}) |
 
 ## ISA 知识地图
 
@@ -140,19 +141,25 @@ permalink: /learning/pto-curriculum/
 | Function ABI / allocation certificate | `PtrType` 只有 element type 与 memory space；shape/stride 是 view claim；外部 owner facts 由 trusted runtime 导入，PlanMemory 可从 static bytes/alignment/offset 生成 invocation/reuse-scoped certificate | 契约与来源已定义；shared IR、registry、propagation、lease 与跨 backend golden 待实现 |
 | Async lease 与 generation fence | `AsyncEvent` 分离 submit/completion，但未绑定 owner/range/generation；timeout、`Test=false`、cancel requested 都不授权复用。只有同代 completion、confirmed cancel 或可信 execution-domain reset 可结束 quarantine | 当前 EmitC 链与 VPTO fail-closed 已确认；token/cancel/quarantine 实现待补 |
 | Runtime Lease Registry | PlanMemory 只产出静态 root/reuse-group/offset；pypto 已用 retained Buffer/object identity 拒绝同地址 stale free。权威 registry 必须位于控制真实 allocation/free list 且能消费 backend terminal evidence 的 runtime owner | 所有权边界与 crash fail-closed 已闭合；durable schema/golden 待实现 |
+| Workspace quarantine / admission | simpler `WorkspaceManager` 已将 current backing、run reference 与 obsolete generation 分离；completion facts 未闭合时 whole-block quarantine，有限 `workspace_budget_bytes` 超限即拒绝且不改变 published state | 当前 whole-allocation 机制已落地；subrange index、水位队列、structured reason 与 device-wide ceiling 待补 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
 | pto-isa | [327cd586](https://github.com/hw-native-sys/pto-isa/commit/327cd5869f3a7c4d2c6a1b945b2aed06e7665c5d) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `AsyncEvent` handle、`AsyncSession/SdmaRuntimeContext`、aggregate `DEFER`/batch publish、doorbell、postDone 与 Host workspace 的 recovery/reset/canary 边界 | ISA 深挖 25 |
-| simpler | [a8d7ce1](https://github.com/hw-native-sys/simpler/commit/a8d7ce12c7433442f4930baf9daf6ab4e3b7edb5) | Worker、compute_task_fanin、orchestrator TensorMap stages | 入门 |
+| simpler | [c605b03](https://github.com/hw-native-sys/simpler/commit/c605b03cad7be2a80700efbdf3bd00dbc79812a9) | 既有 Worker/task fan-in；新增 `WorkspaceManager`、`RegionKey/Block/RunRecord`、`workspace_budget_bytes`、`MemoryAllocator::Reservation/finalize_except`、whole-block quarantine、obsolete-generation reclamation 与 workspace report | 跨仓深挖 2 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
 ## 已确认接口与不变量
+
+- simpler `WorkspaceManager` 已实现 runtime-owned whole-block ledger：capacity 只回答 fits，overwrite permission 必须等所有 run reference 按真实 drain/copyback/binding facts 退休。
+- `ref_count==0` 不等于可 eviction：current backing 属于 device context；只有 obsolete、unreferenced、unquarantined、无 retained mapping 的 generation 能为增长腾预算。
+- context 在退休证据闭合前销毁会 quarantine 其仍引用的整个 allocation；terminal sweep 的 `KeepIt` 将 charge 从 `reserved_bytes` 移入 `relinquished_bytes`，不代表 HBM 已 free。
+- `workspace_budget_bytes` 是 same-process L2 四类 workspace region 的 hard bound，超限同步拒绝且不改变 published state；`coverage_is_partial=1` 明确它不是 device-wide ceiling。
 
 - `AsyncLeaseToken` 的最小 identity 必须绑定 execution domain、session generation、submit sequence、src/dst owner-generation-range 与 immutable payload hash；同一 token ID 的不同 payload 必须 fail closed。
 - register-before-submit 消除的是“设备可能已接受、registry 却完全没有记录”的 untracked submit；它不能区分 crash-before-submit 与 submit 生效后、状态记录前崩溃，故恢复的 durable `PREPARED` 必须视为 `MAY_HAVE_SUBMITTED`。
@@ -322,6 +329,9 @@ permalink: /learning/pto-curriculum/
 - `PROTOCOL_BLOCKED`、`RESIDUAL_STATE` 与 `DATA_MISMATCH` 是三类不同失败；balance/census 不能替代 shape/layout/value 断言，反之亦然。
 
 ## 待验证推断
+
+- 当前 whole-block quarantine 与 allocator/unmap 粒度一致；只有当 runtime 引入可独立复用的 suballocation、owner-generation-range token 与 overlapping lease set 后，interval conflict index 才可能减少物理隔离放大。否则它只增加元数据复杂度，不能返还更多 HBM。
+- hard-limit acquire failure 目前没有 structured reason、watermark、deadline、fairness 或 recovery priority；是否需要等待队列，必须由拒绝率、quarantine 驻留时间、最大单次增长和 cleanup reserve 的观测分布决定，不能先拍固定百分比。
 
 - PTOAS 现有 `AsyncSession/AsyncEvent/Wait/Test` 已证明 submit 与 completion 被分离，但 opaque event 未绑定 owner/range/generation。课程 45 已定义 token、WAL 顺序与 recovery oracle，然而它们尚未实现；尤其 backend 是否支持 operation-key 去重、跨进程 completion query 或可信 session/device reset，仍须以 late DMA、丢回执、重复 final、registry crash 与容量耗尽测试验证。
 
@@ -731,3 +741,15 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：A2/A3 aggregate suite 覆盖 batch/queue/intermediate event 与 poison 终值，A5 suite 覆盖 64/256/512 B 和多 rank 同步 fallback；均未覆盖 crash、event 重建、workspace reuse、reset scope 或 late-write canary。
 - 新知识债：真实 operation-key/verdict schema、SDMA/URMA/RDMA adapter、可信 reset API 与 durable witness、interval index、quarantine 水位/backpressure、VPTO parity，以及 A3/A5 failpoint/canary 真机矩阵。
 - 下一章：**Quarantine 不能无限长——Interval Conflict Index、容量水位与 Admission Backpressure。**
+
+
+## 第 47 章课程账本增量
+
+- 源码基线：simpler [`c605b03c`](https://github.com/hw-native-sys/simpler/commit/c605b03cad7be2a80700efbdf3bd00dbc79812a9)；直接相关已合入为 [PR #2440](https://github.com/hw-native-sys/simpler/pull/2440) / [`9ca91c52`](https://github.com/hw-native-sys/simpler/commit/9ca91c522e8a80483f6a7cf8ad094f994fdcff5f)。最新 PR #2443 的 scheduler-state retained storage仍在 budget 外，佐证 partial coverage。
+- 新覆盖文件：`workspace_manager.h`、`memory_allocator.h`、onboard/sim `memory_allocator.cpp`、`device_runner_base.{h,cpp}`、`c_api_shared.cpp`、Python Worker surface，以及 C++/Python workspace budget tests。
+- 新覆盖符号：`WorkspaceManager::RegionKey/Block/RunRecord`、`acquire/reference/note_published/note_run_fact/make_room_locked`、`MemoryAllocator::Reservation/finalize_except`、`SimplerWorkspaceReport`。
+- 新确认不变量：capacity 不等于 overwrite permission；current backing 即使 idle 也不可为别的 region 回收；只有 obsolete + unreferenced + unquarantined generation 能腾预算；unmap/free 失败继续计费；terminal relinquish 不等于 free。
+- 具体演算：6 MiB budget 下同一 staging region 依次增长 1→2→4 MiB；第三次请求先回收 obsolete 的 1 MiB，保留 current 2 MiB，再分配 4 MiB，最终恰为 6 MiB。若旧 generation 被 quarantine，则不会用于腾预算。
+- 直接测试事实：reuse 需要 capacity 与 consumer retirement；8 KiB budget 的 over-budget request 在 device allocation 前失败且状态不变；context 销毁会 whole-block quarantine；1→2→4 MiB 测试固定 obsolete-only reclamation；Python surface 固定 invalid route 与 close gate。
+- 新知识债：PTO async lease 与 workspace owner 的 shared schema、durable recovery、suballocation/interval index、structured admission reason、水位/queue/deadline/fairness、device-wide reserve，以及 A3/A5 late-write/OOM/failure injection。
+- 下一章：**拒绝以后谁先走——Structured Admission Verdict、Recovery-priority Queue 与 Deadlock-free Wakeup。**
