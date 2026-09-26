@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 39 章已把 fenced takeover 拆成 create/register/kill/reap/final/checkpoint 六个可注入崩溃边界，并定义 intent-before-action、owner-specific evidence 与 replay oracle；下一章将把同一 golden 落到 MP、Ray 与 external launcher 的 deterministic failpoint。
+- 当前主线：第 40 章已把同一 crash-recovery golden 落到 MP、Ray 与 external launcher，形成共享状态机、owner-specific evidence 与 deterministic replay oracle；下一章进入 registry partition 下的 action authority 与 split-brain reconciliation。
 
 ## 已完成章节
 
@@ -52,6 +52,7 @@
 | 2026-09-21 37 | `MP direct child / Ray actor / external rank → owner-specific terminal → GroupFinal` | [`9b49f923`](https://github.com/vllm-project/vllm/commit/9b49f92344312c41ad61e05282c8e6a2d9bafb7f) | [三种 Owner 的 ProcessFinal]({{ '/articles/vllm-process-final-backend-owner-adapters/' | relative_url }}) |
 | 2026-09-22 38 | `owner failure detector → durable CAS takeover → owner_epoch/member token → fenced final` | [`79468c20`](https://github.com/vllm-project/vllm/commit/79468c20ef23227d4e051f807e10fd54fb24e24f) | [Owner Takeover 与 Generation Fencing]({{ '/articles/vllm-owner-takeover-generation-fencing/' | relative_url }}) |
 | 2026-09-24 39 | `create/register/kill/reap/final/checkpoint → crash-at-every-boundary → replay oracle` | [`9ef37771`](https://github.com/vllm-project/vllm/commit/9ef37771beac1c1ce6a8b7ceae1f7ebeb6f51800) | [Takeover 的六边界 Golden]({{ '/articles/vllm-takeover-crash-boundary-golden/' | relative_url }}) |
+| 2026-09-26 40 | `shared crash state machine → MP/Ray/launcher adapter → deterministic failpoint → replay oracle` | [`8a236460`](https://github.com/vllm-project/vllm/commit/8a2364605c0b0581ea5d0d3720cb1125b47abc6f) | [三 Backend 的 Deterministic Golden]({{ '/articles/vllm-backend-deterministic-failpoint-replay-oracle/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -853,9 +854,23 @@
 - 新知识债：durable registry/CAS、register-before-create backend token、orphan discovery、MP/Ray/launcher failpoint adapter、KILL→join、Ray/launcher terminal oracle、WAL torn checkpoint、registry partition 与 late GPU work E2E。
 - 下一章：**同一个 Golden，三种 Backend——MP、Ray 与 External Launcher 的 deterministic failpoint 与 replay oracle。**
 
+## 第 40 章课程账本增量
+
+- 源码基线：[`8a236460`](https://github.com/vllm-project/vllm/commit/8a2364605c0b0581ea5d0d3720cb1125b47abc6f)；该提交为 speculative draft-token RPC 补 execute-model timeout，未改变本文 shutdown/takeover 结论。
+- 已覆盖文件：`vllm/v1/engine/utils.py`、`vllm/v1/utils.py`、`vllm/v1/executor/multiproc_executor.py`、`uniproc_executor.py`、`tests/v1/engine/test_startup_watch_processes.py`、`test_core_engine_actor_manager.py`、`tests/v1/executor/test_executor.py`、`tests/entrypoints/launchers/test_shutdown.py`、`tests/distributed/test_torchrun_example.py`。
+- 已覆盖符号：`CoreEngineProcManager.shutdown`、通用 `shutdown`、`MultiprocExecutor._ensure_worker_termination`、`WorkerProcHandle`、`CoreEngineActorManager.monitor_engine_liveness/shutdown`、`ExecutorWithExternalLauncher._distributed_args/shutdown`；`GoldenHarness/RecoveryAdapter/BackendEvidence/ReplayDecision` 为建议接口。
+- 新确认不变量：
+  1. cross-backend parity 比较共享状态机、fencing 与 final verdict，但必须保留 `direct_reaped/actor_terminal/launcher_reaped` 三种 owner proof。
+  2. deterministic failpoint 应位于 durable transition 与外部 action 的边界，由 step gate 放行，不能依赖 sleep 猜 ACK-loss 窗口。
+  3. replay oracle 的最小输入是 durable journal、backend snapshot、member token 与 owner epoch；token/epoch 不匹配必须 fail closed。
+  4. MP 的 direct-child reap、Ray control-plane terminal 与 launcher job-attempt terminal 不能互相代替；local rank cleanup 不能合成 group final。
+- 直接测试事实：EngineCore timeout 测试覆盖 finalizer 幂等与 timeout 选择；MP fake-clock 只覆盖 grace→TERM；Ray actor manager 只走正常 cleanup；torchrun example 只验证正常跨 rank 一致；shutdown E2E 排除 zombie，不能证明 reap。当前没有三 backend 共用的 action-after-return crash、旧 epoch、同 op 冲突或 checkpoint replay golden。
+- 新知识债：实际 durable registry/CAS/WAL、三类 RecoveryAdapter、MP KILL 后 join/subreaper/pidfd、Ray run-attempt state query、launcher job-attempt API、stable reason code、torn checkpoint、registry partition 与真实 native/GPU hang 校准。
+- 下一章：**Registry 分区时谁有权 KILL——Linearizable CAS、Operation Lease 与 Split-brain Reconciliation。**
+
 ## 下一批候选章节
 
-1. 下一主线：同一个 Golden，三种 Backend——MP、Ray 与 External Launcher 的 deterministic failpoint 与 replay oracle。
+1. 下一主线：Registry 分区时谁有权 KILL——Linearizable CAS、Operation Lease 与 Split-brain Reconciliation。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
