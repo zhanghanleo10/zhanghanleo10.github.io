@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-26。
+最后更新：2026-09-27。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 47 已转入 simpler 的真实 `WorkspaceManager`：以 `RegionKey + run_epoch + whole allocation` 区分 current backing、run reference 与 obsolete generation，并用 `workspace_budget_bytes` 将未知 completion 的安全代价变成可见 admission refusal。当前实现是 whole-block ledger，不是 subrange interval index；下一步追踪 structured admission verdict、recovery-priority queue 与 deadlock-free wakeup。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 48 从 simpler 当前单一 `nullptr` refusal 出发，区分可进展、永久拒绝与 recovery，并推导 progress-capable recovery priority、revision-based 无丢失唤醒及“醒后必须重检”的控制面契约。主干尚无 `AdmissionVerdict/AdmissionTicket/admission_revision`；下一步校准 watermark、cleanup reserve、hysteresis 与 overload shedding。
 
 ## 已完成章节
 
@@ -72,6 +72,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-24 | AsyncLeaseToken、register-before-submit WAL 与 Crash Golden | owner-range-generation token → PREPARED → submit/event → durable completion → retire | [课程 45]({% post_url 2026-09-24-ptoas-async-lease-token-register-before-submit-wal %}) |
 | 2026-09-25 | Backend Recovery Adapter、Session Reset 与 Late-write Canary | durable token → backend operation key → completion query/reset/quarantine → canary | [课程 46]({% post_url 2026-09-25-pto-async-backend-recovery-reset-canary %}) |
 | 2026-09-26 | WorkspaceManager 整块隔离与预算准入 | completion facts → run reference → whole-block quarantine → hard-budget refusal | [课程 47]({% post_url 2026-09-26-simpler-workspace-quarantine-budget-admission %}) |
+| 2026-09-27 | Structured Admission Verdict 与无丢失唤醒 | null refusal → reason/action → recovery priority → revision recheck | [课程 48]({% post_url 2026-09-27-simpler-structured-admission-recovery-priority-wakeup %}) |
 
 ## ISA 知识地图
 
@@ -148,7 +149,7 @@ permalink: /learning/pto-curriculum/
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
 | pto-isa | [327cd586](https://github.com/hw-native-sys/pto-isa/commit/327cd5869f3a7c4d2c6a1b945b2aed06e7665c5d) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `AsyncEvent` handle、`AsyncSession/SdmaRuntimeContext`、aggregate `DEFER`/batch publish、doorbell、postDone 与 Host workspace 的 recovery/reset/canary 边界 | ISA 深挖 25 |
-| simpler | [c605b03](https://github.com/hw-native-sys/simpler/commit/c605b03cad7be2a80700efbdf3bd00dbc79812a9) | 既有 Worker/task fan-in；新增 `WorkspaceManager`、`RegionKey/Block/RunRecord`、`workspace_budget_bytes`、`MemoryAllocator::Reservation/finalize_except`、whole-block quarantine、obsolete-generation reclamation 与 workspace report | 跨仓深挖 2 |
+| simpler | [c605b03](https://github.com/hw-native-sys/simpler/commit/c605b03cad7be2a80700efbdf3bd00dbc79812a9) | 既有 Worker/task fan-in；新增 `WorkspaceManager::Admission/acquire/make_room_locked/note_run_fact`、`DeviceRunnerBase` budget chain、parent-run FIFO/`activate_prepared`；区分当前 null refusal 与建议的 verdict/ticket/revision queue | 跨仓深挖 3 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
@@ -156,6 +157,8 @@ permalink: /learning/pto-curriculum/
 
 ## 已确认接口与不变量
 
+- structured admission 的最小正确性边界是：verdict 区分 `AdmitNow/Retryable/RejectPermanent`；recovery priority 只授予能减少 ownership debt 或补齐终态事实的工作；waiter 不得持 ledger/allocator/admission/binding 等 progress dependency；notify 只授权 recheck，不授权复用。
+- revision-based wait 必须覆盖“判定后、注册前”的竞态：订阅 observed revision 后再次比较，状态已变化就不睡；醒来重新执行完整 capacity + permission 检查。
 - simpler `WorkspaceManager` 已实现 runtime-owned whole-block ledger：capacity 只回答 fits，overwrite permission 必须等所有 run reference 按真实 drain/copyback/binding facts 退休。
 - `ref_count==0` 不等于可 eviction：current backing 属于 device context；只有 obsolete、unreferenced、unquarantined、无 retained mapping 的 generation 能为增长腾预算。
 - context 在退休证据闭合前销毁会 quarantine 其仍引用的整个 allocation；terminal sweep 的 `KeepIt` 将 charge 从 `reserved_bytes` 移入 `relinquished_bytes`，不代表 HBM 已 free。
@@ -331,7 +334,7 @@ permalink: /learning/pto-curriculum/
 ## 待验证推断
 
 - 当前 whole-block quarantine 与 allocator/unmap 粒度一致；只有当 runtime 引入可独立复用的 suballocation、owner-generation-range token 与 overlapping lease set 后，interval conflict index 才可能减少物理隔离放大。否则它只增加元数据复杂度，不能返还更多 HBM。
-- hard-limit acquire failure 目前没有 structured reason、watermark、deadline、fairness 或 recovery priority；是否需要等待队列，必须由拒绝率、quarantine 驻留时间、最大单次增长和 cleanup reserve 的观测分布决定，不能先拍固定百分比。
+- hard-limit acquire failure 目前没有 structured reason、ticket、revision、deadline、fairness 或 recovery priority；本章给出最小契约，但具体 watermark、cleanup reserve、recovery burst/aging 必须由拒绝率、cleanup service time、quarantine 驻留时间、最大增长与 device idle gap 的分布校准，不能先拍固定百分比。
 
 - PTOAS 现有 `AsyncSession/AsyncEvent/Wait/Test` 已证明 submit 与 completion 被分离，但 opaque event 未绑定 owner/range/generation。课程 45 已定义 token、WAL 顺序与 recovery oracle，然而它们尚未实现；尤其 backend 是否支持 operation-key 去重、跨进程 completion query 或可信 session/device reset，仍须以 late DMA、丢回执、重复 final、registry crash 与容量耗尽测试验证。
 
@@ -409,7 +412,7 @@ permalink: /learning/pto-curriculum/
 - Tensor Graph → Tile Graph → Block Graph → Execution Graph 的 pass 顺序。
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
-- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–46 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease 与 backend recovery boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、interval conflict index、quarantine backpressure、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/A5 guard-page/canary/poison/性能矩阵。
+- Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–48 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery 与 admission control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、watermark/hysteresis/overload shedding、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/A5 guard-page/canary/poison/性能矩阵。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -419,7 +422,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：研究 quarantine range 的 interval conflict index、容量水位与 admission backpressure，明确何时拒绝新 async、升级 scoped/device reset，以及如何避免压力下静默复用。
+1. 主线：在 structured verdict/revision queue 上校准 watermark、cleanup reserve、hysteresis 与 overload shedding；再评估 suballocation/interval conflict index 是否真的能返还 HBM。
 2. 为 TPipe early-exit、V2C/DIR_BOTH 与 graph replay 实现 generation-aware cross-dispatch CI contract。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -753,3 +756,15 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：reuse 需要 capacity 与 consumer retirement；8 KiB budget 的 over-budget request 在 device allocation 前失败且状态不变；context 销毁会 whole-block quarantine；1→2→4 MiB 测试固定 obsolete-only reclamation；Python surface 固定 invalid route 与 close gate。
 - 新知识债：PTO async lease 与 workspace owner 的 shared schema、durable recovery、suballocation/interval index、structured admission reason、水位/queue/deadline/fairness、device-wide reserve，以及 A3/A5 late-write/OOM/failure injection。
 - 下一章：**拒绝以后谁先走——Structured Admission Verdict、Recovery-priority Queue 与 Deadlock-free Wakeup。**
+
+
+## 第 48 章课程账本增量
+
+- 源码基线：simpler [`c605b03c`](https://github.com/hw-native-sys/simpler/commit/c605b03cad7be2a80700efbdf3bd00dbc79812a9)；该 commit 仍是 2026-09-27 默认分支最新提交。直接相关已合入为 workspace ledger [PR #2440](https://github.com/hw-native-sys/simpler/pull/2440) 与 parent-run FIFO regression [PR #2314](https://github.com/hw-native-sys/simpler/pull/2314)。
+- 新覆盖文件：`workspace_manager.h`、`device_runner_base.{h,cpp}`、`chip_worker.cpp`、`task_interface.py`、`worker_manager.cpp`、`scheduler.cpp`、`worker-manager.md` 及 workspace/scheduler tests。
+- 新覆盖符号：`WorkspaceManager::Admission/acquire/make_room_locked/note_run_fact`、`DeviceRunnerBase::set_workspace_budget/acquire_arena_backing`、`WorkerThread::activate_prepared`；定义建议的 `AdmissionVerdict/AdmissionTicket/admission_revision`。
+- 新确认不变量：同一 null refusal 不能决定 retry；只有 progress-capable cleanup/recovery 可越过 normal admission；waiter 不持 progress dependency；revision 关闭判定/注册竞态；notify 只触发完整 recheck。
+- 具体演算：6 MiB budget 下 current g2=2 MiB、obsolete but referenced g1=1 MiB、normal g3=4 MiB；初次为 7 MiB 被拒。R1 completion/copyback/bindings 闭合后释放 g1，revision 37→38，重检后恰以 6 MiB commit；若 R1 context destroyed，则转为 quarantine 并继续拒绝。
+- 直接测试事实：workspace tests 固定 fits≠permission、over-budget no-side-effect、context-destroyed whole-block quarantine 与 1→2→4 MiB obsolete reclamation；scheduler tests/PR #2314 固定 staged successor 不越过 FIFO predecessor。尚无 reason/ticket/revision、priority、deadline/cancel 或 lost-wakeup test。
+- 新知识债：stable reason taxonomy、ticket/revision queue、recovery fairness、deadline/cancel、queue/service metrics、watermark/cleanup reserve/hysteresis/overload shedding，以及 OOM/unmap/late-DMA/reset 的 A3/A5 fault matrix。
+- 下一章：**Watermark 不是百分比——Cleanup Reserve、Hysteresis 与 Overload Shedding 的校准。**
