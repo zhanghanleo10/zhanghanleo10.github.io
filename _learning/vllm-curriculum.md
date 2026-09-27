@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 40 章已把同一 crash-recovery golden 落到 MP、Ray 与 external launcher，形成共享状态机、owner-specific evidence 与 deterministic replay oracle；下一章进入 registry partition 下的 action authority 与 split-brain reconciliation。
+- 当前主线：第 41 章已把 registry partition 下的 destructive action authority 收紧为 `linearizable owner CAS → durable intent → generation-bound OperationLease → backend fence`；下一章处理分区恢复后的 torn lease、`ACTION_UNKNOWN`、backend query 与 reconciliation golden。
 
 ## 已完成章节
 
@@ -53,6 +53,7 @@
 | 2026-09-22 38 | `owner failure detector → durable CAS takeover → owner_epoch/member token → fenced final` | [`79468c20`](https://github.com/vllm-project/vllm/commit/79468c20ef23227d4e051f807e10fd54fb24e24f) | [Owner Takeover 与 Generation Fencing]({{ '/articles/vllm-owner-takeover-generation-fencing/' | relative_url }}) |
 | 2026-09-24 39 | `create/register/kill/reap/final/checkpoint → crash-at-every-boundary → replay oracle` | [`9ef37771`](https://github.com/vllm-project/vllm/commit/9ef37771beac1c1ce6a8b7ceae1f7ebeb6f51800) | [Takeover 的六边界 Golden]({{ '/articles/vllm-takeover-crash-boundary-golden/' | relative_url }}) |
 | 2026-09-26 40 | `shared crash state machine → MP/Ray/launcher adapter → deterministic failpoint → replay oracle` | [`8a236460`](https://github.com/vllm-project/vllm/commit/8a2364605c0b0581ea5d0d3720cb1125b47abc6f) | [三 Backend 的 Deterministic Golden]({{ '/articles/vllm-backend-deterministic-failpoint-replay-oracle/' | relative_url }}) |
+| 2026-09-27 41 | `registry partition → linearizable owner CAS → OperationLease → backend fence → reconciliation` | [`eb0f2ca3`](https://github.com/vllm-project/vllm/commit/eb0f2ca37f65e496e8c67a7497e818c8a92bae46) | [Registry 分区下的 KILL 权]({{ '/articles/vllm-registry-partition-operation-lease-split-brain/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -351,6 +352,9 @@
 - `ExecutorWithExternalLauncher.shutdown`（rank-local cleanup boundary）
 - `OwnerLease/KillIntent/MemberFinal/GroupFinal`（建议协议）
 - deterministic failpoint / replay oracle（建议测试接口）
+- `AsyncLLM.shutdown`（API teardown 到 EngineCore owner 的公开关闭入口）
+- `OwnerLease/OperationLease/MemberKey`（本文建议协议，尚未合入）
+- split-brain reconciliation 与 backend generation fence（本文建议状态机）
 
 ## 已确认不变量
 
@@ -542,6 +546,12 @@
 182. terminal observation、MP direct reap、durable member final 与 group checkpoint 是四个单调证据层，不能跨层推断。
 183. takeover golden 必须在 create/register/kill/reap/final/checkpoint 的前后确定性崩溃；只靠 sleep 驱动的 E2E 不能证明 ACK-loss 窗口。
 184. checkpoint 只能聚合 durable、generation-matched finals；volatile cache、PID absence 或旧 epoch late-final 不能补齐 expected member set。
+185. failure detector、本地 timeout 与 eventual cache 都不能授予 destructive action authority；takeover 必须由 linearizable CAS 产生单调 `owner_epoch`。
+186. 只在 final acceptance 检查 epoch 不足以 fencing；action 开始前必须取得绑定 `MemberKey + generation + op_seq + action` 的 `OperationLease`。
+187. operation lease 过期只撤销尚未开始的权限；action 已开始、ACK 丢失或 holder 崩溃时必须进入 `ACTION_UNKNOWN`，不能推断未执行。
+188. linearizable registry fencing 与 backend target fencing 正交；plain PID、可复用 rank 或无 attempt 的 PG 名称都不能阻止失租旧 owner 误杀新 generation。
+189. registry quorum 不可达时 destructive path 必须 fail closed；liveness 降级为 `containment_unknown/quarantine`，不能用本地缓存伪造权限。
+190. 分区恢复只接受当前 epoch、generation-matched 的 backend proof；旧 epoch late final 和同 operation id 不同 payload 必须拒绝。
 
 ## 前置依赖与版本注意
 
@@ -623,6 +633,7 @@
 - Worker death 的 Ray V2/FT 测试覆盖 callback、状态转换和部分关闭语义，尚缺默认 MP 全链 collector/KV/connector/device cleanup parity。
 - multiprocess timeout 只有 fake-clock/deadline 单元测试，尚缺真实 alive Worker withheld-response 的 fatal convergence 与资源基线 E2E。
 
+- 缺少实际 linearizable owner registry、`OperationLease` wire schema、可信 lease clock、MP pidfd/subreaper/cgroup、Ray actor/run-attempt query、launcher job-attempt adapter，以及 partition/clock-jump/PID-reuse/late-GPU-work 联合 golden。
 - shutdown fault-injection 尚未形成 owner 矩阵：缺 Executor、Scheduler、Connector、ModelRunner 分别抛错/卡住时对后续 owner、原始 exception 与 process deadline 的联合断言。
 - 缺少结构化 `ShutdownReport`，无法区分 `drained`、`failed`、`blocked_by_dependency` 与 `abandoned_by_deadline`。
 - P2P tier 已有 3 秒内部 drain，但各 owner 尚未共享父级绝对 deadline；嵌套 per-owner timeout 可能把总关闭时间叠加放大。
@@ -868,9 +879,25 @@
 - 新知识债：实际 durable registry/CAS/WAL、三类 RecoveryAdapter、MP KILL 后 join/subreaper/pidfd、Ray run-attempt state query、launcher job-attempt API、stable reason code、torn checkpoint、registry partition 与真实 native/GPU hang 校准。
 - 下一章：**Registry 分区时谁有权 KILL——Linearizable CAS、Operation Lease 与 Split-brain Reconciliation。**
 
+## 第 41 章课程账本增量
+
+- 源码基线：[`eb0f2ca3`](https://github.com/vllm-project/vllm/commit/eb0f2ca37f65e496e8c67a7497e818c8a92bae46)；该提交为 Mooncake 增加 `CUSTOM_MEM_POOL` 支持，本文直接相关 owner/shutdown 路径没有改变结论的语义变化。
+- 已覆盖文件：`vllm/entrypoints/launchers/api_server/entry.py`、`vllm/v1/engine/async_llm.py`、`engine/utils.py`、`v1/utils.py`、`utils/system_utils.py`、`v1/fault_tolerance/engine_core_sentinel.py`、`executor/uniproc_executor.py`、`tests/v1/fault_tolerance/test_fault_tolerance_e2e.py`、`tests/v1/executor/test_executor.py`、`tests/v1/engine/test_core_engine_actor_manager.py`。
+- 已覆盖符号：`build_async_llm_client` teardown、`AsyncLLM.shutdown`、`CoreEngineProcManager.shutdown`、`_shutdown_subprocesses`、`kill_process_tree`、`CoreEngineActorManager.shutdown`、`EngineCoreSentinel.retry`；`OwnerLease/OperationLease/MemberKey` 与 split-brain reconciliation 为建议协议。
+- 新确认不变量：
+  1. suspicion 与 cleanup authority 必须分离；只有 linearizable CAS 可产生新 owner epoch。
+  2. fencing 必须位于 destructive action 之前，并同时绑定 member generation；只拒绝旧 final 无法阻止误杀。
+  3. operation lease 过期不等于 action 未发生；call 已开始后只能进入 `ACTION_UNKNOWN`，通过 backend query、同 op 重放或 quarantine 收敛。
+  4. registry authority 与 backend token 缺一不可；裸 PID、可重用 rank 或缺 attempt 的 PG 仍有 target-reuse 风险。
+  5. quorum 不可达时 destructive path fail closed，允许 liveness 降级，不允许本地缓存继续 KILL。
+- 具体演算：DP=2，owner epoch `11→12`；B 通过 CAS 获得 `op8` 并终止 `M1/g3`，ACK 丢失后保持 `ACTION_UNKNOWN`。PID 随后复用于 `g4`，旧 owner A 的 epoch 11 action lease无效，不能再次按 PID KILL。
+- 直接测试事实：FT E2E 覆盖 Worker KILL 后 UNHEALTHY/DEAD 与存活 Core retry；MP fake-clock 只覆盖 grace→TERM；Ray actor-manager test 只覆盖正常 cleanup。当前没有 registry partition、双 owner、lease expiry、ACK loss 或 PID/actor/job-attempt reuse golden。
+- 新知识债：durable CAS/WAL、operation lease schema/clock、MP pidfd/subreaper/cgroup、Ray run-attempt query、launcher job-attempt adapter、stable reason code，以及 partition×clock jump×late GPU work E2E。
+- 下一章：**分区恢复后怎么合并——Torn Lease、`ACTION_UNKNOWN`、Backend Query 与 Reconciliation Golden。**
+
 ## 下一批候选章节
 
-1. 下一主线：Registry 分区时谁有权 KILL——Linearizable CAS、Operation Lease 与 Split-brain Reconciliation。
+1. 下一主线：分区恢复后怎么合并——Torn Lease、`ACTION_UNKNOWN`、Backend Query 与 Reconciliation Golden。
 2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
