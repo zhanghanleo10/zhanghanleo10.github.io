@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 41 章已把 registry partition 下的 destructive action authority 收紧为 `linearizable owner CAS → durable intent → generation-bound OperationLease → backend fence`；下一章处理分区恢复后的 torn lease、`ACTION_UNKNOWN`、backend query 与 reconciliation golden。
+- 当前主线：第 42 章已把分区恢复后的歧义收敛为 `ACTION_UNKNOWN → generation-safe BackendQuery → reconciliation → durable final/quarantine`；下一章回访 alive-but-stalled Worker，处理 TP=1 progress heartbeat、withheld-response E2E 与跨 Executor deadline parity。
 
 ## 已完成章节
 
@@ -54,6 +54,7 @@
 | 2026-09-24 39 | `create/register/kill/reap/final/checkpoint → crash-at-every-boundary → replay oracle` | [`9ef37771`](https://github.com/vllm-project/vllm/commit/9ef37771beac1c1ce6a8b7ceae1f7ebeb6f51800) | [Takeover 的六边界 Golden]({{ '/articles/vllm-takeover-crash-boundary-golden/' | relative_url }}) |
 | 2026-09-26 40 | `shared crash state machine → MP/Ray/launcher adapter → deterministic failpoint → replay oracle` | [`8a236460`](https://github.com/vllm-project/vllm/commit/8a2364605c0b0581ea5d0d3720cb1125b47abc6f) | [三 Backend 的 Deterministic Golden]({{ '/articles/vllm-backend-deterministic-failpoint-replay-oracle/' | relative_url }}) |
 | 2026-09-27 41 | `registry partition → linearizable owner CAS → OperationLease → backend fence → reconciliation` | [`eb0f2ca3`](https://github.com/vllm-project/vllm/commit/eb0f2ca37f65e496e8c67a7497e818c8a92bae46) | [Registry 分区下的 KILL 权]({{ '/articles/vllm-registry-partition-operation-lease-split-brain/' | relative_url }}) |
+| 2026-09-28 42 | `ACTION_UNKNOWN → generation-safe BackendQuery → reconciliation → durable final/quarantine` | [`31842269`](https://github.com/vllm-project/vllm/commit/3184226984b17fe0dba960ace5a2d7d57df44ab6) | [KILL 可能已经发生]({{ '/articles/vllm-action-unknown-backend-query-reconciliation/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -354,7 +355,12 @@
 - deterministic failpoint / replay oracle（建议测试接口）
 - `AsyncLLM.shutdown`（API teardown 到 EngineCore owner 的公开关闭入口）
 - `OwnerLease/OperationLease/MemberKey`（本文建议协议，尚未合入）
-- split-brain reconciliation 与 backend generation fence（本文建议状态机）
+- split-brain reconciliation 与 backend generation fence（第 41 章建议状态机）
+- `EngineCoreSentinel.handle_command/retry`（`UNHEALTHY` 恢复与 `DEAD` 拒绝边界）
+- `BackendQuery/BackendQueryVerdict/RecoveryRecord`（第 42 章建议协议，尚未合入）
+- `TERMINAL_MATCH/LIVE_MATCH/LIVE_DIFFERENT_GENERATION/NOT_FOUND_UNPROVEN`（建议 reconciliation verdict）
+- MP direct-child handle/pidfd、Ray actor attempt、launcher job attempt（建议 evidence identity）
+- `tests/entrypoints/launchers/test_shutdown.py::_assert_children_cleaned_up`（当前排除 zombie）
 
 ## 已确认不变量
 
@@ -552,6 +558,12 @@
 188. linearizable registry fencing 与 backend target fencing 正交；plain PID、可复用 rank 或无 attempt 的 PG 名称都不能阻止失租旧 owner 误杀新 generation。
 189. registry quorum 不可达时 destructive path 必须 fail closed；liveness 降级为 `containment_unknown/quarantine`，不能用本地缓存伪造权限。
 190. 分区恢复只接受当前 epoch、generation-matched 的 backend proof；旧 epoch late final 和同 operation id 不同 payload 必须拒绝。
+191. `ACTION_UNKNOWN` 表示 destructive action 可能已生效但 canonical terminal 尚不可证明；lease expiry、ACK loss 或 owner crash 都不能把它降级为“未开始”。
+192. Backend query 必须使用 journal 中原始 `MemberKey`；当前同名/PID/rank 对象不能回填为旧 target，`LIVE_DIFFERENT_GENERATION` 必须 fence 旧 operation。
+193. backend evidence 与 registry authority 正交：backend 证明 attempt 状态，linearizable current epoch 决定谁能接受 evidence、retry action 或写 durable final。
+194. `NOT_FOUND` 只有在 attempt-scoped authoritative tombstone 下才能成为 terminal；普通列表缺失、PID absence 或 rank-local disappearance 只能是 unproven absence。
+195. MP 的 `direct_reaped`、Ray 的 `actor_terminal` 与 external launcher 的 `launcher_reaped` 可映射到统一 verdict，但必须保留原始 evidence class 和 owner scope。
+196. reconciliation replay 必须由 durable journal、current owner epoch、expected member set 与 backend snapshot 确定；同一输入重复执行不能重复计数、重定向 target 或改变 canonical final。
 
 ## 前置依赖与版本注意
 
@@ -561,7 +573,8 @@
 ## 尚未解释的知识债
 
 - 缺少实际 `OwnerLease/KillIntent/ProcessFinal/GroupFinal` durable registry、register-before-create token、orphan discovery、destructive-action epoch enforcement，以及 create/register/kill/reap/final/checkpoint 的 deterministic failpoint/replay oracle。
-- 缺少 MP KILL 后 shared-deadline join/reap、Ray actor terminal/state confirmation、external supervisor adapter、generation-safe evidence identity、process-group/cgroup owner，以及跨 backend zombie/node-loss/launcher-crash golden。
+- 缺少 `BackendQueryVerdict/RecoveryRecord`、attempt-scoped tombstone、`ACTION_UNKNOWN` recovery loop、stable evidence reason 和 quarantine policy；尚无 journal + backend snapshot + epoch 的可执行 reconciliation oracle。
+- 缺少 MP KILL 后 shared-deadline join/reap、pidfd/start-time identity 与 subreaper/cgroup；缺少 Ray actor run/restart-attempt query、external launcher job-attempt adapter，以及跨 backend zombie/PID-reuse/node-loss/launcher-crash/late-GPU-work golden。
 
 - 缺少实际 `ShutdownEvent/ShutdownWAL/TerminalCheckpoint`、独立 collector process、stable durability reason、short-write/EINTR loop、preallocation/rotation、group-commit benchmark、ENOSPC/EIO/blocked-fsync fault matrix 和 crash-at-every-write harness。
 
@@ -897,8 +910,8 @@
 
 ## 下一批候选章节
 
-1. 下一主线：分区恢复后怎么合并——Torn Lease、`ACTION_UNKNOWN`、Backend Query 与 Reconciliation Golden。
-2. Hang 回访：TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
+1. 下一主线：进程还活着，回执却不来——TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
+2. 恢复协议落地：durable `OwnerLease/KillIntent/MemberFinal` registry、MP/Ray/launcher `RecoveryAdapter` 与 reconciliation harness。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
 5. 错误协议回访：真实 ASGI late-error 的 status/body/metrics/usage 联合测试与客户端 retry contract。
@@ -944,3 +957,10 @@
 - 已闭合：cleanup evidence、process isolation、durable ACK 与 terminal completeness 是四种不同证据；diagnostic failure 不得续期 containment。
 - 当前最大盲区：`ShutdownEvent/ShutdownWAL` 仍是设计，MP Worker 的 `5s + 4s` 仍未接收顶层 remaining budget，KILL 后也没有显式 join/reap。
 - 后续路线调整：先补 zombie-free terminal 与 MP/Ray/external launcher adapter，再做 Python/Rust golden、真实 CUDA/NCCL hang 和磁盘故障联合矩阵。
+
+## 第六次七章知识图谱回顾（第 36–42 章）
+
+- 已打通：`signal/exit/reap/containment evidence → backend owner adapter → owner takeover epoch → crash-at-every-boundary → cross-backend replay oracle → split-brain OperationLease → ACTION_UNKNOWN reconciliation`。
+- 已闭合：destructive action 的 authority、target generation、动作提交、terminal observation、direct reap 与 durable final 已被拆成不同状态；lease expiry 与 backend absence 都不能越级成为 terminal。
+- 当前最大盲区：`OwnerLease/KillIntent/MemberFinal`、WAL 与三类 `RecoveryAdapter` 仍是设计；当前 KILL 路径没有统一 post-action query/reap，也没有 PID/actor/job-attempt reuse 与 late GPU work 的 Golden。
+- 后续路线调整：takeover 协议的推导链暂时闭合；下一章回到 alive-but-stalled Worker，建立 TP=1 progress heartbeat、withheld-response E2E 和跨 Executor deadline parity，再以这些真实故障信号校准未来 registry/adapters。
