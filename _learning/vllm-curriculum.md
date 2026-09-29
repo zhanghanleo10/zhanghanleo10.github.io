@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 42 章已把分区恢复后的歧义收敛为 `ACTION_UNKNOWN → generation-safe BackendQuery → reconciliation → durable final/quarantine`；下一章回访 alive-but-stalled Worker，处理 TP=1 progress heartbeat、withheld-response E2E 与跨 Executor deadline parity。
+- 当前主线：第 43 章已把 alive-but-stalled 盲区收敛为 `SchedulerOutput → StepLease → absolute deadline → fatal fan-out → generation fence`，并区分 TP=1 direct call 与 MP response timeout；下一章处理 supervisor 的 kill authority、StepLease generation 与 late completion fencing。
 
 ## 已完成章节
 
@@ -55,6 +55,7 @@
 | 2026-09-26 40 | `shared crash state machine → MP/Ray/launcher adapter → deterministic failpoint → replay oracle` | [`8a236460`](https://github.com/vllm-project/vllm/commit/8a2364605c0b0581ea5d0d3720cb1125b47abc6f) | [三 Backend 的 Deterministic Golden]({{ '/articles/vllm-backend-deterministic-failpoint-replay-oracle/' | relative_url }}) |
 | 2026-09-27 41 | `registry partition → linearizable owner CAS → OperationLease → backend fence → reconciliation` | [`eb0f2ca3`](https://github.com/vllm-project/vllm/commit/eb0f2ca37f65e496e8c67a7497e818c8a92bae46) | [Registry 分区下的 KILL 权]({{ '/articles/vllm-registry-partition-operation-lease-split-brain/' | relative_url }}) |
 | 2026-09-28 42 | `ACTION_UNKNOWN → generation-safe BackendQuery → reconciliation → durable final/quarantine` | [`31842269`](https://github.com/vllm-project/vllm/commit/3184226984b17fe0dba960ace5a2d7d57df44ab6) | [KILL 可能已经发生]({{ '/articles/vllm-action-unknown-backend-query-reconciliation/' | relative_url }}) |
+| 2026-09-29 43 | `SchedulerOutput → TP=1 direct call / MP RPC → StepLease deadline → fatal fan-out → generation fence` | [`869278cb`](https://github.com/vllm-project/vllm/commit/869278cbb02fc04a5f10d2eaba2bb251939e1eab) | [进程活着不等于有进展]({{ '/articles/vllm-tp1-step-lease-withheld-response-deadline-parity/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -89,6 +90,12 @@
 - `EngineCoreProc.process_output_sockets`
 - `EngineCoreProc._send_msg_tracking_payload`
 - `EngineCoreProc._send_engine_dead`
+- `EngineCoreProc.run_engine_core/run_busy_loop/_process_engine_step`
+- `UniProcExecutor.execute_model/collective_rpc/check_health`
+- `MultiprocExecutor.execute_model/collective_rpc/take_draft_token_ids`
+- `BackgroundResources.validate_alive`
+- `AsyncLLM.output_handler/OutputProcessor.propagate_error`
+- `StepLease/STEP_STARTED/STEP_COMPLETED`（建议协议）
 - `BackgroundResources.validate_alive`
 - `MPClient.ensure_alive/start_engine_core_monitor`
 - `make_zmq_socket`
@@ -908,9 +915,25 @@
 - 新知识债：durable CAS/WAL、operation lease schema/clock、MP pidfd/subreaper/cgroup、Ray run-attempt query、launcher job-attempt adapter、stable reason code，以及 partition×clock jump×late GPU work E2E。
 - 下一章：**分区恢复后怎么合并——Torn Lease、`ACTION_UNKNOWN`、Backend Query 与 Reconciliation Golden。**
 
+## 第 43 章课程账本增量
+
+- 源码基线：[`869278cb`](https://github.com/vllm-project/vllm/commit/869278cbb02fc04a5f10d2eaba2bb251939e1eab)；该最新提交调整 CI 报告年龄边界，与本文 Executor/liveness 路径无直接语义修改。直接相关已合入提交是 [`8a236460`](https://github.com/vllm-project/vllm/commit/8a2364605c0b0581ea5d0d3720cb1125b47abc6f)，它为 speculative draft-token readback 补上 execute-model timeout。
+- 已覆盖文件：`vllm/envs.py`、`vllm/v1/executor/abstract.py`、`uniproc_executor.py`、`multiproc_executor.py`、`vllm/v1/engine/core.py`、`core_client.py`、`async_llm.py`、`vllm/v1/worker/gpu_model_runner.py`、`tests/v1/executor/test_multiproc_executor.py`、`tests/v1/shutdown/test_forward_error.py`、`tests/v1/fault_tolerance/test_fault_tolerance_e2e.py`、`tests/v1/engine/test_startup_watch_processes.py`。
+- 已覆盖符号：`EngineCore.step`、`EngineCoreProc.run_engine_core/run_busy_loop/_send_engine_dead`、`Executor.execute_model/collective_rpc`、`UniProcExecutor.execute_model/collective_rpc/check_health`、`MultiprocExecutor.execute_model/collective_rpc/take_draft_token_ids`、`BackgroundResources.validate_alive`、`AsyncLLM.output_handler`、`OutputProcessor.propagate_error`；`StepLease/STEP_STARTED/STEP_COMPLETED` 为建议协议。
+- 新确认不变量：
+  1. process alive 不等于 step progress；每个 `(engine_generation, step_seq)` 必须匹配唯一 terminal，或由独立 supervisor 在 absolute deadline 后产生 fatal。
+  2. TP=1 direct `run_method` 没有 response 边界；`collective_rpc(timeout=...)` 形参在 UniProc 路径未被消费，不能当成已有保护。
+  3. 普通 heartbeat、last-token age 与 step terminal 是三种证据；前两者可告警，但不能自动续期 deadline、授权释放 KV 或接受迟到结果。
+  4. deadline 必须从请求剩余预算扣除 fan-out/containment reserve，跨层只传 remaining；不同 backend 统一 verdict，不抹平 MQ timeout、actor attempt、launcher attempt 的证据差异。
+  5. deadline 后的 old-generation completion 不得调用 `Scheduler.update_from_output`；device completion 未证实时只能 quarantine/reset，不能把 timeout 当成设备停止。
+- 直接测试事实：forward-error E2E 对 TP=1/2 验证 Python exception 后三个 collectors 收到 `EngineDeadError`、新请求拒绝与显存回落；multiproc 单测验证 draft-token readback timeout；FT E2E 覆盖独立 Worker KILL；startup tests 覆盖进程死亡监控。当前没有 TP=1 alive withheld-response、supervisor StepLease、old-generation late output 或 TP=1/MP 共用 deadline oracle。
+- 规划证据：已关闭且未合入的 [PR #45526](https://github.com/vllm-project/vllm/pull/45526) 设计 `/health/decode`，用 API-local admission/progress age 识别 stalled；它是可观测面，不是当前代码事实，也不提供 kill/fatal/fencing 权限。
+- 新知识债：真实 StepLease wire/schema、parent watchdog、native-like failpoint、动态 workload budget、MP/Ray/launcher adapter、supervisor crash recovery、device reset/quarantine 与真实 CUDA/NCCL hang 校准。
+- 下一章：**Heartbeat 之后谁动手——Supervisor Kill Authority、StepLease Generation 与 Late Completion Fencing。**
+
 ## 下一批候选章节
 
-1. 下一主线：进程还活着，回执却不来——TP=1 supervisor/progress heartbeat、alive Worker withheld-response E2E、`TimeoutError → ENGINE_CORE_DEAD → collectors` 与跨 Executor deadline parity。
+1. 下一主线：Heartbeat 之后谁动手——Supervisor Kill Authority、StepLease Generation 与 Late Completion Fencing。
 2. 恢复协议落地：durable `OwnerLease/KillIntent/MemberFinal` registry、MP/Ray/launcher `RecoveryAdapter` 与 reconciliation harness。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
