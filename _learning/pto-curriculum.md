@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-28。
+最后更新：2026-09-29。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 49 证明 simpler 的 `workspace_budget_bytes` 只约束四类已纳管区域，retained scheduler-state 仍在 report 外；由 device-wide census、growth overlap、reaction burst 与 cleanup service time 推导 high/low watermark、cleanup reserve 和 overload shedding 边界。主干尚无统一 `MemoryCensus`、pressure state machine 或 structured ticket queue；下一步回到 ISA/runtime seam，闭合 TPipe early-exit、DIR_BOTH generation 与 cross-dispatch Golden。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 50 回访第 28 章之后已合入的 CPU_SIM 修复，把 `DIR_BOTH` 从共享 tagged ring 收紧为 per-direction bounded FIFO，并用 `commit_seq` 与 `(direction,slot)` outstanding queue 闭合正常 pop/free ownership。当前 oracle 已能分方向 census，但仍没有 `PipeEpoch`、bounded cancel 或 same-key/no-reset abnormal-exit Golden；下一步把 generation/quiescence 变成可执行的 graph replay 测试。
 
 ## 已完成章节
 
@@ -74,6 +74,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-26 | WorkspaceManager 整块隔离与预算准入 | completion facts → run reference → whole-block quarantine → hard-budget refusal | [课程 47]({% post_url 2026-09-26-simpler-workspace-quarantine-budget-admission %}) |
 | 2026-09-27 | Structured Admission Verdict 与无丢失唤醒 | null refusal → reason/action → recovery priority → revision recheck | [课程 48]({% post_url 2026-09-27-simpler-structured-admission-recovery-priority-wakeup %}) |
 | 2026-09-28 | Watermark、Cleanup Reserve 与 Hysteresis | partial census → measured reserve → pressure epoch → overload shedding | [课程 49]({% post_url 2026-09-28-simpler-workspace-watermark-cleanup-reserve-hysteresis %}) |
+| 2026-09-29 | DIR_BOTH per-direction FIFO 与 pop ownership | Tile direction → independent ring → commit order → outstanding tuple → exact free | [课程 50]({% post_url 2026-09-29-pto-isa-dir-both-per-direction-fifo-pop-ownership %}) |
 
 ## ISA 知识地图
 
@@ -132,6 +133,7 @@ permalink: /learning/pto-curriculum/
 | TPipe control-flow balance | branch 必须在所有 peer 上产生相同 transaction delta；loop 每迭代应净余额为零；析构 drain 只确认已发出的 pending free credit，不能修复不对称路径 | 已讲透运行时守恒 |
 | TPipe component balance proof | component identity、单 endpoint borrow safety 与跨 endpoint transaction equality 是三份独立证明；最小 module analysis 应组合 sequence/branch/loop effect，并在 predicate/trip-count unknown 时 fail closed | 已完成源码边界与最小设计；实现和动态验证待补 |
 | CPU_SIM TPipe FIFO | `SharedState` 同时维护 cursor、occupied、direction、lane claim、busy 与 TileData byte storage；publish 到 final free 前 slot 不可复用，非空 GM workspace 不再切换 TileData payload backend | 已讲透 matched/跨环主路径；bounded negative fault injection 待补 |
+| CPU_SIM DIR_BOTH ownership | C2V/V2C 各有 `SlotNum` 容量与独立 payload/cursor/sync state；`commit_seq` 在 delayed free 后保持方向内 FIFO；untyped `TFREE` 按 `(direction,slot)` outstanding queue 归还最老 borrow | 正常路径已闭合；PipeEpoch/no-reset fault Golden 待补 |
 
 | VMI→VPTO physical memory legality | VMI logical value 经 layout assignment 后按 1:N 物理化；load 可在 `policy/warn` 下接受未证明的 full-chunk over-read，store 必须保持 exact semantic footprint；readable guard、defined fill 与 consumer observation 是三份证明 | 已讲透当前 VPTO 主路径；shared/EmitC contract 待补 |
 | PTOAddressAnalysis / MemoryAccessPlan | `PTOAddressAnalysis` 从 VPTO address-semantics op 构造 root、typed element/op offset，证明 byte/unit delta、同 root difference 与有限 remainder/alignment；它不证明 allocation extent、alias、coverage 或 fill。现有 `VMIMemoryAccessPlan` 是 VMIToVPTO 内部瞬时 plan，应演进为 shared intent + backend candidate，而非复制第二套地址求解器 | 分析能力边界已讲透；shared IR/provenance/parity 待实现 |
@@ -149,7 +151,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [327cd586](https://github.com/hw-native-sys/pto-isa/commit/327cd5869f3a7c4d2c6a1b945b2aed06e7665c5d) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax；新增 `AsyncEvent` handle、`AsyncSession/SdmaRuntimeContext`、aggregate `DEFER`/batch publish、doorbell、postDone 与 Host workspace 的 recovery/reset/canary 边界 | ISA 深挖 25 |
+| pto-isa | [27807720](https://github.com/hw-native-sys/pto-isa/commit/2780772019759781706fd156f4e0a1218dbd9c12) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 CPU `SharedStateStorage` 双向隔离、`commit_seq`、oldest-transfer selection、outstanding `(direction,slot)` 与 delayed-free tests | ISA 深挖 26 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -796,3 +798,16 @@ permalink: /learning/pto-curriculum/
 - **pressure control（49）**：partial ledger 不能直接产出百分比 watermark；先测 outside peak、growth overlap、reaction burst 与 cleanup service time，再定义 hard gate 内的 high/low hysteresis 和 shedding。
 - 连续主链已形成：`async operation → durable lease → backend witness → runtime ownership → hard admission → structured wakeup → measured pressure control`。
 - 下一段回到 ISA/runtime seam：以 TPipe early-exit 和同 FlagID 跨 dispatch 残留为对象，把 generation/quiescence 从推导变成 CPU_SIM、A2/A3/A5 与 graph replay Golden。
+
+
+## 第 50 章课程账本增量
+
+- 源码基线：pto-isa [`27807720`](https://github.com/hw-native-sys/pto-isa/commit/2780772019759781706fd156f4e0a1218dbd9c12)；相对课程 28 的 `a8040450`，直接相关已合入修复为 [`de6964a6`](https://github.com/hw-native-sys/pto-isa/commit/de6964a6c71d1c3ddc604b0f200a11c808d6bd0c) 与 [`8e0f3124`](https://github.com/hw-native-sys/pto-isa/commit/8e0f3124a51c151206725336bbbb5383c0cc5e0b)。
+- 新覆盖文件：`include/pto/cpu/TPush.hpp`、`docs/isa/{TPUSH,TPOP,TFREE}.md`、`tests/cpu/st/testcase/tpushpop/main.cpp`；对照 A2/A3/A5 `TPush.hpp` 的 credit cadence。
+- 新覆盖符号：`SharedState/SharedStateStorage/GetSharedState/reset_for_cpu_sim`、`commit_seq/next_commit_seq`、`FindOldestTransferSlot`、`pendingDirections/pendingSlots`、`Consumer::wait/free`。
+- 新确认不变量：C2V/V2C 各有独立 bounded capacity；slot 只有完整 commit 后可见；`TPOP` reserve 与 `TFREE` release 分离；untyped free 必须恢复 direction+slot；CPU concrete-slot release 不等于 NPU sparse flag cadence。
+- 具体演算：`16×16xf32`、1024 B/Tile、`SlotNum=2`；C2V 满两格时 V2C 仍可提交。交错 pop 形成 `[(C2V,0),(V2C,0)]`，两次 free 必须依次归还两个不同 ring。
+- 直接测试事实：8 轮双向满容量+delayed free、32 次双线程 round trip、overlapping pop FIFO、两向 hook storage/reset；相关合入提交记录 CPU tpushpop 32/32 与 fixpipe 3/3。仍无 same-key/no-reset early-exit、bounded waiter cancel、old-thread late write、generation 或 graph replay Golden。
+- 与旧章差异：课程 28 定义 temporal safety boundary；本章基于其后合入代码，补齐能承载 abnormal-exit Golden 的 per-direction normal-path oracle，不重复宣称 generation 已实现。
+- 新知识债：`PipeEpoch`、snapshot schema、waiter cancel/join、same-key/no-reset failpoint、graph replay、跨 A2/A3/A5 Golden，以及显式 `PopHandle` 的 API/性能成本。
+- 下一章：**同一个 FlagID 再次出现——`PipeEpoch`、No-reset Early-exit 与 Graph Replay Golden。**
