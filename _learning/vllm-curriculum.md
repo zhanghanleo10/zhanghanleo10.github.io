@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 43 章已把 alive-but-stalled 盲区收敛为 `SchedulerOutput → StepLease → absolute deadline → fatal fan-out → generation fence`，并区分 TP=1 direct call 与 MP response timeout；下一章处理 supervisor 的 kill authority、StepLease generation 与 late completion fencing。
+- 当前主线：第 44 章已把 `StepLease expiry → supervisor authority → exact member kill → Scheduler/frontend late-output gate` 串成闭环，并以现有 `sched_step_seq/processed_step_seq` 为局部资源 fence；下一章处理 KILL 后 device completion、KV/activation quarantine 与 reset evidence。
 
 ## 已完成章节
 
@@ -56,6 +56,7 @@
 | 2026-09-27 41 | `registry partition → linearizable owner CAS → OperationLease → backend fence → reconciliation` | [`eb0f2ca3`](https://github.com/vllm-project/vllm/commit/eb0f2ca37f65e496e8c67a7497e818c8a92bae46) | [Registry 分区下的 KILL 权]({{ '/articles/vllm-registry-partition-operation-lease-split-brain/' | relative_url }}) |
 | 2026-09-28 42 | `ACTION_UNKNOWN → generation-safe BackendQuery → reconciliation → durable final/quarantine` | [`31842269`](https://github.com/vllm-project/vllm/commit/3184226984b17fe0dba960ace5a2d7d57df44ab6) | [KILL 可能已经发生]({{ '/articles/vllm-action-unknown-backend-query-reconciliation/' | relative_url }}) |
 | 2026-09-29 43 | `SchedulerOutput → TP=1 direct call / MP RPC → StepLease deadline → fatal fan-out → generation fence` | [`869278cb`](https://github.com/vllm-project/vllm/commit/869278cbb02fc04a5f10d2eaba2bb251939e1eab) | [进程活着不等于有进展]({{ '/articles/vllm-tp1-step-lease-withheld-response-deadline-parity/' | relative_url }}) |
+| 2026-09-30 44 | `StepLease expiry → supervisor CAS → exact member kill → Scheduler/frontend late-output fence → KV quarantine` | [`09c47db1`](https://github.com/vllm-project/vllm/commit/09c47db1ca080793dc2351144cb39513fd7984ca) | [Heartbeat 之后谁动手]({{ '/articles/vllm-supervisor-kill-authority-step-generation-late-output-fence/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -96,6 +97,10 @@
 - `BackgroundResources.validate_alive`
 - `AsyncLLM.output_handler/OutputProcessor.propagate_error`
 - `StepLease/STEP_STARTED/STEP_COMPLETED`（建议协议）
+- `Scheduler.sched_step_seq/processed_step_seq/deferred_frees`
+- `Request.last_sched_seq`
+- `AsyncGPUModelRunnerOutput.get_output`
+- `StepToken/supervisor_epoch/member_token`（建议协议）
 - `BackgroundResources.validate_alive`
 - `MPClient.ensure_alive/start_engine_core_monitor`
 - `make_zmq_socket`
@@ -931,9 +936,25 @@
 - 新知识债：真实 StepLease wire/schema、parent watchdog、native-like failpoint、动态 workload budget、MP/Ray/launcher adapter、supervisor crash recovery、device reset/quarantine 与真实 CUDA/NCCL hang 校准。
 - 下一章：**Heartbeat 之后谁动手——Supervisor Kill Authority、StepLease Generation 与 Late Completion Fencing。**
 
+## 第 44 章课程账本增量
+
+- 源码基线：[`09c47db1`](https://github.com/vllm-project/vllm/commit/09c47db1ca080793dc2351144cb39513fd7984ca)；该最新提交仅调整 XPU CI，与本文 Engine/Scheduler 路径无直接语义修改。直接相关历史实现是已合入 [PR #45357](https://github.com/vllm-project/vllm/pull/45357) / [`d467a2a7`](https://github.com/vllm-project/vllm/commit/d467a2a7f2f088dd360c7bef2f3cf5c59a1ffde8) 的 deferred block free。
+- 已覆盖文件：`vllm/v1/engine/core.py`、`engine/utils.py`、`engine/core_client.py`、`engine/__init__.py`、`vllm/v1/utils.py`、`executor/uniproc_executor.py`、`executor/multiproc_executor.py`、`core/sched/scheduler.py`、`core/sched/output.py`、`outputs.py`、`worker/gpu_model_runner.py`、`tests/v1/core/test_deferred_block_free.py`、`tests/v1/executor/test_multiproc_executor.py`、`tests/v1/shutdown/test_forward_error.py`。
+- 已覆盖符号：`CoreEngineProcManager.shutdown/monitor_engine_liveness`、通用 `shutdown`、`EngineCore.step`、`Scheduler.sched_step_seq/processed_step_seq/deferred_frees/update_from_output`、`Request.last_sched_seq`、`AsyncGPUModelRunnerOutput.get_output`、`ModelRunnerOutput`、`EngineCoreOutputs`；`StepToken/supervisor_epoch/member_token` 为建议协议。
+- 新确认不变量：
+  1. deadline expiry 是检测事实，不授予 KILL 权；只有当前 supervisor epoch 完成 fence CAS 后才能执行 destructive action。
+  2. destructive action 必须绑定 exact member identity，不能用可复用 PID/rank；fence 必须先于 terminate/KILL。
+  3. 旧 generation output 不得调用 `Scheduler.update_from_output`、推进 `processed_step_seq`、归还 deferred blocks 或进入 frontend collector。
+  4. 当前 Scheduler fence 只证明同进程 FIFO 内最新可能写 block 的 step 已处理；其 seq 不在 output wire 中且 restart 后归零，不能充当 engine generation。
+  5. 软件 output fence 与 device-memory reuse fence 正交；GPU/NIC completion 未证实时只能 quarantine 或等待可信 reset/context teardown。
+- 具体演算：generation `g17` 的 step `s42` 调度三请求 `4+2+2=8` token，device 有效输入为 `input_ids int32[8]`、`positions int64[8]`；deadline CAS 到 FENCED 后 restart 为 `g18`，迟到 `(g17,s42)` 被双 gate 丢弃，不能将 in-flight 计数减 `4/2/2` 或释放旧 KV block。
+- 直接测试事实：deferred-free CPU suite 用 33-token prompt、block size 16 验证 3 blocks 在最新 in-flight output 处理前不回 pool；MP 单测验证 draft-token readback timeout；forward-error E2E 验证 TP=1/2 的 exception fatal。当前没有 alive withheld response、supervisor CAS、restart late output、旧 generation block reuse 或真实 CUDA/NCCL late-write 测试。
+- 新知识债：真实 StepToken wire/schema、parent watchdog、CAS/operation id、EngineCoreOutputs generation、Scheduler commit gate、MP/Ray/launcher adapter、supervisor crash recovery、generation-safe process identity、device reset/quarantine 与 native-hang E2E。
+- 下一章：**KILL 了，GPU 就停了吗——Device Completion Witness、KV/Activation Quarantine 与 Reset Fence。**
+
 ## 下一批候选章节
 
-1. 下一主线：Heartbeat 之后谁动手——Supervisor Kill Authority、StepLease Generation 与 Late Completion Fencing。
+1. 下一主线：KILL 了，GPU 就停了吗——Device Completion Witness、KV/Activation Quarantine 与 Reset Fence。
 2. 恢复协议落地：durable `OwnerLease/KillIntent/MemberFinal` registry、MP/Ray/launcher `RecoveryAdapter` 与 reconciliation harness。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
