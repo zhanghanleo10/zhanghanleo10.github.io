@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-29。
+最后更新：2026-09-30。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 50 回访第 28 章之后已合入的 CPU_SIM 修复，把 `DIR_BOTH` 从共享 tagged ring 收紧为 per-direction bounded FIFO，并用 `commit_seq` 与 `(direction,slot)` outstanding queue 闭合正常 pop/free ownership。当前 oracle 已能分方向 census，但仍没有 `PipeEpoch`、bounded cancel 或 same-key/no-reset abnormal-exit Golden；下一步把 generation/quiescence 变成可执行的 graph replay 测试。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 51 在 per-direction FIFO 之上审计 temporal identity：当前 `SharedStateStorage` 只初始化一次，numeric hook key 不含 run identity，`reset_for_cpu_sim()` 也没有 generation、waiter census 或旧对象 fence。课程据此定义 `PipeEpoch`、cancel+join、两向联合 quiescence 与 same-key/no-reset replay Golden；下一步把同一 epoch contract 映射到 A2/A3 pending credit、A5 local FIFO 和 CPU_SIM 三种证据。
 
 ## 已完成章节
 
@@ -75,6 +75,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-27 | Structured Admission Verdict 与无丢失唤醒 | null refusal → reason/action → recovery priority → revision recheck | [课程 48]({% post_url 2026-09-27-simpler-structured-admission-recovery-priority-wakeup %}) |
 | 2026-09-28 | Watermark、Cleanup Reserve 与 Hysteresis | partial census → measured reserve → pressure epoch → overload shedding | [课程 49]({% post_url 2026-09-28-simpler-workspace-watermark-cleanup-reserve-hysteresis %}) |
 | 2026-09-29 | DIR_BOTH per-direction FIFO 与 pop ownership | Tile direction → independent ring → commit order → outstanding tuple → exact free | [课程 50]({% post_url 2026-09-29-pto-isa-dir-both-per-direction-fifo-pop-ownership %}) |
+| 2026-09-30 | PipeEpoch、no-reset early-exit 与 graph replay | storage key → abnormal snapshot → cancel/join → quiescent witness → epoch+1 | [课程 51]({% post_url 2026-09-30-pto-isa-pipe-epoch-no-reset-graph-replay-golden %}) |
 
 ## ISA 知识地图
 
@@ -103,7 +104,7 @@ permalink: /learning/pto-curriculum/
 | TPipe drain | pending=`consumer notified - producer steady waited`；析构精确消费余额，使同一 FlagID 在下一 dispatch 前回到零 credit | 已讲透正常完成路径 |
 | CPU_SIM TPipe fault census | 无限 `cv.wait` 是协议语义；负向测试需 snapshot-before-cancel、join-before-reset。quiescence 是 `occupied/busy/direction/borrow/commit/waiter` 集合，不要求 cursor、sequence 或旧 payload 清零 | 已讲透最小测试协议；实现待补 |
 | A2/A3/A5 TPipe evidence boundary | 可移植不变量是 `publish/acquire/release/reuse`；A2/A3 TileData 在 `TPOP` 内释放 GM ring，A5 local/CPU_SIM 由显式 `TFREE` 结束借用；不可观测设备状态必须记为 `unknown` | 已讲透语义对齐；device trace 待补 |
-| TPipe temporal identity | `DIR_BOTH` 的 C2V/V2C 使用四个 flag identity；跨 dispatch 复用要求两向同时 quiescent。当前实现没有显式 generation，析构只 drain 正常 pending credit；unknown/early-exit 必须 poison 或重建 context | 已讲透安全边界；generation/cancel 实现待补 |
+| TPipe temporal identity | `DIR_BOTH` 的 C2V/V2C 使用四个 flag identity；跨 dispatch 复用要求两向同时 quiescent。当前 `SharedStateStorage` 只初始化一次，numeric hook key 不含 run identity，原地 reset 无法 fence 旧 waiter/object；generation 必须约束 wait、commit、free，unknown/early-exit 必须 cancel+join、quarantine 或重建 context | 已讲透 key/reset/replay 边界；generation/cancel 实现待补 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -811,3 +812,14 @@ permalink: /learning/pto-curriculum/
 - 与旧章差异：课程 28 定义 temporal safety boundary；本章基于其后合入代码，补齐能承载 abnormal-exit Golden 的 per-direction normal-path oracle，不重复宣称 generation 已实现。
 - 新知识债：`PipeEpoch`、snapshot schema、waiter cancel/join、same-key/no-reset failpoint、graph replay、跨 A2/A3/A5 Golden，以及显式 `PopHandle` 的 API/性能成本。
 - 下一章：**同一个 FlagID 再次出现——`PipeEpoch`、No-reset Early-exit 与 Graph Replay Golden。**
+
+## 第 51 章课程账本增量
+
+- 源码基线：pto-isa [`15a9e0a0`](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25)；本章路径相对课程 50 无新的语义实现，重点是审计当前 key/reset 事实并把缺口转成可执行 Golden。
+- 新覆盖文件：`include/pto/cpu/TPush.hpp`、`include/pto/common/cpu_stub.hpp`、`docs/coding/cpu_sim.md`、`tests/cpu/st/testcase/tpushpop/main.cpp`。
+- 新覆盖符号：`SharedStateStorage::init_state`、`EnsureSharedStateInitialized`、`GetSharedState` 的 numeric/string/static 三路径、`get_task_cookie`、`reset_for_cpu_sim`、`Consumer::pendingDirections/pendingSlots`。
+- 新确认不变量：storage 一次性初始化不等于 launch 初始化；key namespace 不等于 generation lease；原地 reset 的安全前置条件是旧参与者已停止；epoch 必须在 wait 返回后/commit 前与 free 前复核；`DIR_BOTH` 两向联合 quiescent 后才能整体复用。
+- 具体演算：`16×16xf32`、1024 B/Tile、`SlotNum=2`；D41 在 pop 后漏 free，D42 same-key replay 不得消费旧 A、永久等待或接受迟到 free，只能 `NOT_QUIESCENT/STALE_EPOCH`、cancel+join 或隔离旧 backing。
+- 直接测试事实：当前 full-capacity、32 次 round trip、overlapping pop 与 hook reset 覆盖正常闭合和同步清零；未覆盖 same-key/no-reset early-exit、存活 waiter、旧对象 late free、epoch wrap 或 graph replay。
+- 新知识债：真实 `PipeEpoch/PipeToken` schema、waiter census、cooperative cancel、bounded join、stable verdict、numeric hook run identity、epoch wrap、A2/A3/A5 adapter、graph executor failpoint，以及迟到 DMA/flag poison E2E。
+- 下一章：**一份 Epoch，三种证据——A2/A3 Pending Credit、A5 Local FIFO 与 CPU_SIM Replay Adapter。**
