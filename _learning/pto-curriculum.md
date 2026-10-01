@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-09-30。
+最后更新：2026-10-01。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 51 在 per-direction FIFO 之上审计 temporal identity：当前 `SharedStateStorage` 只初始化一次，numeric hook key 不含 run identity，`reset_for_cpu_sim()` 也没有 generation、waiter census 或旧对象 fence。课程据此定义 `PipeEpoch`、cancel+join、两向联合 quiescence 与 same-key/no-reset replay Golden；下一步把同一 epoch contract 映射到 A2/A3 pending credit、A5 local FIFO 和 CPU_SIM 三种证据。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 52 已把同一 `PipeEpoch` contract 映射到三类 backend-native evidence：A2/A3 batched pending credit、A5 local FIFO last-use/flag baseline 与 CPU_SIM concrete-slot snapshot。统一层只消费 `QUIESCENT/BUSY/STALE_EPOCH/UNKNOWN`，不得把 normal drain 算术升级成 crash witness；下一步补齐 cooperative cancel、waiter census、bounded join 与 scoped reset authority。
 
 ## 已完成章节
 
@@ -76,6 +76,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-28 | Watermark、Cleanup Reserve 与 Hysteresis | partial census → measured reserve → pressure epoch → overload shedding | [课程 49]({% post_url 2026-09-28-simpler-workspace-watermark-cleanup-reserve-hysteresis %}) |
 | 2026-09-29 | DIR_BOTH per-direction FIFO 与 pop ownership | Tile direction → independent ring → commit order → outstanding tuple → exact free | [课程 50]({% post_url 2026-09-29-pto-isa-dir-both-per-direction-fifo-pop-ownership %}) |
 | 2026-09-30 | PipeEpoch、no-reset early-exit 与 graph replay | storage key → abnormal snapshot → cancel/join → quiescent witness → epoch+1 | [课程 51]({% post_url 2026-09-30-pto-isa-pipe-epoch-no-reset-graph-replay-golden %}) |
+| 2026-10-01 | PipeEpoch 的跨 backend evidence adapter | common verdict → A2/A3 credit / A5 local FIFO / CPU concrete-slot evidence → reuse gate | [课程 52]({% post_url 2026-10-01-pto-isa-pipe-epoch-cross-backend-evidence-adapters %}) |
 
 ## ISA 知识地图
 
@@ -105,6 +106,7 @@ permalink: /learning/pto-curriculum/
 | CPU_SIM TPipe fault census | 无限 `cv.wait` 是协议语义；负向测试需 snapshot-before-cancel、join-before-reset。quiescence 是 `occupied/busy/direction/borrow/commit/waiter` 集合，不要求 cursor、sequence 或旧 payload 清零 | 已讲透最小测试协议；实现待补 |
 | A2/A3/A5 TPipe evidence boundary | 可移植不变量是 `publish/acquire/release/reuse`；A2/A3 TileData 在 `TPOP` 内释放 GM ring，A5 local/CPU_SIM 由显式 `TFREE` 结束借用；不可观测设备状态必须记为 `unknown` | 已讲透语义对齐；device trace 待补 |
 | TPipe temporal identity | `DIR_BOTH` 的 C2V/V2C 使用四个 flag identity；跨 dispatch 复用要求两向同时 quiescent。当前 `SharedStateStorage` 只初始化一次，numeric hook key 不含 run identity，原地 reset 无法 fence 旧 waiter/object；generation 必须约束 wait、commit、free，unknown/early-exit 必须 cancel+join、quarantine 或重建 context | 已讲透 key/reset/replay 边界；generation/cancel 实现待补 |
+| PipeEpoch backend evidence | 上层可统一 `QUIESCENT/BUSY/STALE_EPOCH/UNKNOWN`，但必须保留 native proof：A2/A3 pending credit 只证明正常 drain 算术，A5 local FIFO 还需 last-use/flag/core terminal，CPU_SIM concrete slot 仍需 epoch/waiter snapshot。任一方向 unknown 都禁止 `DIR_BOTH` 升代 | verdict/adapter 边界已讲透；query/cancel/reset/golden 待实现 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -152,7 +154,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [27807720](https://github.com/hw-native-sys/pto-isa/commit/2780772019759781706fd156f4e0a1218dbd9c12) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 CPU `SharedStateStorage` 双向隔离、`commit_seq`、oldest-transfer selection、outstanding `(direction,slot)` 与 delayed-free tests | ISA 深挖 26 |
+| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 PipeEpoch cross-backend evidence mapping：A2/A3 pending-credit drain、A5 local no-split last-use/credit protocol、CPU concrete-slot replay oracle | ISA 深挖 27 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -823,3 +825,19 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：当前 full-capacity、32 次 round trip、overlapping pop 与 hook reset 覆盖正常闭合和同步清零；未覆盖 same-key/no-reset early-exit、存活 waiter、旧对象 late free、epoch wrap 或 graph replay。
 - 新知识债：真实 `PipeEpoch/PipeToken` schema、waiter census、cooperative cancel、bounded join、stable verdict、numeric hook run identity、epoch wrap、A2/A3/A5 adapter、graph executor failpoint，以及迟到 DMA/flag poison E2E。
 - 下一章：**一份 Epoch，三种证据——A2/A3 Pending Credit、A5 Local FIFO 与 CPU_SIM Replay Adapter。**
+
+## 第 52 章课程账本增量
+
+- 源码基线：pto-isa [`15a9e0a0`](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25)；该 head 的最近同步未修改本文 TPipe 路径。直接相关实现为 A2/A3 pending-credit 修复 [`0a15e15c`](https://github.com/hw-native-sys/pto-isa/commit/0a15e15c627deef86b4281fb08e84d39dad793de)、A5 local no-split credit 修复 [`dc6449e4`](https://github.com/hw-native-sys/pto-isa/commit/dc6449e48d33756e619db7087ff9852f59ed1504) 与 CPU_SIM 双向隔离 [`8e0f3124`](https://github.com/hw-native-sys/pto-isa/commit/8e0f3124a51c151206725336bbbb5383c0cc5e0b)。
+- 新覆盖文件：`include/pto/npu/a2a3/{TPush,TPop,TFree}.hpp`、`include/pto/npu/a5/{TPush,TPop,TFree}.hpp`、`include/pto/cpu/{TPush,TPop}.hpp`、A2/A3 `tpushpop_cv_nosplit`、A5 `tpushpop_dir_both` 与 CPU `tpushpop` 回归。
+- 新覆盖符号：`SyncPeriod`、`shouldWaitFree/shouldNotifyFree`、`countPendingFreeCredits`、A5 `uses_local_no_split_credit_protocol` 与 constructor/destructor credit protocol、CPU `SharedState`；`PipeEpochEvidence/Adapter` 为建议协议，当前代码不存在。
+- 新确认不变量：
+  1. 统一的是 reuse verdict，不是 backend counter；native snapshot 和 reset scope 必须保留。
+  2. A2/A3 `countPendingFreeCredits` 证明正常返回的 expected balance，不证明异常退出后的 flag/device terminal。
+  3. A5 local `TPOP` 绑定 UB/L1 slot，最后使用后的显式 `TFREE` 才能发 free；quiescence 还需 flag baseline 与旧 core terminal。
+  4. CPU_SIM concrete-slot 状态可作 replay oracle，但缺 epoch、waiter census 与 immutable snapshot 时，`occupied==0` 仍不足以安全 reset。
+  5. `DIR_BOTH` 任一方向 `BUSY/UNKNOWN` 都禁止整体 epoch 前进。
+- 具体演算：`16×16xf32`、1024 B、`SlotNum=8`、`SyncPeriod=4`；10 次完整传输产生 2 个 free notification、1 次 steady-state wait，normal pending credit 为 1。CPU_SIM 同场景没有 batched credit；若 epoch 41 在第 10 次 record 后退出，则 exact snapshot 以 `occupied=1` 返回 `BUSY`。
+- 直接测试事实：A2/A3 depth-8/40-transfer static assert 固定 pending credit 为 2，并记录 80 次连续 dispatch；A5 DIR_BOTH depth-2 覆盖 `UP_DOWN/LEFT_RIGHT` 的 V2C→matmul→C2V local FIFO 与显式 free；CPU suite 覆盖 per-direction capacity、overlapping pop、commit order 与 hook reset。三者均未覆盖同一 failpoint 下的 cross-backend verdict、old-epoch late operation 或 scoped reset。
+- 新知识债：真实 evidence/token schema、A2/A3/A5 flag query、reset scope、CPU waiter census/cooperative cancel/immutable snapshot、stable reason code、epoch wrap、graph replay failpoint、late-write/flag-poison canary，以及 adapter query/drain 性能成本。
+- 下一章：**Epoch 什么时候能交棒——Cooperative Cancel、Waiter Census、Bounded Join 与 Scoped Reset。**
