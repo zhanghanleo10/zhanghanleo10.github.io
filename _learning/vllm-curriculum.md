@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 44 章已把 `StepLease expiry → supervisor authority → exact member kill → Scheduler/frontend late-output gate` 串成闭环，并以现有 `sched_step_seq/processed_step_seq` 为局部资源 fence；下一章处理 KILL 后 device completion、KV/activation quarantine 与 reset evidence。
+- 当前主线：第 45 章已区分 `process terminal → output fence → device completion → physical range reuse`，并确认正常 output event/FIFO fence 不能自动覆盖 KILL recovery；下一章下钻 context generation、backend reset witness scope 与跨 backend golden。
 
 ## 已完成章节
 
@@ -57,6 +57,7 @@
 | 2026-09-28 42 | `ACTION_UNKNOWN → generation-safe BackendQuery → reconciliation → durable final/quarantine` | [`31842269`](https://github.com/vllm-project/vllm/commit/3184226984b17fe0dba960ace5a2d7d57df44ab6) | [KILL 可能已经发生]({{ '/articles/vllm-action-unknown-backend-query-reconciliation/' | relative_url }}) |
 | 2026-09-29 43 | `SchedulerOutput → TP=1 direct call / MP RPC → StepLease deadline → fatal fan-out → generation fence` | [`869278cb`](https://github.com/vllm-project/vllm/commit/869278cbb02fc04a5f10d2eaba2bb251939e1eab) | [进程活着不等于有进展]({{ '/articles/vllm-tp1-step-lease-withheld-response-deadline-parity/' | relative_url }}) |
 | 2026-09-30 44 | `StepLease expiry → supervisor CAS → exact member kill → Scheduler/frontend late-output fence → KV quarantine` | [`09c47db1`](https://github.com/vllm-project/vllm/commit/09c47db1ca080793dc2351144cb39513fd7984ca) | [Heartbeat 之后谁动手]({{ '/articles/vllm-supervisor-kill-authority-step-generation-late-output-fence/' | relative_url }}) |
+| 2026-10-01 45 | `CUDA event → ModelRunnerOutput → processed_step_seq → KILL completion unknown → range quarantine/reset fence` | [`37d61740`](https://github.com/vllm-project/vllm/commit/37d6174096fd99a8d362c9f5b379f7ec59deedb8) | [KILL 了，GPU 就停了吗]({{ '/articles/vllm-device-completion-witness-kv-quarantine-reset-fence/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -100,6 +101,12 @@
 - `Scheduler.sched_step_seq/processed_step_seq/deferred_frees`
 - `Request.last_sched_seq`
 - `AsyncGPUModelRunnerOutput.get_output`
+- `AsyncGPUModelRunnerOutput.__init__/get_output`（copy-stream event 与 device tensor lifetime）
+- `WorkerProc.enqueue_output`（device event 到 response MQ 的可见性边界）
+- `Scheduler._free_request_blocks/_drain_deferred_frees`
+- `GPUWorker.shutdown`、`GPUModelRunner.shutdown/_cleanup_profiling_kv_cache`
+- `CuMemAllocator.release_pools/_python_free_callback`
+- `DeviceWorkToken/DeviceCompletionWitness/ResetWitness`（第 45 章建议协议，尚未合入）
 - `StepToken/supervisor_epoch/member_token`（建议协议）
 - `BackgroundResources.validate_alive`
 - `MPClient.ensure_alive/start_engine_core_monitor`
@@ -576,6 +583,12 @@
 194. `NOT_FOUND` 只有在 attempt-scoped authoritative tombstone 下才能成为 terminal；普通列表缺失、PID absence 或 rank-local disappearance 只能是 unproven absence。
 195. MP 的 `direct_reaped`、Ray 的 `actor_terminal` 与 external launcher 的 `launcher_reaped` 可映射到统一 verdict，但必须保留原始 evidence class 和 owner scope。
 196. reconciliation replay 必须由 durable journal、current owner epoch、expected member set 与 backend snapshot 确定；同一输入重复执行不能重复计数、重定向 target 或改变 canonical final。
+197. process KILL/exit、ModelRunner output 可提交、device work 完成与 physical range 可复用是四种不同证据；任何一层都不能未经 adapter 证明自动升级到下一层。
+198. 正常 async scheduling 中，copy stream 先等待 default stream，`AsyncGPUModelRunnerOutput.get_output()` 再同步 event；因此 response MQ 可见性可支撑同进程 `processed_step_seq`，但 event 丢失后不能成为 crash recovery witness。
+199. `deferred_frees` 保护的是当前 Scheduler 生命周期和 FIFO step 顺序；其 seq 未绑定 engine/context generation，进程重启后不能据此释放旧 generation ranges。
+200. graceful `GPUModelRunner.shutdown()` 的 device synchronize 与强制 `proc.kill()` 是不同路径；KILL 绕过 Python cleanup，当前 parent 侧没有结构化 context teardown/reset evidence。
+201. completion unknown 时，KV、activation、workspace 或 connector range 必须 quarantine；只有同 generation completion witness 或覆盖该 scope 的 authoritative reset/teardown witness 才能归还 allocator。
+202. 显存 used-bytes 下降是资源回收观测，不包含 event identity、range、context generation 或 reset scope，不能单独证明旧 work 不会影响新 allocation。
 
 ## 前置依赖与版本注意
 
@@ -594,6 +607,9 @@
 - 缺少 BlockPool 守恒审计：非 null block refcount、free queue membership、request tables、deferred frees 与 Connector holds 尚无一次性一致性断言。
 - Connector 没有统一 `pending_loads/pending_saves/stopped` 回执；各实现的 background job 与 transport quiescence 仍不可横向比较。
 - Worker/ModelRunner 缺 active slots、in-flight batches、device synchronized 和 teardown-done 的结构化快照；allocator memory threshold 仍是弱证据。
+- 缺少真实 `DeviceWorkToken/DeviceCompletionWitness/ResetWitness`、context generation 与 backend query；KILL 后 outstanding KV/activation/workspace ranges 没有可恢复的 quarantine registry。
+- 缺少 range interval conflict index、quarantine 容量水位/admission backpressure、CUDA Graph recapture fence，以及 CUDA/ROCm/MPS/IPC/RDMA reset scope 的 adapter/golden。
+- 缺少 crash-at-kernel-launch/event-record/D2H/MQ-enqueue 每个边界的真机 late-write canary；现有 forward-error E2E 只验证 EngineDeadError 与显存阈值回落。
 
 - `AsyncMPClient`/DP client 的 engine identity 选择、跨 producer 顺序和线程安全边界。
 - hybrid KV groups 下 per-group prefix blocks 如何收敛为统一 `num_computed_tokens`，以及 partial-tail/CoW 的正确性边界。
@@ -952,9 +968,25 @@
 - 新知识债：真实 StepToken wire/schema、parent watchdog、CAS/operation id、EngineCoreOutputs generation、Scheduler commit gate、MP/Ray/launcher adapter、supervisor crash recovery、generation-safe process identity、device reset/quarantine 与 native-hang E2E。
 - 下一章：**KILL 了，GPU 就停了吗——Device Completion Witness、KV/Activation Quarantine 与 Reset Fence。**
 
+## 第 45 章课程账本增量
+
+- 源码基线：[`37d61740`](https://github.com/vllm-project/vllm/commit/37d6174096fd99a8d362c9f5b379f7ec59deedb8)；该最新提交增加 custom histogram buckets，与本文设备完成路径无语义修改。直接相关实现是已合入 [PR #45357](https://github.com/vllm-project/vllm/pull/45357) / [`d467a2a7`](https://github.com/vllm-project/vllm/commit/d467a2a7f2f088dd360c7bef2f3cf5c59a1ffde8) 的 deferred block free。
+- 已覆盖文件：`vllm/v1/worker/gpu_model_runner.py`、`gpu_worker.py`、`worker_base.py`、`vllm/v1/executor/multiproc_executor.py`、`vllm/v1/core/sched/scheduler.py`、`kv_cache_manager.py`、`vllm/device_allocator/cumem.py`、`tests/v1/core/test_deferred_block_free.py`、`tests/v1/shutdown/test_forward_error.py`、`tests/utils.py`。
+- 已覆盖符号：`AsyncGPUModelRunnerOutput.__init__/get_output`、`WorkerProc.enqueue_output`、`Scheduler.defer_block_free/sched_step_seq/processed_step_seq/_free_request_blocks/_drain_deferred_frees`、`GPUWorker.shutdown`、`GPUModelRunner.shutdown/_cleanup_profiling_kv_cache`、`CuMemAllocator.release_pools/_python_free_callback`；`DeviceWorkToken/DeviceCompletionWitness/ResetWitness` 为建议协议。
+- 新确认不变量：
+  1. process terminal、output commit、device completion 与 physical range reuse 是不同证据，不能互相越级。
+  2. 正常 async output 的 copy-stream event 经 `WorkerProc.enqueue_output` 转成 MQ 可见性，可支撑同进程 FIFO fence；worker crash 后该 event 不可查询，不能成为 recovery witness。
+  3. graceful shutdown 会 synchronize 后清 KV/workspace；KILL 绕过 Python cleanup，当前 parent 不持有 context reset/teardown proof。
+  4. completion unknown 时，outstanding KV/activation/workspace ranges 只能 quarantine；同 generation completion 或覆盖相同 scope 的 authoritative reset 才能释放。
+  5. NVML/AMDSMI used-bytes 回落是弱回收观测，缺 event/range/context generation/reset scope，不能代替 device witness。
+- 具体演算：33-token prompt、`block_size=16` 使用 3 blocks；假设 32 层、8 KV heads、head size 128、FP16，则每 block 逻辑 K+V 约 2 MiB。旧 generation step 仍可能触碰 `B2` 时，新 generation 不得复用该 range，除非同代 completion 或 scoped reset 已证实。
+- 直接测试事实：deferred-free CPU suite 验证 stop/abort/preempt 后 blocks 等最新 output；forward-error E2E 验证 TP=1/2 的 `EngineDeadError` 与显存阈值回落。当前没有真机 KILL×kernel/RDMA/graph/IPC late-write canary，也没有 reset scope/generation golden。
+- 新知识债：真实 token/witness schema、backend query、context generation、range interval index、quarantine 水位与 admission、graph recapture、MPS/IPC/RDMA scope、crash-at-every-boundary 真机矩阵。
+- 下一章：**Reset 到底重置了谁——Context Generation、Backend Reset Witness 与 Cross-backend Golden。**
+
 ## 下一批候选章节
 
-1. 下一主线：KILL 了，GPU 就停了吗——Device Completion Witness、KV/Activation Quarantine 与 Reset Fence。
+1. 下一主线：Reset 到底重置了谁——Context Generation、Backend Reset Witness 与 Cross-backend Golden。
 2. 恢复协议落地：durable `OwnerLease/KillIntent/MemberFinal` registry、MP/Ray/launcher `RecoveryAdapter` 与 reconciliation harness。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
