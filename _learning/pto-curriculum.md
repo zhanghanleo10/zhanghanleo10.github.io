@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-01。
+最后更新：2026-10-02。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 52 已把同一 `PipeEpoch` contract 映射到三类 backend-native evidence：A2/A3 batched pending credit、A5 local FIFO last-use/flag baseline 与 CPU_SIM concrete-slot snapshot。统一层只消费 `QUIESCENT/BUSY/STALE_EPOCH/UNKNOWN`，不得把 normal drain 算术升级成 crash witness；下一步补齐 cooperative cancel、waiter census、bounded join 与 scoped reset authority。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 53 已从 CPU_SIM 的真实 cv/reset 实现推导 `freeze admission → cooperative cancel → waiter/active/borrow census → bounded join → scoped reset` 交棒协议，并确认 `notify_all()` 与同步清零都不能替代旧 epoch terminal evidence；下一步把五个 failpoint、immutable snapshot 与 replay oracle 做成 CPU_SIM/A2/A3/A5 的 cross-backend Golden。
 
 ## 已完成章节
 
@@ -77,6 +77,7 @@ permalink: /learning/pto-curriculum/
 | 2026-09-29 | DIR_BOTH per-direction FIFO 与 pop ownership | Tile direction → independent ring → commit order → outstanding tuple → exact free | [课程 50]({% post_url 2026-09-29-pto-isa-dir-both-per-direction-fifo-pop-ownership %}) |
 | 2026-09-30 | PipeEpoch、no-reset early-exit 与 graph replay | storage key → abnormal snapshot → cancel/join → quiescent witness → epoch+1 | [课程 51]({% post_url 2026-09-30-pto-isa-pipe-epoch-no-reset-graph-replay-golden %}) |
 | 2026-10-01 | PipeEpoch 的跨 backend evidence adapter | common verdict → A2/A3 credit / A5 local FIFO / CPU concrete-slot evidence → reuse gate | [课程 52]({% post_url 2026-10-01-pto-isa-pipe-epoch-cross-backend-evidence-adapters %}) |
+| 2026-10-02 | PipeEpoch 的 cooperative cancel 与 bounded join | freeze admission → cancel/wake → waiter/borrow census → join/reset → epoch handoff | [课程 53]({% post_url 2026-10-02-pto-isa-pipe-epoch-cancel-waiter-join-scoped-reset %}) |
 
 ## ISA 知识地图
 
@@ -841,3 +842,21 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：A2/A3 depth-8/40-transfer static assert 固定 pending credit 为 2，并记录 80 次连续 dispatch；A5 DIR_BOTH depth-2 覆盖 `UP_DOWN/LEFT_RIGHT` 的 V2C→matmul→C2V local FIFO 与显式 free；CPU suite 覆盖 per-direction capacity、overlapping pop、commit order 与 hook reset。三者均未覆盖同一 failpoint 下的 cross-backend verdict、old-epoch late operation 或 scoped reset。
 - 新知识债：真实 evidence/token schema、A2/A3/A5 flag query、reset scope、CPU waiter census/cooperative cancel/immutable snapshot、stable reason code、epoch wrap、graph replay failpoint、late-write/flag-poison canary，以及 adapter query/drain 性能成本。
 - 下一章：**Epoch 什么时候能交棒——Cooperative Cancel、Waiter Census、Bounded Join 与 Scoped Reset。**
+
+
+## 第 53 章课程账本增量
+
+- 源码基线：pto-isa [`15a9e0a0`](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25)；默认分支最新 head 与课程 52 相同，TPipe 路径无新语义提交，本章针对已确认缺口建立恢复协议。
+- 新覆盖文件：`include/pto/cpu/TPush.hpp`、`include/pto/cpu/TPop.hpp`、`include/pto/common/cpu_stub.hpp`、`tests/cpu/st/testcase/tpushpop/main.cpp`；对照 A2/A3、A5 `TPush.hpp` 的 backend reset scope。
+- 新覆盖符号：`SharedState::{mutex,cv,occupied,popped_not_freed,slot_busy,commit_seq}`、`Producer::allocate/record`、`Consumer::wait/free`、`reset_for_cpu_sim`；`PipeToken/PipeControl/WaiterGuard/ResetWitness` 为建议协议，当前代码不存在。
+- 新确认不变量：
+  1. `notify_all()` 只触发 predicate 重检；没有 cancel/epoch 条件时不能让旧 waiter 安全退出。
+  2. waiter census 必须与 predicate 检查在同一 mutex/RAII 协议内，否则 cancel 与 sleep 之间存在 lost-wakeup。
+  3. epoch 前进前不仅要 `waiters==0`，还要 active producer/consumer、outstanding borrow 与已发布 payload 闭合。
+  4. 旧 token 在 wait 返回后、record 前、free 前都必须复核 epoch，避免迟到 commit/free 修改同编号新 slot。
+  5. bounded join 超时只能得到 `BUSY/UNKNOWN`；只有覆盖旧 execution domain、direction、slot/flag backing 的 authoritative reset 才能交棒。
+  6. `DIR_BOTH` 必须分别 census 两向再联合判定；一向 quiescent 不能释放另一向。
+- 具体演算：`16×16xf32`、1024 B/Tile、`SlotNum=2`；epoch 41 的两槽均 committed，consumer 已 pop A 未 free，producer P2 阻塞。cancel 唤醒 P2 后 waiter 归零，但 borrow 与 payload B 仍在；consumer失联且 50 ms join 超时只能 quarantine。旧对象全部退出或 scoped reset complete 后才建立 epoch 42。
+- 直接测试事实：32 次 DIR_BOTH round trip 是 reset-before-start、join-before-finish 的正常闭合；hook reset test 只人工设置两向 `occupied=1/2` 后同步清零，没有 waiter/borrow/old object。当前没有 active reset、lost-wakeup、late record/free、join timeout、partial-direction 或 backend-scoped reset Golden。
+- 新知识债：真实 token/control schema、RAII census、absolute deadline、immutable snapshot、stable verdict、A2/A3/A5 reset authority、epoch wrap、graph executor failpoint、late DMA/flag poison canary 与性能标定。
+- 下一章：**Failpoint 落在哪——PipeToken Immutable Snapshot、Replay Oracle 与 Cross-backend Golden。**
