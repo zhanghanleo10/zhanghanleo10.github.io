@@ -986,7 +986,7 @@
 
 ## 下一批候选章节
 
-1. 下一主线：Reset 到底重置了谁——Context Generation、Backend Reset Witness 与 Cross-backend Golden。
+1. 下一主线：Reset 以后 Graph 还能 replay 吗——Graph Context Generation、Recapture Fence 与 Address Rebinding Golden。
 2. 恢复协议落地：durable `OwnerLease/KillIntent/MemberFinal` registry、MP/Ray/launcher `RecoveryAdapter` 与 reconciliation harness。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
@@ -1040,3 +1040,35 @@
 - 已闭合：destructive action 的 authority、target generation、动作提交、terminal observation、direct reap 与 durable final 已被拆成不同状态；lease expiry 与 backend absence 都不能越级成为 terminal。
 - 当前最大盲区：`OwnerLease/KillIntent/MemberFinal`、WAL 与三类 `RecoveryAdapter` 仍是设计；当前 KILL 路径没有统一 post-action query/reap，也没有 PID/actor/job-attempt reuse 与 late GPU work 的 Golden。
 - 后续路线调整：takeover 协议的推导链暂时闭合；下一章回到 alive-but-stalled Worker，建立 TP=1 progress heartbeat、withheld-response E2E 和跨 Executor deadline parity，再以这些真实故障信号校准未来 registry/adapters。
+
+
+## 第 46 章课程账本增量
+
+- 日期：2026-10-03
+- 章节：**Reset 到底重置了谁：Context Generation、Backend Reset Witness 与 Cross-backend Golden**
+- 源码基线：[`44198f57`](https://github.com/vllm-project/vllm/commit/44198f577fe5cfb4b02297bf6ff7235eb31d742b)
+- 课程位置：`device completion unknown → context generation → backend reset witness → cross-backend golden`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/async_llm.py`：`AsyncLLM.shutdown`
+  - `vllm/v1/engine/core.py`：`EngineCore.shutdown`
+  - `vllm/v1/engine/core_client.py`：`EngineCoreClient.shutdown`、`MPClient.shutdown`
+  - `vllm/v1/executor/abstract.py`：`Executor.shutdown`
+  - `vllm/v1/executor/uniproc_executor.py`：`UniProcExecutor.shutdown`、`ExecutorWithExternalLauncher`
+  - `vllm/v1/executor/multiproc_executor.py`：`_ensure_worker_termination`
+  - `vllm/v1/executor/ray_executor.py`、`ray_executor_v2.py`：actor kill 与 monitor shutdown
+  - `vllm/v1/worker/gpu_worker.py`：`GPUWorker.shutdown`
+  - `vllm/v1/worker/gpu_model_runner.py`：`GPUModelRunner.shutdown`、`_cleanup_profiling_kv_cache`
+  - `vllm/distributed/parallel_state.py`：`cleanup_dist_env_and_memory`
+  - `tests/v1/shutdown/test_delete.py`、`test_forward_error.py`、`tests/utils.py`
+- 新确认不变量：
+  - 进程/actor terminal、allocator 显存下降与 device/context generation 失效是不同证据。
+  - `ResetWitness` 必须绑定 backend、authority、owner attempt、rank、device/context、scope、from/to generation 与 terminal evidence。
+  - TP group 只有在所有可能 writer 的 member witness 收敛后才可恢复 group admission；partial-rank reset 必须 fail closed。
+  - software generation 自增不能替代执行 fence。
+- 代码/测试事实：
+  - 正常 GPU model-runner cleanup 会 synchronize、解绑 KV cache；ROCm 会显式清 captured graph 并再次同步。
+  - MP 的 KILL 路径与 Ray 的 `ray.kill` 路径都没有返回结构化 device reset witness。
+  - shutdown E2E 以 GPU used-memory 阈值为 oracle，未验证 generation、scope 或 late write。
+- 建议协议（非当前实现）：`ContextToken`、`ResetWitness`、`GroupResetFinal` 与 `QUIESCENT / RESET_FENCED / QUARANTINED / CONFLICT` verdict。
+- 新知识债：backend reset/query adapter、scope taxonomy、durable witness/CAS、partial-rank convergence、cross-backend golden、RDMA/native late-write canary。
+- 下一章：**Reset 以后 Graph 还能 replay 吗——Graph Context Generation、Recapture Fence 与 Address Rebinding Golden。**
