@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-03。
+最后更新：2026-10-04。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 54 已把 CPU_SIM `allocate → payload → record → wait/pop → free` 拆成 ownership linearization failpoints，并定义冻结后同锁值复制的 immutable snapshot、纯 replay oracle 与 A2/A3/A5 backend-native evidence adapter；下一步补 ResetIntent WAL、幂等 action replay 与 torn-checkpoint Golden。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 55 已从 CPU_SIM 同步清零事实推导 `ResetIntent` WAL：durable intent 必须先于 destructive action，`PREPARED` 只能解释为 `MAY_HAVE_APPLIED`，幂等 replay 必须绑定 operation ID、expected epoch/revision、snapshot hash 与 backend scope；下一步补 checkpoint ownership、WAL segment compaction 与 quarantine registry 的原子截断边界。
 
 ## 已完成章节
 
@@ -79,6 +79,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-01 | PipeEpoch 的跨 backend evidence adapter | common verdict → A2/A3 credit / A5 local FIFO / CPU concrete-slot evidence → reuse gate | [课程 52]({% post_url 2026-10-01-pto-isa-pipe-epoch-cross-backend-evidence-adapters %}) |
 | 2026-10-02 | PipeEpoch 的 cooperative cancel 与 bounded join | freeze admission → cancel/wake → waiter/borrow census → join/reset → epoch handoff | [课程 53]({% post_url 2026-10-02-pto-isa-pipe-epoch-cancel-waiter-join-scoped-reset %}) |
 | 2026-10-03 | PipeToken Immutable Snapshot 与 Replay Oracle | ownership failpoint → freeze/snapshot → backend evidence → deterministic verdict | [课程 54]({% post_url 2026-10-03-pto-isa-pipe-token-immutable-snapshot-replay-oracle %}) |
+| 2026-10-04 | ResetIntent WAL、幂等 replay 与 torn checkpoint | immutable snapshot → durable intent → backend action/query → result → atomic epoch checkpoint | [课程 55]({% post_url 2026-10-04-pto-isa-reset-intent-wal-idempotent-replay %}) |
 
 ## ISA 知识地图
 
@@ -110,6 +111,7 @@ permalink: /learning/pto-curriculum/
 | TPipe temporal identity | `DIR_BOTH` 的 C2V/V2C 使用四个 flag identity；跨 dispatch 复用要求两向同时 quiescent。当前 `SharedStateStorage` 只初始化一次，numeric hook key 不含 run identity，原地 reset 无法 fence 旧 waiter/object；generation 必须约束 wait、commit、free，unknown/early-exit 必须 cancel+join、quarantine 或重建 context | 已讲透 key/reset/replay 边界；generation/cancel 实现待补 |
 | PipeEpoch backend evidence | 上层可统一 `QUIESCENT/BUSY/STALE_EPOCH/UNKNOWN`，但必须保留 native proof：A2/A3 pending credit 只证明正常 drain 算术，A5 local FIFO 还需 last-use/flag/core terminal，CPU_SIM concrete slot 仍需 epoch/waiter snapshot。任一方向 unknown 都禁止 `DIR_BOTH` 升代 | verdict/adapter 边界已讲透；query/cancel/reset/golden 待实现 |
 | PipeToken snapshot/replay oracle | failpoint 必须位于 allocate/publish/borrow/release 线性化边界；snapshot 在 freeze 后同锁值复制，不能保留 mutable pointer；oracle 仅依赖 token、durable prefix、snapshot 与 backend-native evidence，并输出确定性 verdict | 协议已讲透；schema、adapter、Golden 待实现 |
+| ResetIntent WAL / crash replay | destructive reset 前先持久化 intent；`PREPARED` 只证明 action 可能发生。幂等重放需 operation ID、expected epoch/revision、snapshot hash 与 scope；RESULT 已落盘而 checkpoint torn 时只重做 checkpoint，不能重做 reset | 协议已讲透；backend ledger、WAL/checkpoint schema 与 crash Golden 待实现 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -157,7 +159,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 ownership failpoint、`PipeToken/PipeSnapshot`、CPU concrete-slot immutable snapshot、A2/A3/A5 native-evidence replay oracle | ISA 深挖 28 |
+| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 CPU_SIM reset 语义、`ResetIntent/Result/Checkpoint`、register-before-action WAL、幂等 replay 与 torn-checkpoint Golden | ISA 深挖 29 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -880,3 +882,21 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：delayed free、overlapping pop、full-capacity、32 次 round trip、hook reset 与 undersized-slot 测试覆盖正常 FIFO/布局/方向隔离；当前没有 active failpoint、atomic snapshot、stale-token replay、partial-direction reset、late free/DMA 或 torn checkpoint Golden。
 - 新知识债：真实 schema、freeze/cancel RAII、snapshot revision、A2/A3/A5 adapter、stable reason code、epoch wrap、snapshot/action durability、graph replay 与真机 flag-poison/late-DMA 测试。
 - 下一章：**Snapshot 写下了，Action 做过吗——ResetIntent WAL、Idempotent Replay 与 Torn-checkpoint Golden。**
+
+
+## 第 55 章课程账本增量
+
+- 源码基线：pto-isa [`15a9e0a0`](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25)；默认分支 head 与课程 54 相同。当前代码只提供同步 `reset_for_cpu_sim()`，`ResetIntent/ResetActionResult/PipeCheckpoint` 与 WAL 均为本章建议协议。
+- 新覆盖文件：`include/pto/cpu/TPush.hpp`、`include/pto/npu/a2a3/TPush.hpp`、`include/pto/npu/a5/TPush.hpp`、`tests/cpu/st/testcase/tpushpop/main.cpp`。
+- 新覆盖符号：`TPipe::SharedState/SharedStateStorage/GetSharedState/reset_for_cpu_sim`、`Producer::allocate/record`、`Consumer::wait/free`；建议对象为 `ResetIntent/ResetActionResult/PipeCheckpoint`。
+- 新确认不变量：
+  1. durable intent 必须先于 destructive reset；否则 action 已发生但恢复器无从发现。
+  2. `PREPARED` 只能解释为 `MAY_HAVE_APPLIED`，不能证明 action 尚未执行。
+  3. 幂等 action identity 至少绑定 operation ID、expected epoch/revision、snapshot hash、scope、target epoch 与 payload hash；同 ID 不同 payload 必须 fail closed。
+  4. 当前 `reset_for_cpu_sim()` 没有 generation 前置条件或 action ledger；跨 epoch 盲重放会清除新 generation 的合法 payload。
+  5. RESULT 已 durable、checkpoint torn 时只能重建 checkpoint；重复 reset 会破坏 at-most-once destructive effect。
+  6. `DIR_BOTH` 若共享 epoch/execution domain，两个 direction 的 result 必须 group-commit；partial applied/unknown 禁止整体 reopen。
+- 具体演算：`16×16xf32`、1024 B/Tile、`SlotNum=2`、`DIR_BOTH`；epoch 41 的 C2V slot0 已 pop 未 free、slot1 已 publish。`op7` reset 后 owner 在 RESULT 前崩溃；若 epoch42 已写 slot0，重放当前清零函数会删除新 Tile，只能依赖 backend `ALREADY_APPLIED` query、权威空态+census 证据或 quarantine。
+- 直接测试事实：八轮双向满容量+delayed free、32 次双线程 round trip、两向 hook storage/reset 与 split-lane publish 测试覆盖正常 FIFO、方向隔离及同步清零；没有 intent/action/result failpoint、同 ID 冲突、backend query、frame CRC、torn checkpoint、partial group reset 或真机 late flag 测试。
+- 新知识债：真实 token/intent/result/checkpoint schema、WAL frame/CRC/hash chain、backend operation ledger、epoch CAS、group-scope atomicity、quarantine registry、A2/A3/A5 reset/query adapter、graph generation 与真机 torn-write/late-flag Golden。
+- 下一章：**WAL 什么时候能截断——Checkpoint Ownership、Segment Compaction 与 Quarantine Registry Atomicity。**
