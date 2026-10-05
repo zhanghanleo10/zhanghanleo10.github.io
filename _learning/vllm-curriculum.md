@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 45 章已区分 `process terminal → output fence → device completion → physical range reuse`，并确认正常 output event/FIFO fence 不能自动覆盖 KILL recovery；下一章下钻 context generation、backend reset witness scope 与跨 backend golden。
+- 当前主线：第 47 章已把 CUDA Graph 的 shape dispatch 与 graph/address/execution generation 分离，并对照 Elastic EP 的 release/recapture 与 Sleep Mode 的原址恢复；下一章建立 per-key recapture manifest、TP group commit 与 eager fallback SLO。
 
 ## 已完成章节
 
@@ -58,6 +58,8 @@
 | 2026-09-29 43 | `SchedulerOutput → TP=1 direct call / MP RPC → StepLease deadline → fatal fan-out → generation fence` | [`869278cb`](https://github.com/vllm-project/vllm/commit/869278cbb02fc04a5f10d2eaba2bb251939e1eab) | [进程活着不等于有进展]({{ '/articles/vllm-tp1-step-lease-withheld-response-deadline-parity/' | relative_url }}) |
 | 2026-09-30 44 | `StepLease expiry → supervisor CAS → exact member kill → Scheduler/frontend late-output fence → KV quarantine` | [`09c47db1`](https://github.com/vllm-project/vllm/commit/09c47db1ca080793dc2351144cb39513fd7984ca) | [Heartbeat 之后谁动手]({{ '/articles/vllm-supervisor-kill-authority-step-generation-late-output-fence/' | relative_url }}) |
 | 2026-10-01 45 | `CUDA event → ModelRunnerOutput → processed_step_seq → KILL completion unknown → range quarantine/reset fence` | [`37d61740`](https://github.com/vllm-project/vllm/commit/37d6174096fd99a8d362c9f5b379f7ec59deedb8) | [KILL 了，GPU 就停了吗]({{ '/articles/vllm-device-completion-witness-kv-quarantine-reset-fence/' | relative_url }}) |
+| 2026-10-03 46 | `device completion unknown → context generation → backend reset witness → cross-backend golden` | [`44198f57`](https://github.com/vllm-project/vllm/commit/44198f577fe5cfb4b02297bf6ff7235eb31d742b) | [Reset 到底重置了谁]({{ '/articles/vllm-context-generation-backend-reset-witness/' | relative_url }}) |
+| 2026-10-05 47 | `ResetWitness → graph/address generation → preserve-or-recapture → replay admission` | [`13881005`](https://github.com/vllm-project/vllm/commit/138810056093301f4881050fcf2b1786939da387) | [Reset 以后 Graph 还能 replay 吗]({{ '/articles/vllm-cudagraph-address-generation-recapture-fence/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -380,6 +382,14 @@
 - `TERMINAL_MATCH/LIVE_MATCH/LIVE_DIFFERENT_GENERATION/NOT_FOUND_UNPROVEN`（建议 reconciliation verdict）
 - MP direct-child handle/pidfd、Ray actor attempt、launcher job attempt（建议 evidence identity）
 - `tests/entrypoints/launchers/test_shutdown.py::_assert_children_cleaned_up`（当前排除 zombie）
+- `BatchExecutionDescriptor`
+- `CudaGraphManager.capture/dispatch/run_fullgraph/release_graphs`
+- `GPUModelRunner.capture_model/needs_cudagraph_capture`
+- `CUDAGraphWrapper/CUDAGraphEntry/clear_all_graphs`
+- `capture_pool/capture_outside_cumem_pool`
+- `ElasticEPScalingExecutor._release_cuda_graphs/warm_and_capture`
+- `WorkspaceManager.lock/unlock`
+- `GraphGenerationToken/RecaptureFinal`（第 47 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -589,6 +599,11 @@
 200. graceful `GPUModelRunner.shutdown()` 的 device synchronize 与强制 `proc.kill()` 是不同路径；KILL 绕过 Python cleanup，当前 parent 侧没有结构化 context teardown/reset evidence。
 201. completion unknown 时，KV、activation、workspace 或 connector range 必须 quarantine；只有同 generation completion witness 或覆盖该 scope 的 authoritative reset/teardown witness 才能归还 allocator。
 202. 显存 used-bytes 下降是资源回收观测，不包含 event identity、range、context generation 或 reset scope，不能单独证明旧 work 不会影响新 allocation。
+203. CUDA Graph descriptor 只证明 shape、模式与 LoRA/microbatch 兼容；graph executable、input/KV/workspace address 与 context/communicator generation 必须另有生命周期保证。
+204. workspace 或其他 captured storage 变化前必须先关闭旧 graph admission；Elastic EP 的安全顺序是 release graph、unlock/grow、warmup/capture、lock 后再恢复 replay。
+205. `data_ptr()` 数值相等不能排除 allocation/context ABA；跨 reset replay 必须绑定 execution generation，不能依赖偶然的 virtual-address reuse。
+206. Sleep Mode 保留 graph 的前提不是普通 reset，而是同一 worker/context 内 graph pool 内容与 virtual mapping 的原址备份恢复；不满足该 witness 时必须 recapture 或 eager。
+207. profiling graph 绑定 minimal KV 与 throwaway pool，只能用于估算；真实 KV 初始化后必须丢弃并重捕获，相同 descriptor 不能升级其 lifetime。
 
 ## 前置依赖与版本注意
 
@@ -608,7 +623,7 @@
 - Connector 没有统一 `pending_loads/pending_saves/stopped` 回执；各实现的 background job 与 transport quiescence 仍不可横向比较。
 - Worker/ModelRunner 缺 active slots、in-flight batches、device synchronized 和 teardown-done 的结构化快照；allocator memory threshold 仍是弱证据。
 - 缺少真实 `DeviceWorkToken/DeviceCompletionWitness/ResetWitness`、context generation 与 backend query；KILL 后 outstanding KV/activation/workspace ranges 没有可恢复的 quarantine registry。
-- 缺少 range interval conflict index、quarantine 容量水位/admission backpressure、CUDA Graph recapture fence，以及 CUDA/ROCm/MPS/IPC/RDMA reset scope 的 adapter/golden。
+- 缺少 range interval conflict index、quarantine 容量水位/admission backpressure，以及 CUDA/ROCm/MPS/IPC/RDMA reset scope 的 adapter/golden；CUDA Graph 已有 Elastic EP release/recapture 与 Sleep Mode 原址恢复专项路径，但仍缺统一 generation token、per-key manifest 与跨 rank atomic publish。
 - 缺少 crash-at-kernel-launch/event-record/D2H/MQ-enqueue 每个边界的真机 late-write canary；现有 forward-error E2E 只验证 EngineDeadError 与显存阈值回落。
 
 - `AsyncMPClient`/DP client 的 engine identity 选择、跨 producer 顺序和线程安全边界。
@@ -986,7 +1001,7 @@
 
 ## 下一批候选章节
 
-1. 下一主线：Reset 以后 Graph 还能 replay 吗——Graph Context Generation、Recapture Fence 与 Address Rebinding Golden。
+1. 下一主线：Recapture 只成功一半怎么办——Per-key Manifest、TP Group Commit 与 Eager Fallback SLO。
 2. 恢复协议落地：durable `OwnerLease/KillIntent/MemberFinal` registry、MP/Ray/launcher `RecoveryAdapter` 与 reconciliation harness。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
@@ -1072,3 +1087,28 @@
 - 建议协议（非当前实现）：`ContextToken`、`ResetWitness`、`GroupResetFinal` 与 `QUIESCENT / RESET_FENCED / QUARANTINED / CONFLICT` verdict。
 - 新知识债：backend reset/query adapter、scope taxonomy、durable witness/CAS、partial-rank convergence、cross-backend golden、RDMA/native late-write canary。
 - 下一章：**Reset 以后 Graph 还能 replay 吗——Graph Context Generation、Recapture Fence 与 Address Rebinding Golden。**
+
+## 第 47 章课程账本增量
+
+- 日期：2026-10-05
+- 章节：**Reset 以后 Graph 还能 replay 吗：地址代际、Recapture Fence 与 Rebinding Golden**
+- 源码基线：[`13881005`](https://github.com/vllm-project/vllm/commit/138810056093301f4881050fcf2b1786939da387)；直接相关变化为 [PR #59160](https://github.com/vllm-project/vllm/pull/59160) / [`5e56e9af`](https://github.com/vllm-project/vllm/commit/5e56e9af2aaede223a5f723cba88fa35999ac813) 的 Sleep Mode cuMem graph pool。
+- 课程位置：`ResetWitness → graph/address generation → preserve-or-recapture → replay admission`
+- 新覆盖文件与符号：
+  - `vllm/v1/worker/gpu/cudagraph_utils.py`：`BatchExecutionDescriptor`、`CudaGraphManager.capture/dispatch/run_fullgraph/release_graphs`、`profile_cudagraph_memory`
+  - `vllm/v1/worker/gpu/model_runner.py`：`GPUModelRunner.capture_model/needs_cudagraph_capture`
+  - `vllm/compilation/cuda_graph.py`、`breakable_cudagraph.py`：wrapper entry、debug address check、clear/replay
+  - `vllm/compilation/cudagraph_pool.py`、`vllm/device_allocator/cumem.py`：`capture_pool`、`cudagraph_pool`
+  - `vllm/distributed/elastic_ep/elastic_execute.py`：`_release_cuda_graphs/warm_and_capture`
+  - `vllm/v1/worker/workspace.py`：`lock_workspace/unlock_workspace`
+  - `tests/v1/worker/test_gpu_model_runner_v2.py`、`test_gpu_model_runner_v2_cudagraph_profiling.py`、`tests/basic_correctness/memory/cumem/test_cumem.py`、`tests/basic_correctness/memory/sleep_mode/test_sleep_mode.py`
+- 新确认不变量：
+  1. descriptor 是 shape compatibility key，不是 graph lifetime 或 context-generation certificate。
+  2. captured graph 绑定 input、KV、workspace、pool 及 stream/communicator address；地址改变前必须关闭旧 replay admission。
+  3. Elastic EP 使用 `release → unlock/grow → warmup/capture → lock` 重新绑定；Sleep Mode 只有在 graph pool 与 virtual mapping 原址恢复、同一 context/graph executable 保留时才可直接 replay。
+  4. `data_ptr()` 相等不能排除 ABA；context generation 改变后旧 graph 必须永久失效。
+  5. TP/PP 只在所有相关 rank 的 graph/communicator generation 收敛后才能恢复 group admission。
+- 具体演算：FULL decode `8 requests × 1 token`，`input_ids int32[8]`、`positions int64[8]`、`slot_mapping int64[8]`；generation `g17` 捕获 `{I17,P17,S17,W17,K17}`，Elastic EP 把 workspace 换为 `W18` 时必须 recapture，即使新 VA 数值恰好等于旧值也不能消除 ABA。
+- 直接测试事实：workspace-lock 单测证明 captured static buffer 不得 resize；profiling suite 验证 throwaway graph 必须清除；cuMem 单测验证 level 1/2 graph-pool pointer mapping 原址恢复后 replay 正确；Sleep Mode E2E 覆盖 FULL/PIECEWISE/breakable 与 TP=2 custom all-reduce。
+- 新知识债：统一 `GraphGenerationToken/RecaptureFinal`、完整 address inventory、per-key manifest、partial capture rollback、TP/PP atomic publish、ABA/context-reset negative test、partial wake 与 eager fallback SLO。
+- 下一章：**Recapture 只成功一半怎么办——Per-key Manifest、TP Group Commit 与 Eager Fallback SLO。**
