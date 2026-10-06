@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 47 章已把 CUDA Graph 的 shape dispatch 与 graph/address/execution generation 分离，并对照 Elastic EP 的 release/recapture 与 Sleep Mode 的原址恢复；下一章建立 per-key recapture manifest、TP group commit 与 eager fallback SLO。
+- 当前主线：第 48 章已把 worker-local graph entry、worker batch-open 与 TP group-ready 拆成三层证据，并完成 partial recapture、per-key manifest、group commit 与 eager fallback 的第一性原理推导；下一章处理 manifest 发布前后 owner crash 的 WAL 与幂等恢复。
 
 ## 已完成章节
 
@@ -60,6 +60,7 @@
 | 2026-10-01 45 | `CUDA event → ModelRunnerOutput → processed_step_seq → KILL completion unknown → range quarantine/reset fence` | [`37d61740`](https://github.com/vllm-project/vllm/commit/37d6174096fd99a8d362c9f5b379f7ec59deedb8) | [KILL 了，GPU 就停了吗]({{ '/articles/vllm-device-completion-witness-kv-quarantine-reset-fence/' | relative_url }}) |
 | 2026-10-03 46 | `device completion unknown → context generation → backend reset witness → cross-backend golden` | [`44198f57`](https://github.com/vllm-project/vllm/commit/44198f577fe5cfb4b02297bf6ff7235eb31d742b) | [Reset 到底重置了谁]({{ '/articles/vllm-context-generation-backend-reset-witness/' | relative_url }}) |
 | 2026-10-05 47 | `ResetWitness → graph/address generation → preserve-or-recapture → replay admission` | [`13881005`](https://github.com/vllm-project/vllm/commit/138810056093301f4881050fcf2b1786939da387) | [Reset 以后 Graph 还能 replay 吗]({{ '/articles/vllm-cudagraph-address-generation-recapture-fence/' | relative_url }}) |
+| 2026-10-06 48 | `partial recapture → per-key local final → TP group commit → graph/eager admission` | [`97bd8c74`](https://github.com/vllm-project/vllm/commit/97bd8c74ebf12c3d847fb59f24966a83bf6f6920) | [Recapture 只成功一半怎么办]({{ '/articles/vllm-cudagraph-per-key-manifest-tp-group-commit-eager-fallback/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1001,7 +1002,7 @@
 
 ## 下一批候选章节
 
-1. 下一主线：Recapture 只成功一半怎么办——Per-key Manifest、TP Group Commit 与 Eager Fallback SLO。
+1. 下一主线：Manifest 写了一半，Owner 崩了——Recapture WAL、Idempotent Publish 与 Stale-final Reconciliation。
 2. 恢复协议落地：durable `OwnerLease/KillIntent/MemberFinal` registry、MP/Ray/launcher `RecoveryAdapter` 与 reconciliation harness。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
@@ -1112,3 +1113,31 @@
 - 直接测试事实：workspace-lock 单测证明 captured static buffer 不得 resize；profiling suite 验证 throwaway graph 必须清除；cuMem 单测验证 level 1/2 graph-pool pointer mapping 原址恢复后 replay 正确；Sleep Mode E2E 覆盖 FULL/PIECEWISE/breakable 与 TP=2 custom all-reduce。
 - 新知识债：统一 `GraphGenerationToken/RecaptureFinal`、完整 address inventory、per-key manifest、partial capture rollback、TP/PP atomic publish、ABA/context-reset negative test、partial wake 与 eager fallback SLO。
 - 下一章：**Recapture 只成功一半怎么办——Per-key Manifest、TP Group Commit 与 Eager Fallback SLO。**
+
+## 第 48 章课程账本增量
+
+- 日期：2026-10-06
+- 章节：**Recapture 只成功一半怎么办：Per-key Manifest、TP Group Commit 与 Eager Fallback**
+- 源码基线：[`97bd8c74`](https://github.com/vllm-project/vllm/commit/97bd8c74ebf12c3d847fb59f24966a83bf6f6920)；直接相关架构证据为已合入 [PR #53934](https://github.com/vllm-project/vllm/pull/53934) 的 Elastic EP + Model Runner V2 支持，以及 [PR #59160](https://github.com/vllm-project/vllm/pull/59160) 的 graph-pool 生命周期。
+- 课程位置：`GraphGenerationToken → partial recapture → per-key local final → TP group commit → graph/eager admission`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`：初始化阶段的 `model_executor.compile_or_warm_up_model`
+  - `vllm/v1/executor/abstract.py`：`Executor.compile_or_warm_up_model`
+  - `vllm/v1/executor/multiproc_executor.py`：`MultiprocExecutor.collective_rpc`
+  - `vllm/v1/worker/gpu_worker.py`：`GPUWorker.compile_or_warm_up_model`
+  - `vllm/v1/worker/gpu/model_runner.py`：V2 `GPUModelRunner.capture_model/execute_model`
+  - `vllm/v1/worker/gpu/cudagraph_utils.py`：`CudaGraphManager.capture/dispatch/run_fullgraph/release_graphs`
+  - `vllm/v1/worker/gpu/dp_utils.py`：`dispatch_cg_and_sync_dp/sync_cudagraph_and_dp_padding`
+  - `vllm/distributed/elastic_ep/elastic_execute.py`：`_release_cuda_graphs/warm_and_capture`
+  - `tests/v1/cudagraph/test_cudagraph_dispatch.py`、`tests/v1/worker/test_gpu_ubatch_slicing.py`、`tests/v1/worker/test_gpu_model_runner_v2.py`
+- 新确认不变量：
+  1. `graphs[descriptor]` 是 worker-local capture 结果，`_graphs_captured` 是该 worker 的整批 replay 闸门；二者都不是 TP group-ready 证据。
+  2. 当前 manager 只在全部 descriptor 成功后打开 `_graphs_captured`，所以部分 entry 不会被 dispatch；但异常不会自动清空已插入 entry，同一实例直接重试可能命中重复 descriptor assert。
+  3. `collective_rpc` 能把 worker exception 传播到调用者，却没有 `rank × descriptor` manifest 或原子 group publish。
+  4. per-key replay 必须绑定相同 worker attempt、graph generation、descriptor 和 address fingerprint，并在 expected ranks 全部 LOCAL_READY 后 group commit。
+  5. DP 运行时的“任一 rank eager → 全组 eager”证明 mode 需要共识，但不能充当 TP recapture commit。
+- 具体演算：TP=2、K8/K16 两个 FULL decode key；rank 0 两 key ready，rank 1 只有 K16 ready。安全 verdict 只能开放 K16，K8 保持 eager/failed；rank 0 的 K8 本地成功不能单独授权 replay。
+- 直接测试事实：wrapper suite 验证 capture/replay/unknown-key bypass，DP ubatch suite 验证任一 rank 不满足 split 时全组 eager，workspace-lock 单测验证 capture 后禁止 resize；当前没有 V2 manager partial rollback、TP partial-rank commit、stale final、capture collective hang 或 eager fallback SLO 测试。
+- 建议协议（非当前实现）：`GraphKeyFinal`、`GraphManifest`、expected-set freeze、per-key `GROUP_READY` CAS、generation fence 和失败 key eager policy。
+- 新知识债：真实 manifest schema、capture rollback、TP/PP commit transport、owner crash WAL、stale-final reconciliation、rank hang deadline、per-key HBM 计量和 fallback p99/TPOT 基准。
+- 下一章：**Manifest 写了一半，Owner 崩了——Recapture WAL、Idempotent Publish 与 Stale-final Reconciliation。**
