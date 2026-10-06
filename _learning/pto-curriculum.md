@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-05。
+最后更新：2026-10-06。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 56 已把 checkpoint 定义为 WAL 删除证书：它必须由当前 owner epoch 发布，并覆盖 canonical pipe state、全部 unresolved operation、quarantine registry 与 backend witness；segment absence 不能反证 debt absence。下一步把 WAL/compaction/quarantine 的长期积压变成结构化 admission signal，研究恢复债务的容量水位与 fail-closed backpressure。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 57 已把 recovery debt 拆成不可互换的 WAL、quarantine backing、backend evidence/compaction 分量，并用 worst-case peak、failure expansion 与 recovery reserve 建立 fail-closed admission。下一步进入 `RECOVERY_ONLY` 内部，研究 cleanup queue 如何在有限 reserve 下避免普通工作反压、恢复任务互相饿死或无界 drain。
 
 ## 已完成章节
 
@@ -81,6 +81,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-03 | PipeToken Immutable Snapshot 与 Replay Oracle | ownership failpoint → freeze/snapshot → backend evidence → deterministic verdict | [课程 54]({% post_url 2026-10-03-pto-isa-pipe-token-immutable-snapshot-replay-oracle %}) |
 | 2026-10-04 | ResetIntent WAL、幂等 replay 与 torn checkpoint | immutable snapshot → durable intent → backend action/query → result → atomic epoch checkpoint | [课程 55]({% post_url 2026-10-04-pto-isa-reset-intent-wal-idempotent-replay %}) |
 | 2026-10-05 | Checkpoint ownership、WAL compaction 与 quarantine atomicity | action/result WAL + quarantine closure → owner-fenced checkpoint → safe cutoff → sealed segment deletion | [课程 56]({% post_url 2026-10-05-pto-isa-wal-checkpoint-compaction-quarantine-atomicity %}) |
+| 2026-10-06 | Recovery Debt、向量水位与 Fail-closed Admission | WAL/quarantine/evidence census → worst-case charge → recovery reserve → recovery-only drain | [课程 57]({% post_url 2026-10-06-pto-isa-recovery-debt-watermark-fail-closed-admission %}) |
 
 ## ISA 知识地图
 
@@ -114,6 +115,7 @@ permalink: /learning/pto-curriculum/
 | PipeToken snapshot/replay oracle | failpoint 必须位于 allocate/publish/borrow/release 线性化边界；snapshot 在 freeze 后同锁值复制，不能保留 mutable pointer；oracle 仅依赖 token、durable prefix、snapshot 与 backend-native evidence，并输出确定性 verdict | 协议已讲透；schema、adapter、Golden 待实现 |
 | ResetIntent WAL / crash replay | destructive reset 前先持久化 intent；`PREPARED` 只证明 action 可能发生。幂等重放需 operation ID、expected epoch/revision、snapshot hash 与 scope；RESULT 已落盘而 checkpoint torn 时只重做 checkpoint，不能重做 reset | 协议已讲透；backend ledger、WAL/checkpoint schema 与 crash Golden 待实现 |
 | WAL checkpoint / compaction | checkpoint 是删除证书而非仅为加速 replay：必须原子覆盖 canonical state、unresolved operation、quarantine set 与 witness；只有当前 owner epoch 可发布 manifest/cutoff，segment absence 不证明 debt absence | recovery closure 与 owner fence 已讲透；schema、fsync/CAS、reader lease、ENOSPC/partial-delete Golden 待实现 |
+| Recovery debt / fail-closed admission | WAL bytes、quarantine backing、unresolved evidence 与 compaction lag 不可折成单一百分比；普通工作必须预付峰值与 failure expansion，checkpoint/reset/compaction 也必须从受保护 reserve 预占临时资源。`λ_d≥μ_d` 持续成立时 watermark 无法创造稳定性 | 向量 census、hard gate 与 recovery-only 边界已讲透；schema、atomic reserve、revision wake 与压力 Golden 待实现 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -161,7 +163,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 recovery-closure checkpoint、owner-epoch manifest、compaction watermark、sealed segment 与 quarantine atomicity | ISA 深挖 30 |
+| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 recovery-debt vector、failure expansion charge、recovery reserve 与 fail-closed admission | ISA 深挖 31 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -436,7 +438,7 @@ permalink: /learning/pto-curriculum/
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
 - Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–49 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery、admission 与 pressure-control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、device-wide `MemoryCensus`、scheduler-state charge、watermark state machine、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/OOM/A5 guard-page/canary/poison/性能矩阵。
-- TPipe recovery 主线已推进到 recovery-closure checkpoint 与 owner-fenced compaction；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot` schema、frame/segment sealing、temp-write/file-fsync/rename/directory-fsync/manifest-CAS 协议、reader lease、orphan GC、closure verifier、ENOSPC/partial-delete fault matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
+- TPipe recovery 主线已推进到 recovery-closure checkpoint、owner-fenced compaction 与 recovery-debt fail-closed admission；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict` schema、frame/segment sealing、temp-write/file-fsync/rename/directory-fsync/manifest-CAS、atomic reserve、durable revision wake、reader lease、orphan GC、closure verifier、ENOSPC/partial-delete/pressure fault matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -446,7 +448,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：把 TPipe WAL bytes、replay latency、unresolved operation 与 quarantine residency 统一成 recovery-debt admission contract，并补 generation-aware cross-dispatch/compaction CI。
+1. 主线：在 recovery-debt admission contract 上实现 recovery-only cleanup queue、reserved capacity、fairness/cancel 与 starvation-free drain，并补 generation-aware cross-dispatch/compaction CI。
 2. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -937,3 +939,20 @@ permalink: /learning/pto-curriculum/
 - **recoverable action（55）**：durable intent 在 destructive reset 之前；`PREPARED=MAY_HAVE_APPLIED`，result 已落盘时只补 checkpoint。
 - **bounded history（56）**：当前 owner 发布的 checkpoint 必须吸收 canonical state 与全部未决债务，之后才能推进 segment cutoff。
 - 连续主链已形成：`slot ownership → epoch fence → backend evidence → bounded quiescence → immutable snapshot → idempotent action → durable recovery closure`。下一段研究 recovery debt 的容量控制与长期可运行性。
+
+## 第 57 章课程账本增量
+
+- 源码基线：pto-isa [`15a9e0a0`](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25)；同步 PR [#339](https://github.com/hw-native-sys/pto-isa/pull/339) 未修改本文直接引用的 CPU TPipe 路径。直接相关正常态修复为 [`8e0f3124`](https://github.com/hw-native-sys/pto-isa/commit/8e0f3124a51c151206725336bbbb5383c0cc5e0b)。
+- 新覆盖文件与符号：`include/pto/cpu/TPush.hpp` 的 `Producer::allocate/record`、`Consumer::wait/free`、`reset_for_cpu_sim()`；`tests/cpu/st/testcase/tpushpop/main.cpp` 的双向满容量延迟释放、32 次并发往返与双 state hook reset。
+- 新覆盖建议对象：`RecoveryDebtRecord`、`DebtCensus`、vector `AdmissionVerdict`、recovery reserve 与 ledger revision。
+- 新确认不变量：
+  1. `D_wal`、`D_quarantine`、`D_evidence/D_compact` 不可互换；单一 debt 百分比不能作为 correctness gate。
+  2. 普通 admission 必须同时 charge request peak、failure expansion 与 cleanup reserve；只看当前 free slot 会超卖故障后的隔离容量。
+  3. checkpoint/reset/compaction 也会临时增加 WAL 或空间，必须从受保护 recovery reserve 原子预占，不能无条件绕过 gate。
+  4. 水位负责策略和 hysteresis，worst-case headroom/owner/evidence 完整性负责 fail-closed safety；阈值必须由实测峰值与 service rate 校准。
+  5. `notify/revision` 只提示 waiter 重算；只有新 revision 上重新通过 gate 才获得 admission。
+  6. 若 recovery debt arrival `λ_d` 持续不小于 retirement `μ_d`，任何 watermark 都无法稳定系统，必须减载、扩容或修复永不 terminal 的 backend。
+- 具体演算：`16×16xf32`、1024 B/Tile、`SlotNum=2`、`DIR_BOTH` 的 4096 B 逻辑 entry capacity；epoch41 quarantine 1024 B。故障测试磁盘配置为 12 KiB，总 free 8 KiB，而 checkpoint temp 6 KiB、manifest reserve 2 KiB、普通 WAL 峰值 1 KiB；普通请求必须拒绝，仅 checkpoint recovery 可消费预留并随后 compact 旧 4 KiB segment。
+- 直接测试事实：本次执行 `python3 tests/run_cpu.py -t tpushpop`，构建和测试均 PASS；现有回归只覆盖正常 FIFO 容量、顺序、释放和进程内唤醒，不覆盖 WAL/ENOSPC、checkpoint temp、quarantine watermarks、backend stall、crash/restart 或压力状态机。
+- 新知识债：真实 debt/admission schema、atomic reserve、durable revision/no-lost-wake、arrival/retirement metrics、recovery task cost model、reader-pinned/owner-conflict reason、A2/A3/A5 terminal adapter，以及磁盘/backing/evidence 正交耗尽与 late-action 真机 Golden。
+- 下一章：**Recovery 也会抢资源——Cleanup Queue、Reserved Capacity 与 Starvation-free Drain。**
