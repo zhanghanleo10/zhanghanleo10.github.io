@@ -1141,3 +1141,30 @@
 - 建议协议（非当前实现）：`GraphKeyFinal`、`GraphManifest`、expected-set freeze、per-key `GROUP_READY` CAS、generation fence 和失败 key eager policy。
 - 新知识债：真实 manifest schema、capture rollback、TP/PP commit transport、owner crash WAL、stale-final reconciliation、rank hang deadline、per-key HBM 计量和 fallback p99/TPOT 基准。
 - 下一章：**Manifest 写了一半，Owner 崩了——Recapture WAL、Idempotent Publish 与 Stale-final Reconciliation。**
+
+## 第 49 章课程账本增量
+
+- 日期：2026-10-07
+- 章节：**Manifest 写了一半，Owner 崩了：Recapture WAL、幂等发布与迟到 Final 对账**
+- 源码基线：[`db6e3cd8`](https://github.com/vllm-project/vllm/commit/db6e3cd8c4f9b84c39fe3c44fab0b1d3117f758b)；相对第 48 章前进 69 个提交。直接相关变化是已合入 [PR #59532](https://github.com/vllm-project/vllm/pull/59532) / [`eb2901b7`](https://github.com/vllm-project/vllm/commit/eb2901b7356dd6782b7418ac071d3cf56ce018f7) 新增 inner decoder-replay CUDA Graph。
+- 课程位置：`per-key manifest → durable intent/final → group CAS → live-handle validation → stale-final reconciliation`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`：`EngineCore` 初始化调用 `compile_or_warm_up_model`
+  - `vllm/v1/executor/abstract.py`、`multiproc_executor.py`：`Executor.compile_or_warm_up_model`、`MultiprocExecutor.collective_rpc`
+  - `vllm/v1/worker/gpu_worker.py`：`GPUWorker.compile_or_warm_up_model` 与 `CompilationTimes`
+  - `vllm/v1/worker/gpu/model_runner.py`：`GPUModelRunner.capture_model` 的 model → inner → speculator 顺序
+  - `vllm/v1/worker/gpu/cudagraph_utils.py`：`CudaGraphManager.capture/release_graphs/dispatch`
+  - `vllm/models/deepseek_v41/nvidia/model_state.py`：`capture_inner_cudagraphs`
+  - `vllm/models/deepseek_v41/nvidia/decoder_replay_cudagraph.py`：`DecoderReplayCudaGraphManager.capture_replay_graphs/run`
+  - `tests/models/test_deepseek_v41_decoder_replay_layers.py`、`test_deepseek_v41_replay_batch.py`、`tests/v1/worker/test_gpu_model_runner_v2.py`
+- 新确认不变量：
+  1. capture success、`_graphs_captured` 与 RPC success 都是进程内事实，不能代替 durable group commit。
+  2. WAL 只恢复 intent/final/commit 决策，不能序列化或复活 `torch.cuda.CUDAGraph`；发布还需要当前 worker/context 的 live-handle witness。
+  3. inner decoder-replay graph 使同一 descriptor 可能属于不同 graph domain；manifest key 必须是 `(graph_domain, descriptor_hash)`。
+  4. 建议顺序是 `intent durable → capture → final durable → group CAS → live activation`；CAS 后 activation 丢失可幂等补做，handle/context 丢失则必须新 generation recapture。
+  5. stale final 必须同时经过 owner epoch、graph generation、worker attempt 与 address fingerprint fence；同 operation id 异 payload 必须 fail closed。
+- 具体演算：TP=2、generation `g42`、K8 model FULL 与 R128 inner PIECEWISE；owner 在 K8 finals 齐全、CAS 前崩溃。新 owner 可幂等提交 K8，但只有两 rank live handle 仍匹配才可激活；R128 缺 final 保持 eager，旧 epoch 的迟到 final 不能补写。
+- 直接测试事实：inner graph 数值测试验证 R4 capture、3 行 gather 与 eager 一致；DP 测试验证最大 300 行选择并统一 padding 到 R512；workspace 测试验证 capture 后锁地址。当前没有 WAL、owner crash、per-domain partial final、stale generation、commit/activation 窗口或 orphan graph 回收测试。
+- 建议协议（非当前实现）：`RecaptureIntent`、`RankKeyFinal`、`GroupKeyCommit`、stable `capture_id`、payload hash、per-key CAS、live graph registry/query 与 deterministic crash failpoint。
+- 新知识债：真实 schema、WAL frame/CRC/fsync、TP/PP transport、live registry、outer/inner/speculator rollback、owner election、per-domain HBM 计量、rank hang deadline、graph pool quarantine 与真机 crash golden。
+- 下一章：**Rank 一直不回怎么办——Recapture Deadline、Eager-only Final 与 Orphan Graph 回收。**
