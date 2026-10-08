@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-07。
+最后更新：2026-10-08。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 58 已进入 `RECOVERY_ONLY` 内部：recovery task 也必须原子预占多维峰值；最老 runnable task 以 protected head claim 防止被连续小任务饿死，前置任务通过 ticket inheritance 打破 head-of-line blocking，owner 换代则 fence 旧 lease 的 apply/free 权。下一步补齐 durable revision、no-lost-wake 与 recovery-to-normal 原子交接。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 59 已把 `RECOVERY_ONLY` 的退出边界闭合：durable revision 与权威状态同事务提交，notification 只作可丢失 hint；最后一次 owner-fenced CAS 同时发布 `NORMAL`、推进 revision 并换 admission generation，waiter 醒来后仍须重新检查容量与权限。下一步补 stable reason、transition audit 与 crash-replay trace。
 
 ## 已完成章节
 
@@ -83,6 +83,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-05 | Checkpoint ownership、WAL compaction 与 quarantine atomicity | action/result WAL + quarantine closure → owner-fenced checkpoint → safe cutoff → sealed segment deletion | [课程 56]({% post_url 2026-10-05-pto-isa-wal-checkpoint-compaction-quarantine-atomicity %}) |
 | 2026-10-06 | Recovery Debt、向量水位与 Fail-closed Admission | WAL/quarantine/evidence census → worst-case charge → recovery reserve → recovery-only drain | [课程 57]({% post_url 2026-10-06-pto-isa-recovery-debt-watermark-fail-closed-admission %}) |
 | 2026-10-07 | Cleanup Queue、保护性 Reserve 与无饥饿 Drain | durable task → vector reserve CAS → head claim / dependency inheritance → owner-fenced debt closure | [课程 58]({% post_url 2026-10-07-pto-isa-cleanup-queue-reserved-capacity-starvation-free-drain %}) |
+| 2026-10-08 | Durable Revision、无丢失唤醒与 NORMAL 交接 | durable result → revision watch → atomic mode/generation CAS → admission recheck | [课程 59]({% post_url 2026-10-08-pto-isa-durable-revision-no-lost-wake-recovery-normal-handoff %}) |
 
 ## ISA 知识地图
 
@@ -118,6 +119,7 @@ permalink: /learning/pto-curriculum/
 | WAL checkpoint / compaction | checkpoint 是删除证书而非仅为加速 replay：必须原子覆盖 canonical state、unresolved operation、quarantine set 与 witness；只有当前 owner epoch 可发布 manifest/cutoff，segment absence 不证明 debt absence | recovery closure 与 owner fence 已讲透；schema、fsync/CAS、reader lease、ENOSPC/partial-delete Golden 待实现 |
 | Recovery debt / fail-closed admission | WAL bytes、quarantine backing、unresolved evidence 与 compaction lag 不可折成单一百分比；普通工作必须预付峰值与 failure expansion，checkpoint/reset/compaction 也必须从受保护 reserve 预占临时资源。`λ_d≥μ_d` 持续成立时 watermark 无法创造稳定性 | 向量 census、hard gate 与 recovery-only 边界已讲透；schema、atomic reserve、revision wake 与压力 Golden 待实现 |
 | Cleanup queue / starvation-free drain | recovery task 也必须按多维 peak 原子预占；最老 runnable task 的保护性声明禁止年轻任务侵占其必需 reserve，被前置条件阻塞时由 prerequisite 继承 ticket。owner lease 失效只撤销 apply/free 权，不证明物理 action 已终止 | 调度不变量与 crash 边界已讲透；真实 schema、CAS、fairness/设备 Golden 待实现 |
+| Durable revision / recovery handoff | revision 与 canonical recovery state 同事务推进；watch/notify 只触发 full reload。`RECOVERY_ONLY→NORMAL` 以 owner/revision 为 expected value，原子关闭 critical debt、归还 cleanup reserve并换 admission generation | 跨 crash no-lost-wake 与 handoff 不变量已讲透；store/watch/schema、audit 与 Golden 待实现 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -165,7 +167,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 cleanup task vector reserve、protected head claim、dependency ticket inheritance 与 owner-fenced drain | ISA 深挖 32 |
+| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 durable revision/watch、atomic NORMAL handoff 与 generation-bound admission contract | ISA 深挖 33 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -176,6 +178,8 @@ permalink: /learning/pto-curriculum/
 
 - structured admission 的最小正确性边界是：verdict 区分 `AdmitNow/Retryable/RejectPermanent`；recovery priority 只授予能减少 ownership debt 或补齐终态事实的工作；waiter 不得持 ledger/allocator/admission/binding 等 progress dependency；notify 只授权 recheck，不授权复用。
 - revision-based wait 必须覆盖“判定后、注册前”的竞态：订阅 observed revision 后再次比较，状态已变化就不睡；醒来重新执行完整 capacity + permission 检查。
+- 跨 crash 的 no-lost-wake 依赖 durable level state，而不是可靠 edge notification：状态与 revision 同事务提交后，即使 owner 在 notify 前崩溃，waiter 也能通过 reconnect/full reload 看到新 revision。
+- `RECOVERY_ONLY→NORMAL` 必须以当前 owner epoch 与 revision 为 expected value，原子提交 `mode=NORMAL`、`revision+1` 与 `admission_generation+1`；debt、reserve 和 mode 分步写会暴露撕裂快照。
 - simpler `WorkspaceManager` 已实现 runtime-owned whole-block ledger：capacity 只回答 fits，overwrite permission 必须等所有 run reference 按真实 drain/copyback/binding facts 退休。
 - `ref_count==0` 不等于可 eviction：current backing 属于 device context；只有 obsolete、unreferenced、unquarantined、无 retained mapping 的 generation 能为增长腾预算。
 - context 在退休证据闭合前销毁会 quarantine 其仍引用的整个 allocation；terminal sweep 的 `KeepIt` 将 charge 从 `reserved_bytes` 移入 `relinquished_bytes`，不代表 HBM 已 free。
@@ -440,7 +444,7 @@ permalink: /learning/pto-curriculum/
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
 - Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–49 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery、admission 与 pressure-control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、device-wide `MemoryCensus`、scheduler-state charge、watermark state machine、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/OOM/A5 guard-page/canary/poison/性能矩阵。
-- TPipe recovery 主线已推进到 recovery-closure checkpoint、owner-fenced compaction 与 recovery-debt fail-closed admission；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict` schema、frame/segment sealing、temp-write/file-fsync/rename/directory-fsync/manifest-CAS、atomic reserve、durable revision wake、reader lease、orphan GC、closure verifier、ENOSPC/partial-delete/pressure fault matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
+- TPipe recovery 主线已推进到 starvation-free cleanup、durable revision 与 atomic recovery-to-normal handoff；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor` schema、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、transition audit、reader lease、orphan GC、ENOSPC/partition/crash replay fault matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -450,7 +454,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：在 recovery-debt admission contract 上实现 recovery-only cleanup queue、reserved capacity、fairness/cancel 与 starvation-free drain，并补 generation-aware cross-dispatch/compaction CI。
+1. 主线：为 recovery state 增加 stable reason、transition audit 与 crash-replay trace，验证 revision/owner/mode/generation 的每次变化均可归因，并补 store partition、notify-before-crash 与 stale-owner Golden。
 2. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -975,3 +979,20 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：本次执行 `python3 tests/run_cpu.py -t tpushpop`，构建和测试均 PASS；现有回归证明正常 FIFO 容量、方向顺序、具体 slot 释放和进程内唤醒，不证明 cleanup reserve、公平性、durability 或 owner takeover。
 - 新知识债：真实 task/lease/reserve schema、dependency cycle verifier、peak 校准、durable ticket/CAS、跨进程 worker、owner takeover reconciliation、reserve leak repair、backend adapter、revision no-lost-wake，以及 ENOSPC/control-plane partition/late-action 真机 Golden。
 - 下一章：**Cleanup 做完，谁来唤醒——Durable Revision、No-lost-wake 与 Recovery-to-Normal Handoff。**
+
+## 第 59 章课程账本增量
+
+- 源码基线：pto-isa [`15a9e0a0`](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25)；默认分支相对第 58 章未变化，PR [#339](https://github.com/hw-native-sys/pto-isa/pull/339) 未修改本文直接引用的 CPU TPipe 路径。直接相关正常态修复仍为 [`8e0f3124`](https://github.com/hw-native-sys/pto-isa/commit/8e0f3124a51c151206725336bbbb5383c0cc5e0b)。
+- 新覆盖文件与符号：`include/pto/cpu/TPush.hpp` 的 `SharedState`、`EnsureSharedStateInitialized/GetSharedState`、`Producer::record`、`Consumer::wait/free`、`reset_for_cpu_sim()`、`commit_seq` 与 `notify_all()`；三项 DIR_BOTH 正常回归。
+- 新覆盖建议对象：`RecoveryState`、`RevisionCursor`、generation-bound `AdmissionLease`、linearizable revision watch 与 atomic recovery-to-normal CAS。
+- 新确认不变量：
+  1. revision 是 canonical state version，不是 notification sequence；状态与 revision 必须在同一 durable transaction 中提交。
+  2. notification 可丢失、重复或乱序，只授权 reload；watch 从 observed revision 的下一版本开始，注册后必须再次读取，history compaction 时执行 full reload。
+  3. `commit_seq` 只排序当前 CPU FIFO entry，final free 后会清零，不能充当跨 crash/owner 的 revision；比较身份至少绑定 `(owner_epoch, revision)`。
+  4. `RECOVERY_ONLY→NORMAL` 只有在 critical debt、cleanup inflight 与 reserve 闭合且 checkpoint/terminal proof 可消费时成立，并原子发布 `mode + revision + admission_generation`。
+  5. owner 在 handoff CAS 后、notify 前崩溃不影响正确性；waiter 重连读取最新 durable state。CAS 前崩溃则仍保持 `RECOVERY_ONLY`。
+  6. waiter 醒来不继承旧 verdict，也不自动获得 slot；必须在最新 revision/generation 上重新执行 capacity、permission 与 lease CAS。
+- 具体演算：`16×16xf32`、1024 B/Tile、`SlotNum=2`、`DIR_BOTH`，两向 entry capacity 合计 4096 B；revision107 有 4 KiB WAL、1024 B quarantine 与一个 unknown action。E7 terminal witness 推进到108，C42 checkpoint/compaction推进到109，最后 CAS 到 `NORMAL@110/generation13`。即使 notify 丢失，2048 B 双向请求也只能重读110后取得 g13 lease；旧 owner/旧 generation 均被 fence。
+- 直接测试事实：本次执行 `python3 tests/run_cpu.py -t tpushpop`，构建 PASS，`tpushpop` 在本次环境中 85 ms PASS；现有回归证明进程内 FIFO、wait/notify、方向隔离与同步 reset，不证明 durable watch、notify-before-crash、owner takeover 或 atomic mode handoff。
+- 新知识债：真实 state/cursor/lease schema、linearizable store/watch、watch history/GC、跨进程 notification adapter、handoff CAS、device-wide gate 摘要、旧 generation lease 回收、stable reason/transition audit，以及 store partition、stale-owner、late-action 和 A2/A3/A5 真机 Golden。
+- 下一章：**Revision 前进了，谁改了什么——Stable Reason、Transition Audit 与 Crash-replay Trace。**
