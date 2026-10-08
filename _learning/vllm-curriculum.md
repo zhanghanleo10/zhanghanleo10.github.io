@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 48 章已把 worker-local graph entry、worker batch-open 与 TP group-ready 拆成三层证据，并完成 partial recapture、per-key manifest、group commit 与 eager fallback 的第一性原理推导；下一章处理 manifest 发布前后 owner crash 的 WAL 与幂等恢复。
+- 当前主线：第 50 章已把 recapture 的活性边界补齐：absolute decision deadline 触发 per-key `EAGER_ONLY` final，迟到 READY 不得重开旧 generation，未提交 graph 必须经过 admission fence、replay lease drain 与 reclaim/reset witness 才能退出容量账本。下一章进入 graph pool 的物理回收证据与 recapture admission backpressure。
 
 ## 已完成章节
 
@@ -61,6 +61,8 @@
 | 2026-10-03 46 | `device completion unknown → context generation → backend reset witness → cross-backend golden` | [`44198f57`](https://github.com/vllm-project/vllm/commit/44198f577fe5cfb4b02297bf6ff7235eb31d742b) | [Reset 到底重置了谁]({{ '/articles/vllm-context-generation-backend-reset-witness/' | relative_url }}) |
 | 2026-10-05 47 | `ResetWitness → graph/address generation → preserve-or-recapture → replay admission` | [`13881005`](https://github.com/vllm-project/vllm/commit/138810056093301f4881050fcf2b1786939da387) | [Reset 以后 Graph 还能 replay 吗]({{ '/articles/vllm-cudagraph-address-generation-recapture-fence/' | relative_url }}) |
 | 2026-10-06 48 | `partial recapture → per-key local final → TP group commit → graph/eager admission` | [`97bd8c74`](https://github.com/vllm-project/vllm/commit/97bd8c74ebf12c3d847fb59f24966a83bf6f6920) | [Recapture 只成功一半怎么办]({{ '/articles/vllm-cudagraph-per-key-manifest-tp-group-commit-eager-fallback/' | relative_url }}) |
+| 2026-10-07 49 | `per-key manifest → durable intent/final → group CAS → live-handle validation → stale-final reconciliation` | [`db6e3cd8`](https://github.com/vllm-project/vllm/commit/db6e3cd8c4f9b84c39fe3c44fab0b1d3117f758b) | [Manifest 写了一半，Owner 崩了]({{ '/articles/vllm-recapture-wal-idempotent-publish-stale-final/' | relative_url }}) |
+| 2026-10-08 50 | `absolute deadline → EAGER_ONLY final → late-final fence → orphan graph retirement` | [`9e3e37cb`](https://github.com/vllm-project/vllm/commit/9e3e37cb3c041fa3cb7dc578bca1fa0a004b715a) | [Rank 一直不回怎么办]({{ '/articles/vllm-recapture-deadline-eager-only-orphan-graph-reclamation/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -391,6 +393,7 @@
 - `ElasticEPScalingExecutor._release_cuda_graphs/warm_and_capture`
 - `WorkspaceManager.lock/unlock`
 - `GraphGenerationToken/RecaptureFinal`（第 47 章建议协议，尚未合入）
+- `RecaptureDecisionDeadline/GraphKeyFinal/LocalGraphLease`（第 50 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -1168,3 +1171,36 @@
 - 建议协议（非当前实现）：`RecaptureIntent`、`RankKeyFinal`、`GroupKeyCommit`、stable `capture_id`、payload hash、per-key CAS、live graph registry/query 与 deterministic crash failpoint。
 - 新知识债：真实 schema、WAL frame/CRC/fsync、TP/PP transport、live registry、outer/inner/speculator rollback、owner election、per-domain HBM 计量、rank hang deadline、graph pool quarantine 与真机 crash golden。
 - 下一章：**Rank 一直不回怎么办——Recapture Deadline、Eager-only Final 与 Orphan Graph 回收。**
+
+## 第七次七章知识图谱回顾（第 43–49 章）
+
+- 第 43–44 章：`StepLease` 把 alive-but-stalled worker 变成有 deadline 的事实，supervisor 通过 epoch-fenced authority 执行 kill。
+- 第 45–46 章：KILL 后 device work 仍可能 completion unknown；只有 backend-scoped reset witness 才能推进 context generation。
+- 第 47–49 章：context/address generation 决定旧 graph 是否可 replay；per-key TP commit 隔离 partial recapture；WAL/CAS 让 owner crash 后幂等恢复并拒绝 stale final。
+- 路线调整：证据链已从“进程是否活着”推进到“哪一代地址上的哪个 graph key 可被哪些 rank 共同授权”。后续先补 deadline、eager-only 与 orphan 回收，再进入 graph-pool 物理容量和 recapture admission。
+
+## 第 50 章课程账本增量
+
+- 日期：2026-10-08
+- 章节：**Rank 一直不回怎么办：Recapture Deadline、Eager-only Final 与 Orphan Graph 回收**
+- 源码基线：[`9e3e37cb`](https://github.com/vllm-project/vllm/commit/9e3e37cb3c041fa3cb7dc578bca1fa0a004b715a)；相对第 49 章前进 61 个提交。当天合入的 [PR #56775](https://github.com/vllm-project/vllm/pull/56775) 调整的是 H200 CUDAGraph CI job 预算和选测范围，不是生产 recapture deadline。
+- 课程位置：`Recapture WAL → absolute decision deadline → EAGER_ONLY final → late-final fence → orphan retirement`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`：初始化调用 `model_executor.compile_or_warm_up_model`
+  - `vllm/v1/executor/abstract.py`：无 timeout 的 `Executor.compile_or_warm_up_model`
+  - `vllm/v1/executor/multiproc_executor.py`：`collective_rpc` 的 monotonic absolute deadline、remaining MQ timeout 与顺序收集
+  - `vllm/v1/worker/gpu/model_runner.py`：encoder → model → inner → speculator capture 顺序、workspace lock
+  - `vllm/v1/worker/gpu/cudagraph_utils.py`：FULL `graphs[desc]`、PIECEWISE capture、`_graphs_captured` 与 coarse `release_graphs`
+  - `vllm/compilation/breakable_cudagraph.py`：全进程 weak-set、`entries` 与 `clear_all_graphs`
+  - `tests/v1/executor/test_multiproc_executor.py`、`tests/v1/worker/test_gpu_model_runner_v2.py`、DeepSeek-V4.1 inner graph/DP padding tests
+- 新确认不变量：
+  1. RPC timeout 只结束 caller 等待；它不等于 per-key group final，也不证明 device capture 已停止。
+  2. 同 generation/key 的 `GRAPH_READY` 与 `EAGER_ONLY` 必须竞争一个 CAS；终态一旦提交，迟到 READY 只能对账与回收，不能重开 replay。
+  3. orphan 是“本地 executable 存在但没有 group admission”的资源状态；`_graphs_captured=False` 不代表 graph pool 未占用。
+  4. 安全回收顺序是 admission fence → replay lease drain → exact entry delete → reclaim witness；hung rank 只能由 process/context terminal/reset witness 收敛，否则容量继续 quarantine。
+  5. deadline 由 recovery SLO、分层 capture P99、publish 与 safety budget推导；execute-model 300 秒、源码 5–20 秒注释和 CI 45 分钟都不能直接复用。
+- 具体演算：TP=2、K8 model FULL 与 R128 inner PIECEWISE；K8 两 rank ready 后继续 replay，R128 在 r1 hang 时由 deadline CAS 为 `EAGER_ONLY`，r0 的 orphan 在 lease 归零后 retire，r1 的迟到 READY 只能触发本地清理。
+- 直接测试事实：draft-token RPC timeout 单测覆盖 remaining budget；workspace-lock 测试覆盖静态地址；R4 数值与 DP R512 padding 测试覆盖 inner graph 的运行期正确性。当前没有 warmup timeout、deadline/READY race、late final、per-key retire、shared-pool reclaim 或 context reset golden；本地环境缺少 `pytest`，本章未声称重跑测试。
+- 建议协议（非当前实现）：`RecaptureDecisionDeadline`、`GraphKeyFinal(GRAPH_READY/EAGER_ONLY)`、`LocalGraphLease`、replay refcount、reclaim/reset witness 与 fake-clock failpoint。
+- 新知识债：真实 schema/transport/timer、per-key FULL/PIECEWISE retire、capture progress sideband、graph-pool capacity census、allocator reclaim witness、quarantine backpressure、recapture storm admission 与 TP 真机 hang/canary。
+- 下一章：**Graph 删了，显存就回来了吗——Graph Pool Census、Reclaim Witness 与 Recapture Admission Backpressure。**
