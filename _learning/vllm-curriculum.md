@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 50 章已把 recapture 的活性边界补齐：absolute decision deadline 触发 per-key `EAGER_ONLY` final，迟到 READY 不得重开旧 generation，未提交 graph 必须经过 admission fence、replay lease drain 与 reclaim/reset witness 才能退出容量账本。下一章进入 graph pool 的物理回收证据与 recapture admission backpressure。
+- 当前主线：第 51 章已把 recapture 从逻辑回收推进到物理容量证据：区分 entry absence、shared-pool reusable、allocator cached 与 device free，只有 generation-bound `ReclaimWitness` 才能把容量返还 admission。下一章进入 benefit-per-byte 队列、水位和 anti-thrashing。
 
 ## 已完成章节
 
@@ -63,6 +63,7 @@
 | 2026-10-06 48 | `partial recapture → per-key local final → TP group commit → graph/eager admission` | [`97bd8c74`](https://github.com/vllm-project/vllm/commit/97bd8c74ebf12c3d847fb59f24966a83bf6f6920) | [Recapture 只成功一半怎么办]({{ '/articles/vllm-cudagraph-per-key-manifest-tp-group-commit-eager-fallback/' | relative_url }}) |
 | 2026-10-07 49 | `per-key manifest → durable intent/final → group CAS → live-handle validation → stale-final reconciliation` | [`db6e3cd8`](https://github.com/vllm-project/vllm/commit/db6e3cd8c4f9b84c39fe3c44fab0b1d3117f758b) | [Manifest 写了一半，Owner 崩了]({{ '/articles/vllm-recapture-wal-idempotent-publish-stale-final/' | relative_url }}) |
 | 2026-10-08 50 | `absolute deadline → EAGER_ONLY final → late-final fence → orphan graph retirement` | [`9e3e37cb`](https://github.com/vllm-project/vllm/commit/9e3e37cb3c041fa3cb7dc578bca1fa0a004b715a) | [Rank 一直不回怎么办]({{ '/articles/vllm-recapture-deadline-eager-only-orphan-graph-reclamation/' | relative_url }}) |
+| 2026-10-09 51 | `orphan retirement → graph-pool census → reclaim witness → recapture admission backpressure` | [`4274ae95`](https://github.com/vllm-project/vllm/commit/4274ae956c7df16b07f6d68ba400e6321de1f47e) | [Graph 删了，显存就回来了吗]({{ '/articles/vllm-cudagraph-pool-census-reclaim-witness-admission/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1204,3 +1205,31 @@
 - 建议协议（非当前实现）：`RecaptureDecisionDeadline`、`GraphKeyFinal(GRAPH_READY/EAGER_ONLY)`、`LocalGraphLease`、replay refcount、reclaim/reset witness 与 fake-clock failpoint。
 - 新知识债：真实 schema/transport/timer、per-key FULL/PIECEWISE retire、capture progress sideband、graph-pool capacity census、allocator reclaim witness、quarantine backpressure、recapture storm admission 与 TP 真机 hang/canary。
 - 下一章：**Graph 删了，显存就回来了吗——Graph Pool Census、Reclaim Witness 与 Recapture Admission Backpressure。**
+
+## 第 51 章课程账本增量
+
+- 日期：2026-10-09
+- 章节：**Graph 删了，显存就回来了吗：Pool Census、Reclaim Witness 与 Recapture Backpressure**
+- 源码基线：[`4274ae95`](https://github.com/vllm-project/vllm/commit/4274ae956c7df16b07f6d68ba400e6321de1f47e)；相对第 50 章前进 86 个提交，graph pool、profiling 与 release 主路径未变。已合入 [PR #59160](https://github.com/vllm-project/vllm/pull/59160) 提供 cuMem graph pool sleep/offload；[PR #59368](https://github.com/vllm-project/vllm/pull/59368) 与 [PR #51590](https://github.com/vllm-project/vllm/pull/51590) 截至本基线仍开放，仅作计划/实验证据。
+- 课程位置：`orphan retirement → graph-pool census → reclaim witness → recapture admission backpressure`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`、`vllm/v1/executor/abstract.py`：启动期 `determine_available_memory` 调用链
+  - `vllm/v1/worker/gpu_worker.py`：`Worker.determine_available_memory/compile_or_warm_up_model` 的 graph estimate、KV budget 与 actual/estimated comparison
+  - `vllm/v1/worker/gpu/model_runner.py`：`profile_cudagraph_memory/capture_model/shutdown`
+  - `vllm/v1/worker/gpu/cudagraph_utils.py`：`profile_cudagraph_memory`、throwaway pool、FULL sample/extrapolation、`CudaGraphManager.release_graphs`
+  - `vllm/compilation/cuda_graph.py`、`breakable_cudagraph.py`：entry→graph/capture→segments 引用链与 `clear_graphs`
+  - `vllm/compilation/cudagraph_pool.py`、`vllm/platforms/interface.py`：`capture_pool/get_global_graph_pool`
+  - `vllm/device_allocator/cumem.py`、`sleep_mode_backend.py`：`cudagraph` tag、physical unmap/remap、pool census 边界
+  - `vllm/utils/mem_utils.py`：`memory_reserved`、`get_memory_info` 与 pluggable allocator 观测差异
+  - profiling、cuMem pool 与 sleep-mode 直接测试；Elastic EP `_release_cuda_graphs`
+- 新确认不变量：
+  1. registry entry absence、`CUDAGraph`/capture tensors 失效、shared pool reusable bytes、allocator cached bytes 与 device free bytes 是不同状态。
+  2. shared global pool 按跨 graph 峰值复用；per-key capture delta 不可加总，也不可在单 key 删除后原样返还。
+  3. reclaim witness 必须绑定 worker attempt、context generation、pool id、domain/key、replay lease 和 allocator backend；未知只能 quarantine。
+  4. cuMem sleep 释放 physical mapping 但保留 VA/内容以便恢复，是 offload witness，不是永久 retire witness。
+  5. recapture 准入必须同时预算 active pool、orphan/quarantine、incremental capture peak、fragmentation 与 failure reserve。
+- 具体演算：直接测试以 64 MiB 临时 KV 加两个 64 MiB graph 验证 throwaway pool teardown 后 `memory_reserved` 回到 baseline；shared-pool 教学例中 K8/K16 共用 96 MiB segment，删除 K8 的 device-free 增量仍为 0，直到最后 graph/tensor 引用归零且 allocator 真正 release segment 才增加 96 MiB。
+- 直接测试事实：profiling suite 覆盖完整 throwaway cleanup、异常 teardown、wrapper pool 恢复和 speculator manager 丢弃；cuMem test 与 sleep E2E 覆盖原址 remap/replay、FULL/PIECEWISE/breakable/TP2；当前没有 `release_graphs()` 的直接测试或 per-key physical reclaim oracle。本地环境缺少 `pytest`，未声称重跑。
+- 建议协议（非当前实现）：`GraphPoolCensus`、generation-bound `ReclaimWitness(RECLAIMED/REUSED_IN_POOL/QUARANTINED)` 与 `headroom >= incremental_capture_peak + failure_reserve` admission gate。
+- 新知识债：pool-specific snapshot adapter、普通 allocator/cuMem 统一口径、per-key retire、replay refcount、fragmentation、TP group capacity aggregate、水位/backpressure、OOM 与 late-replay 真机 golden。
+- 下一章：**Pool 有空间也不能全抓——Benefit-per-byte、Recapture Queue 与 Anti-thrashing。**
