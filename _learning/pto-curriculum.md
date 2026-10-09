@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-08。
+最后更新：2026-10-09。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 59 已把 `RECOVERY_ONLY` 的退出边界闭合：durable revision 与权威状态同事务提交，notification 只作可丢失 hint；最后一次 owner-fenced CAS 同时发布 `NORMAL`、推进 revision 并换 admission generation，waiter 醒来后仍须重新检查容量与权限。下一步补 stable reason、transition audit 与 crash-replay trace。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 60 已把“revision 为什么前进”变成可机读因果：instruction trace 只描述执行，versioned stable reason 标识状态机边，`TransitionAudit` 将 owner/revision、evidence、前后 state hash 与资源差量绑定，并与 canonical state 原子提交；crash replay 按 revision 而非 timestamp 重建。下一步补 cross-backend correlation ID、causal link 与 native evidence join。
 
 ## 已完成章节
 
@@ -84,6 +84,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-06 | Recovery Debt、向量水位与 Fail-closed Admission | WAL/quarantine/evidence census → worst-case charge → recovery reserve → recovery-only drain | [课程 57]({% post_url 2026-10-06-pto-isa-recovery-debt-watermark-fail-closed-admission %}) |
 | 2026-10-07 | Cleanup Queue、保护性 Reserve 与无饥饿 Drain | durable task → vector reserve CAS → head claim / dependency inheritance → owner-fenced debt closure | [课程 58]({% post_url 2026-10-07-pto-isa-cleanup-queue-reserved-capacity-starvation-free-drain %}) |
 | 2026-10-08 | Durable Revision、无丢失唤醒与 NORMAL 交接 | durable result → revision watch → atomic mode/generation CAS → admission recheck | [课程 59]({% post_url 2026-10-08-pto-isa-durable-revision-no-lost-wake-recovery-normal-handoff %}) |
+| 2026-10-09 | Stable Reason、Transition Audit 与 Crash-replay Trace | instruction trace / evidence → owner-fenced rule → atomic state+audit → replay oracle | [课程 60]({% post_url 2026-10-09-pto-isa-stable-reason-transition-audit-crash-replay-trace %}) |
 
 ## ISA 知识地图
 
@@ -150,6 +151,7 @@ permalink: /learning/pto-curriculum/
 | TPipe component balance proof | component identity、单 endpoint borrow safety 与跨 endpoint transaction equality 是三份独立证明；最小 module analysis 应组合 sequence/branch/loop effect，并在 predicate/trip-count unknown 时 fail closed | 已完成源码边界与最小设计；实现和动态验证待补 |
 | CPU_SIM TPipe FIFO | `SharedState` 同时维护 cursor、occupied、direction、lane claim、busy 与 TileData byte storage；publish 到 final free 前 slot 不可复用，非空 GM workspace 不再切换 TileData payload backend | 已讲透 matched/跨环主路径；bounded negative fault injection 待补 |
 | CPU_SIM DIR_BOTH ownership | C2V/V2C 各有 `SlotNum` 容量与独立 payload/cursor/sync state；`commit_seq` 在 delayed free 后保持方向内 FIFO；untyped `TFREE` 按 `(direction,slot)` outstanding queue 归还最老 borrow | 正常路径已闭合；PipeEpoch/no-reset fault Golden 待补 |
+| CPU_SIM instruction trace / recovery audit | `InstructionTraceRecord` 记录 worker identity、worker-local sequence、opcode 与 Tile/Scalar operand；合并 JSONL 的 worker chunk 顺序不是全局因果时钟。恢复审计必须另以 owner/revision、stable reason、evidence hash、前后 state hash 与资源差量构成，并与 canonical state 原子提交 | 执行 trace 事实已验证；durable audit/schema/replay/correlation 待实现 |
 
 | VMI→VPTO physical memory legality | VMI logical value 经 layout assignment 后按 1:N 物理化；load 可在 `policy/warn` 下接受未证明的 full-chunk over-read，store 必须保持 exact semantic footprint；readable guard、defined fill 与 consumer observation 是三份证明 | 已讲透当前 VPTO 主路径；shared/EmitC contract 待补 |
 | PTOAddressAnalysis / MemoryAccessPlan | `PTOAddressAnalysis` 从 VPTO address-semantics op 构造 root、typed element/op offset，证明 byte/unit delta、同 root difference 与有限 remainder/alignment；它不证明 allocation extent、alias、coverage 或 fill。现有 `VMIMemoryAccessPlan` 是 VMIToVPTO 内部瞬时 plan，应演进为 shared intent + backend candidate，而非复制第二套地址求解器 | 分析能力边界已讲透；shared IR/provenance/parity 待实现 |
@@ -167,7 +169,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 durable revision/watch、atomic NORMAL handoff 与 generation-bound admission contract | ISA 深挖 33 |
+| pto-isa | [15a9e0a0](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 async recovery；新增 CPU_SIM instruction trace、stable reason、atomic transition audit 与 crash-replay contract | ISA 深挖 34 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -444,7 +446,7 @@ permalink: /learning/pto-curriculum/
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
 - Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–49 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery、admission 与 pressure-control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、device-wide `MemoryCensus`、scheduler-state charge、watermark state machine、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/OOM/A5 guard-page/canary/poison/性能矩阵。
-- TPipe recovery 主线已推进到 starvation-free cleanup、durable revision 与 atomic recovery-to-normal handoff；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor` schema、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、transition audit、reader lease、orphan GC、ENOSPC/partition/crash replay fault matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
+- TPipe recovery 主线已推进到 starvation-free cleanup、durable revision、atomic recovery-to-normal handoff 与 transition audit/replay contract；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor/StableReason/TransitionAudit` schema、canonical hash、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、reader lease、retention/redaction、cross-backend correlation、orphan GC、ENOSPC/partition/crash replay fault matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -454,7 +456,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：为 recovery state 增加 stable reason、transition audit 与 crash-replay trace，验证 revision/owner/mode/generation 的每次变化均可归因，并补 store partition、notify-before-crash 与 stale-owner Golden。
+1. 主线：为 CPU_SIM、A2/A3 与 A5 的 native trace/evidence 定义 correlation ID 与 causal link，把 operation、owner epoch、pipe generation、revision transition 串成可验证 evidence join，并补 store partition、notify-before-crash 与 stale-owner Golden。
 2. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -996,3 +998,20 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：本次执行 `python3 tests/run_cpu.py -t tpushpop`，构建 PASS，`tpushpop` 在本次环境中 85 ms PASS；现有回归证明进程内 FIFO、wait/notify、方向隔离与同步 reset，不证明 durable watch、notify-before-crash、owner takeover 或 atomic mode handoff。
 - 新知识债：真实 state/cursor/lease schema、linearizable store/watch、watch history/GC、跨进程 notification adapter、handoff CAS、device-wide gate 摘要、旧 generation lease 回收、stable reason/transition audit，以及 store partition、stale-owner、late-action 和 A2/A3/A5 真机 Golden。
 - 下一章：**Revision 前进了，谁改了什么——Stable Reason、Transition Audit 与 Crash-replay Trace。**
+
+## 第 60 章课程账本增量
+
+- 源码基线：pto-isa [`15a9e0a0`](https://github.com/hw-native-sys/pto-isa/commit/15a9e0a0845955f5d7a409a7f4d1609a263b5d25)；直接关联已合入 [PR #328](https://github.com/hw-native-sys/pto-isa/pull/328) / commit [`2f496bae`](https://github.com/hw-native-sys/pto-isa/commit/2f496baed82fffc3d823acba47dc12ad995b6bf9)，该变更恢复 trace wrapper、补 subblock identity 并完善多次 launch JSONL 回归。
+- 新覆盖文件与符号：`include/pto/cpu/trace.hpp` 的 `InstructionTraceRecord/State`、`ReserveInstructionTraceSequenceId`、`PtoInstrTraceScope`、`DumpInstructionTraceJson`；`include/pto/common/cpu_stub.hpp` 的 `LaunchKernelMultiCore`；`include/pto/cpu/TPush.hpp` 的 `SharedState`、`Producer::record` 与 `Consumer::free`。
+- 新覆盖建议对象：versioned `StableReason`、`TransitionAudit`、canonical before/after state hash、atomic state+audit transaction 与 crash-replay oracle。
+- 新确认不变量：
+  1. instruction trace 描述 data-plane 执行，transition audit 描述 control-plane authority change；二者只能以 digest/reference 关联，不能互相替代。
+  2. CPU_SIM `sequence_id` 是 worker-local；`LaunchKernelMultiCore` 按 worker chunk 合并文件不构成跨 worker 的 happens-before。
+  3. reason code 只选择状态机边，不证明 authority/evidence；transition 必须同时绑定 current owner epoch、previous/new revision、evidence 与前后 state hash。
+  4. canonical state、revision 与 audit record 必须原子提交；commit 前 crash 保留旧 revision，commit 后 notify 丢失仍可由 audit replay 得到新 state。
+  5. replay 按 `(owner_epoch,new_revision)` 而非 timestamp 排序；相同 transition ID/相同 payload 可幂等重放，冲突 payload、revision gap、未知 schema 或 hash mismatch 均 fail closed。
+  6. audit 不保存原始 Tile payload/凭据；checkpoint 只有在 state hash 覆盖 replay 结果且 reader/evidence 引用解除后才能截断历史。
+- 具体演算：`16×16xf32`、1024 B/Tile、`SlotNum=2`、`DIR_BOTH`，两向 capacity 合计 4096 B；以 r107 的 4 KiB WAL、1024 B quarantine 与 unknown `op7` 为起点，E7 evidence、C42 checkpoint 与 `RECOVERY_TO_NORMAL` 三条 audit 将状态推进到 `NORMAL@110/generation13`。commit 后 notify 丢失不改变 replay 结果，资源差量或 evidence hash 被篡改则 after-state hash 校验失败。
+- 直接测试事实：本次执行 `python3 tests/run_cpu.py -t ttrace --trace-mode`，构建 PASS，`ttrace` 13 ms PASS；执行 `python3 tests/run_cpu.py -t tpushpop`，构建 PASS，`tpushpop` 79 ms PASS。现有测试证明 trace schema/导出和正常 FIFO，不证明 durable audit、crash replay 或 cross-backend correlation。
+- 新知识债：真实 reason/audit schema、canonical hash 编码、事务 store、WAL frame/CRC、schema evolution、reader lease、retention/redaction、checkpoint cutoff、evidence registry、tamper/partition detection、cross-backend correlation，以及 A2/A3/A5 真机 Golden。
+- 下一章：**一条 Trace 怎样跨 Backend 串起来——Correlation ID、Causal Link 与 A2/A3/A5 Evidence Join。**
