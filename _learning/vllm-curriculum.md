@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 51 章已把 recapture 从逻辑回收推进到物理容量证据：区分 entry absence、shared-pool reusable、allocator cached 与 device free，只有 generation-bound `ReclaimWitness` 才能把容量返还 admission。下一章进入 benefit-per-byte 队列、水位和 anti-thrashing。
+- 当前主线：第 52 章已把 recapture 从容量安全推进到效用调度：静态 size coverage 与 largest-first pool reuse 不等于价值排序；建议按窗口净收益/当前 shared pool 的条件边际 bytes 排队，并以 hysteresis、最短驻留、cooldown 与 generation/census fence 抑制 capture storm。下一章进入 durable reservation ticket、owner takeover 与 leak recovery。
 
 ## 已完成章节
 
@@ -64,6 +64,7 @@
 | 2026-10-07 49 | `per-key manifest → durable intent/final → group CAS → live-handle validation → stale-final reconciliation` | [`db6e3cd8`](https://github.com/vllm-project/vllm/commit/db6e3cd8c4f9b84c39fe3c44fab0b1d3117f758b) | [Manifest 写了一半，Owner 崩了]({{ '/articles/vllm-recapture-wal-idempotent-publish-stale-final/' | relative_url }}) |
 | 2026-10-08 50 | `absolute deadline → EAGER_ONLY final → late-final fence → orphan graph retirement` | [`9e3e37cb`](https://github.com/vllm-project/vllm/commit/9e3e37cb3c041fa3cb7dc578bca1fa0a004b715a) | [Rank 一直不回怎么办]({{ '/articles/vllm-recapture-deadline-eager-only-orphan-graph-reclamation/' | relative_url }}) |
 | 2026-10-09 51 | `orphan retirement → graph-pool census → reclaim witness → recapture admission backpressure` | [`4274ae95`](https://github.com/vllm-project/vllm/commit/4274ae956c7df16b07f6d68ba400e6321de1f47e) | [Graph 删了，显存就回来了吗]({{ '/articles/vllm-cudagraph-pool-census-reclaim-witness-admission/' | relative_url }}) |
+| 2026-10-10 52 | `static size coverage → conditional marginal charge → utility queue → anti-thrashing` | [`7d1d8660`](https://github.com/vllm-project/vllm/commit/7d1d8660d620149bc4eadf795cbb80a1f884ddc2) | [Pool 有空间也不能全抓]({{ '/articles/vllm-cudagraph-benefit-per-byte-recapture-queue-antithrashing/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1233,3 +1234,30 @@
 - 建议协议（非当前实现）：`GraphPoolCensus`、generation-bound `ReclaimWitness(RECLAIMED/REUSED_IN_POOL/QUARANTINED)` 与 `headroom >= incremental_capture_peak + failure_reserve` admission gate。
 - 新知识债：pool-specific snapshot adapter、普通 allocator/cuMem 统一口径、per-key retire、replay refcount、fragmentation、TP group capacity aggregate、水位/backpressure、OOM 与 late-replay 真机 golden。
 - 下一章：**Pool 有空间也不能全抓——Benefit-per-byte、Recapture Queue 与 Anti-thrashing。**
+
+
+## 第 52 章课程账本增量
+
+- 日期：2026-10-10
+- 章节：**Pool 有空间也不能全抓：Benefit-per-byte、Recapture Queue 与 Anti-thrashing**
+- 源码基线：[`7d1d8660`](https://github.com/vllm-project/vllm/commit/7d1d8660d620149bc4eadf795cbb80a1f884ddc2)；相对第 51 章前进 139 个提交。直接相关历史变化包括 [PR #48483](https://github.com/vllm-project/vllm/pull/48483) 对大 capture size 的 profiling KV 峰值收紧，以及 [PR #53682](https://github.com/vllm-project/vllm/pull/53682) 对 throwaway graph pool 的完整隔离。
+- 课程位置：`reclaim witness → safe headroom → benefit-per-byte queue → hysteresis → stable graph set`
+- 新覆盖文件与符号：
+  - `vllm/config/vllm.py`：默认/显式 `cudagraph_capture_sizes` 的生成、裁剪、去重与分段步长
+  - `vllm/config/compilation.py`：`post_init_cudagraph_sizes`、`max_cudagraph_capture_size` 契约
+  - `vllm/v1/cudagraph_dispatcher.py`：`initialize_cudagraph_keys/get_capture_descs/dispatch`、padding map、FULL/PIECEWISE/eager 选择
+  - `vllm/v1/worker/gpu_worker.py`：`compile_or_warm_up_model` 的 compile-only warmup 与 capture 入口
+  - `vllm/v1/worker/gpu_model_runner.py`：`profile_cudagraph_memory/capture_model/_capture_cudagraphs`、shared-pool estimate 与 largest-first capture
+  - `tests/v1/cudagraph/test_cudagraph_dispatch.py`：静态 key 数、mode、无匹配 eager fallback 与 largest-first order
+- 新确认不变量：
+  1. 默认 capture-size 规则提供 coverage；它不读取命中率、padding waste、capture p99 或 per-key memory，因而不是 workload-optimal scheduler。
+  2. largest-first 只优化已选 graph 集合的 shared-pool 复用；它不能替代 candidate 的效用排序。
+  3. 未命中 graph key 时 `dispatch()` 安全返回 `CUDAGraphMode.NONE`，因此 cold key 可以继续 eager，无需为正确性强制 capture。
+  4. shared pool 中 candidate 的 charge 必须是 `peak(P∪{k})-peak(P)` 的条件边际峰值；standalone capture delta 不可直接加总。
+  5. reservation 必须绑定 graph generation、pool census revision 与 expected ranks；任一变化都使 ticket 失效并重新评估。
+  6. anti-thrashing 需要 enter/exit 双阈值、最短驻留、失败 cooldown、稳定 telemetry window 和有限 capture concurrency；具体阈值必须由实测 SLO/cost 校准。
+- 具体演算：60 秒窗口内 K1/K8/K16 分别为 30,000/12,000/500 hits；扣除 padding 与 capture p99 后，教学 score 为 65/7/0 ms·MiB⁻¹。在 20 MiB headroom 与 4 MiB failure reserve 下，先提交 4 MiB 的 K1，再按新 census revision 重算并提交 12 MiB 的 K8；K16 保持 eager。
+- 直接测试事实：dispatcher suite 验证 `[1,8]` 在 FULL/PIECEWISE/LoRA 组合下生成预期 key，size 8 命中、size 15 eager，以及 capture descriptors largest-first。当前没有运行期 recapture queue、条件边际 charge、hysteresis、reservation/OOM rollback、TP score/headroom divergence 或 capture-storm SLO 测试；本章未声称重跑 GPU 测试。
+- 建议协议（非当前实现）：`RecaptureCandidate`、benefit-per-byte score、generation/census-bound reservation、逐 commit 重算、enter/exit hysteresis、min-residency、cooldown 与 group-ready publish。
+- 新知识债：真实 candidate/ticket schema、per-key telemetry、条件 pool estimator、durable queue/owner、TP/PP 聚合、capture concurrency、replay refcount、fragmentation，以及 OOM/reset/late-final/traffic-oscillation 真机 Golden。
+- 下一章：**Ticket 扣了显存，Owner 崩了——Durable Reservation、Takeover Reconciliation 与 Leak Recovery。**
