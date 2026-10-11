@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 52 章已把 recapture 从容量安全推进到效用调度：静态 size coverage 与 largest-first pool reuse 不等于价值排序；建议按窗口净收益/当前 shared pool 的条件边际 bytes 排队，并以 hysteresis、最短驻留、cooldown 与 generation/census fence 抑制 capture storm。下一章进入 durable reservation ticket、owner takeover 与 leak recovery。
+- 当前主线：第 53 章已把 recapture queue 推进到 owner-crash 恢复：durable ticket 记录意图与 authority，但不能复活 worker-local graph；lease expiry 只转移协调权，budget 复用必须等待 epoch/generation-fenced worker query 与 pool reclaim witness。下一章进入 ledger、live handle 与 pool census 的 tri-source reconciliation、quarantine 和 auditable reclaim。
 
 ## 已完成章节
 
@@ -65,6 +65,7 @@
 | 2026-10-08 50 | `absolute deadline → EAGER_ONLY final → late-final fence → orphan graph retirement` | [`9e3e37cb`](https://github.com/vllm-project/vllm/commit/9e3e37cb3c041fa3cb7dc578bca1fa0a004b715a) | [Rank 一直不回怎么办]({{ '/articles/vllm-recapture-deadline-eager-only-orphan-graph-reclamation/' | relative_url }}) |
 | 2026-10-09 51 | `orphan retirement → graph-pool census → reclaim witness → recapture admission backpressure` | [`4274ae95`](https://github.com/vllm-project/vllm/commit/4274ae956c7df16b07f6d68ba400e6321de1f47e) | [Graph 删了，显存就回来了吗]({{ '/articles/vllm-cudagraph-pool-census-reclaim-witness-admission/' | relative_url }}) |
 | 2026-10-10 52 | `static size coverage → conditional marginal charge → utility queue → anti-thrashing` | [`7d1d8660`](https://github.com/vllm-project/vllm/commit/7d1d8660d620149bc4eadf795cbb80a1f884ddc2) | [Pool 有空间也不能全抓]({{ '/articles/vllm-cudagraph-benefit-per-byte-recapture-queue-antithrashing/' | relative_url }}) |
+| 2026-10-11 53 | `durable reservation → owner epoch takeover → worker/pool reconciliation → leak recovery` | [`276fbcff`](https://github.com/vllm-project/vllm/commit/276fbcff2717bd934cfa37c8a2e4c391f3e7237b) | [Ticket 扣了显存，Owner 崩了]({{ '/articles/vllm-cudagraph-durable-reservation-takeover-leak-recovery/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -397,6 +398,12 @@
 - `GraphGenerationToken/RecaptureFinal`（第 47 章建议协议，尚未合入）
 - `RecaptureDecisionDeadline/GraphKeyFinal/LocalGraphLease`（第 50 章建议协议，尚未合入）
 
+- `CUDAGraphEntry`、`CUDAGraphWrapper.__call__/clear_graphs`
+- `Executor.compile_or_warm_up_model`（all-worker collective capture boundary）
+- `GPUModelRunner.capture_model/_warmup_and_capture/_capture_cudagraphs`
+- `GPUModelRunner.profile_cudagraph_memory`（throwaway pool 与异常 teardown）
+- `ReservationTicket/owner_epoch/reclaim_witness`（第 53 章建议协议，尚未合入）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -610,6 +617,12 @@
 205. `data_ptr()` 数值相等不能排除 allocation/context ABA；跨 reset replay 必须绑定 execution generation，不能依赖偶然的 virtual-address reuse。
 206. Sleep Mode 保留 graph 的前提不是普通 reset，而是同一 worker/context 内 graph pool 内容与 virtual mapping 的原址备份恢复；不满足该 witness 时必须 recapture 或 eager。
 207. profiling graph 绑定 minimal KV 与 throwaway pool，只能用于估算；真实 KV 初始化后必须丢弃并重捕获，相同 descriptor 不能升级其 lifetime。
+208. `CUDAGraphEntry` 先于实际 capture 创建；entry 存在不是 local-ready witness，必须同时验证非空 live graph、descriptor 与当前地址代际。
+209. durable ticket 能恢复 intent、owner epoch 与 rank final，不能序列化或复活 worker 进程内的 `cudaGraphExec_t`；worker attempt 死亡必须 recapture 或 eager。
+210. reservation lease expiry 只转移协调 authority，不证明 shared pool 已释放；逻辑 budget 返还必须等待 generation/census-bound reclaim witness。
+211. coordinator crash 且 workers 存活时可以查询并续用 local graph；持有 handle 的 worker crash 时，同名 durable `LOCAL_DONE` 只能用于对账，不能授权 replay。
+212. Python registry 为空、graph handle 失效、pool 引用归零、allocator segment 可复用和 device-free bytes 上升是不同回收证据，不能互相越级替代。
+213. owner takeover 必须以单调 epoch fence 旧 publish；查询超时或 ledger/handle/pool 三方不一致时保持 reservation/quarantine 并走 eager。
 
 ## 前置依赖与版本注意
 
@@ -1007,7 +1020,7 @@
 
 ## 下一批候选章节
 
-1. 下一主线：Manifest 写了一半，Owner 崩了——Recapture WAL、Idempotent Publish 与 Stale-final Reconciliation。
+1. 下一主线：账、Handle 和 Pool 对不上时信谁——Tri-source Reconciliation、Quarantine 与 Auditable Reclaim。
 2. 恢复协议落地：durable `OwnerLease/KillIntent/MemberFinal` registry、MP/Ray/launcher `RecoveryAdapter` 与 reconciliation harness。
 3. 输出性能回访：真实慢读 socket、collector bytes/age、logprobs 长输出和 per-request budget。
 4. fan-in 回访：P>1×n>1 sampling streaming、单源异常/断连、admission rollback 与 task/KV 归零 E2E。
@@ -1261,3 +1274,29 @@
 - 建议协议（非当前实现）：`RecaptureCandidate`、benefit-per-byte score、generation/census-bound reservation、逐 commit 重算、enter/exit hysteresis、min-residency、cooldown 与 group-ready publish。
 - 新知识债：真实 candidate/ticket schema、per-key telemetry、条件 pool estimator、durable queue/owner、TP/PP 聚合、capture concurrency、replay refcount、fragmentation，以及 OOM/reset/late-final/traffic-oscillation 真机 Golden。
 - 下一章：**Ticket 扣了显存，Owner 崩了——Durable Reservation、Takeover Reconciliation 与 Leak Recovery。**
+
+## 第 53 章课程账本增量
+
+- 日期：2026-10-11
+- 章节：**Ticket 扣了显存，Owner 崩了：Durable Reservation、Takeover Reconciliation 与 Leak Recovery**
+- 源码基线：[`276fbcff`](https://github.com/vllm-project/vllm/commit/276fbcff2717bd934cfa37c8a2e4c391f3e7237b)；相对第 52 章前进到最新默认分支。直接证据包括已合入 [PR #53682](https://github.com/vllm-project/vllm/pull/53682) 的 throwaway-pool 修复；[PR #59160](https://github.com/vllm-project/vllm/pull/59160) 仅作为开放设计/实验材料，不视为当前 main 能力。
+- 课程位置：`utility winner → durable reservation → rank-local capture → owner crash → fenced reconciliation → commit 或 safe release`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`：启动期 `model_executor.compile_or_warm_up_model`
+  - `vllm/v1/executor/abstract.py`：`Executor.compile_or_warm_up_model` 与 all-worker `collective_rpc`
+  - `vllm/v1/worker/gpu_worker.py`：warmup、capture context 与 actual/estimated graph memory
+  - `vllm/v1/worker/gpu_model_runner.py`：`capture_model/_warmup_and_capture/_capture_cudagraphs/profile_cudagraph_memory`
+  - `vllm/compilation/cuda_graph.py`：`CUDAGraphEntry`、`CUDAGraphWrapper.__call__/clear_graphs`、input-address check 与 shared pool
+  - `tests/v1/cudagraph/test_cudagraph_dispatch.py`、`tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py`
+- 新确认不变量：
+  1. durable ticket 不能复活 process-local graph；worker attempt 死亡后旧 `LOCAL_DONE` 不得授权 replay。
+  2. lease expiry 只转移 authority；budget 释放必须等待 generation/census-bound reclaim witness。
+  3. coordinator-only crash 可查询存活 workers 后续跑；worker crash 必须 recapture/eager，二者不能共用恢复捷径。
+  4. entry absence、handle loss、pool refcount、allocator reusable bytes 与 device-free bytes 是不同证据。
+  5. dispatcher key 只在 all-rank group commit 后可见；旧 epoch 的迟到 final 只能诊断，不能发布。
+- 具体演算：TP=2、K8、generation 43/census revision 17，每 rank reservation 12 MiB；rank0 local capture 后 owner 崩溃。epoch 7 接管者查询存活 rank0、续抓 rank1 后可 group commit；若 rank0 worker 已死，则进入 `EAGER_ONLY/RELEASE_PENDING`，直到 reset/census witness 后才返还额度。
+- 直接测试事实：wrapper GPU 测试覆盖 capture→entry→replay 与 eager 一致、禁捕后 unseen key 报错；V2 profiling suite 覆盖 capture error teardown、counter 恢复、throwaway-pool redirect/restore 和物理释放。本章未重跑 GPU 测试。
+- 建议协议（非当前实现）：`ReservationTicket`、owner epoch/lease、rank-local live witness、takeover query、terminal CAS、`RELEASE_PENDING` 与 fail-closed eager。
+- 新知识债：真实 ticket/WAL schema、durable CAS backend、worker query API、pool revision/live-handle digest、V1/V2/encoder/speculator owner 统一、TP/PP expected-rank 变化、context reset witness、fragmentation 和 crash-at-every-boundary Golden。
+- 下一章：**账、Handle 和 Pool 对不上时信谁——Tri-source Reconciliation、Quarantine 与 Auditable Reclaim。**
+
