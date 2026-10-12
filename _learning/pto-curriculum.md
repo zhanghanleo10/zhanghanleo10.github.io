@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-11。
+最后更新：2026-10-12。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 62 已把 evidence closure 的失败面细分为 missing node/edge/participant、conflict 与 unknown schema：缺记录和 timeout 只产生 `UNKNOWN`，bounded reconciliation 依次执行 reload、native query、可信 scoped reset 或 quarantine；只有当前 owner 以 expected revision 应用 `Complete`/`ResetCovered` 后，allocator 才能复用对应 generation。下一步研究并发 reconciler 的 owner fence、revision CAS 与 late-witness linearization。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 63 已把 partial-graph reconciliation 收紧为两层并发协议：immutable evidence 允许多写者追加，canonical verdict/reset/free 只能由当前 owner 在 `owner_epoch + expected_revision` 双 fence 下单写；late witness 在 durable append 时成为事实，但不能跨 attempt/generation 或重新打开 terminal state。下一步研究 canonical CAS 与 allocator side effect 之间的失败原子性。
 
 ## 已完成章节
 
@@ -87,6 +87,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-09 | Stable Reason、Transition Audit 与 Crash-replay Trace | instruction trace / evidence → owner-fenced rule → atomic state+audit → replay oracle | [课程 60]({% post_url 2026-10-09-pto-isa-stable-reason-transition-audit-crash-replay-trace %}) |
 | 2026-10-10 | Correlation ID、Causal Link 与 Evidence Join | native trace/flag/semaphore → stable identity → typed causal DAG → backend closure → audit | [课程 61]({% post_url 2026-10-10-pto-isa-correlation-id-causal-link-evidence-join %}) |
 | 2026-10-11 | Partial Graph、Missing Witness 与 Fail-closed Reconciliation | frozen contract → deficit census → bounded reconciliation → complete/reset-covered/quarantine | [课程 62]({% post_url 2026-10-11-pto-isa-partial-graph-missing-witness-fail-closed-reconciliation %}) |
+| 2026-10-12 | Owner Fence、Revision CAS 与 Late-witness Linearization | immutable evidence append → deterministic join → epoch/revision CAS → one terminal state | [课程 63]({% post_url 2026-10-12-pto-isa-owner-fence-revision-cas-late-witness-linearization %}) |
 
 ## ISA 知识地图
 
@@ -123,6 +124,7 @@ permalink: /learning/pto-curriculum/
 | Recovery debt / fail-closed admission | WAL bytes、quarantine backing、unresolved evidence 与 compaction lag 不可折成单一百分比；普通工作必须预付峰值与 failure expansion，checkpoint/reset/compaction 也必须从受保护 reserve 预占临时资源。`λ_d≥μ_d` 持续成立时 watermark 无法创造稳定性 | 向量 census、hard gate 与 recovery-only 边界已讲透；schema、atomic reserve、revision wake 与压力 Golden 待实现 |
 | Cleanup queue / starvation-free drain | recovery task 也必须按多维 peak 原子预占；最老 runnable task 的保护性声明禁止年轻任务侵占其必需 reserve，被前置条件阻塞时由 prerequisite 继承 ticket。owner lease 失效只撤销 apply/free 权，不证明物理 action 已终止 | 调度不变量与 crash 边界已讲透；真实 schema、CAS、fairness/设备 Golden 待实现 |
 | Durable revision / recovery handoff | revision 与 canonical recovery state 同事务推进；watch/notify 只触发 full reload。`RECOVERY_ONLY→NORMAL` 以 owner/revision 为 expected value，原子关闭 critical debt、归还 cleanup reserve并换 admission generation | 跨 crash no-lost-wake 与 handoff 不变量已讲透；store/watch/schema、audit 与 Golden 待实现 |
+| Concurrent evidence reconciliation | immutable evidence 可由 adapter/late query 多写者幂等追加；canonical verdict、reset 与 allocator free 必须由当前 owner 以 `owner_epoch + expected_revision` CAS 单写。late witness 不跨 attempt/generation，也不重新打开 `Complete/ResetCovered` | owner fence、revision CAS 与线性化边界已讲透；store/schema、action idempotency 与 fault Golden 待实现 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -173,7 +175,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [418de18d](https://github.com/hw-native-sys/pto-isa/commit/418de18dde8fa33773dc5c384fdfe5506463b628) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 CPU_SIM worker-local trace、A2/A3 mode2 FFTS、A5 per-subblock/per-pipe sync，以及 correlation/causal/evidence-closure、partial-graph census 与 fail-closed reconciliation contract | ISA 深挖 36 |
+| pto-isa | [418de18d](https://github.com/hw-native-sys/pto-isa/commit/418de18dde8fa33773dc5c384fdfe5506463b628) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 CPU_SIM worker-local trace、A2/A3 mode2 FFTS、A5 per-subblock/per-pipe sync，以及 correlation/causal/evidence-closure、partial-graph census、owner fence、revision CAS 与 late-witness linearization contract | ISA 深挖 37 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -182,6 +184,7 @@ permalink: /learning/pto-curriculum/
 
 ## 已确认接口与不变量
 
+- immutable evidence append 与 canonical state apply 是两个线性化域：前者允许 validated multi-writer/idempotent duplicate，后者连同 reset/free 必须以 `owner_epoch + expected_revision` CAS 单写；late witness 不跨 attempt/generation，也不重开 terminal state。
 - missing trace/event/semaphore witness 只能证明当前 evidence set 不闭合，不能证明 native action 未发生；timeout 是控制事件，不是 negative witness。
 - reconciliation 必须按 frozen contract 重放 identity、schema、digest 与 backend topology closure；late witness 只属于原 attempt，wrong-generation/unknown-schema/conflict 均保持 `UNKNOWN/quarantine`。
 - `Complete` 与 `ResetCovered` 必须分开：前者可证明 computation closure，后者只在 scope 覆盖全部 participant/pipeline/generation 时证明旧动作不再触碰 backing。
@@ -1068,3 +1071,22 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：本次执行 `python3 tests/run_cpu.py -t ffts`，构建 PASS，`ffts` 317 ms PASS；执行 `python3 tests/run_cpu.py -t ttrace --trace-mode`，构建 PASS，`ttrace` 46 ms PASS。现有测试证明 mode2 credit、隔离/reset/3000 轮可见性和多 worker trace 导出，不证明建议的 partial graph、A5 fault closure 或 crash reconciliation。
 - 新知识债：真实 schema/registry、register-before-submit 事务、canonical encoding、native query/reset adapter、A5 repeated/late/wrong-sem、action-before-append crash failpoint、owner-fenced CAS、retention/redaction 与 A2/A3/A5 真机 differential Golden。
 - 下一章：**两个 Reconciler 同时补同一张图怎么办——Owner Fence、Revision CAS 与 Late-witness Linearization。**
+
+## 第 63 章课程账本增量
+
+- 源码基线：pto-isa [`418de18d`](https://github.com/hw-native-sys/pto-isa/commit/418de18dde8fa33773dc5c384fdfe5506463b628)，默认分支相对第 62 章未变化；最新已合入同步为 [PR #342](https://github.com/hw-native-sys/pto-isa/pull/342)，trace 直接关联已合入 [PR #328](https://github.com/hw-native-sys/pto-isa/pull/328)。[PR #343](https://github.com/hw-native-sys/pto-isa/pull/343) 截至基线仅作后续同步计划，不作为当前代码事实。
+- 新覆盖文件与符号：`include/pto/cpu/TPush.hpp` 的 `SharedStateStorage.init_state`、`EnsureSharedStateInitialized`、`SharedState.mutex/cv/commit_seq` 与 `reset_for_cpu_sim`；`include/pto/cpu/trace.hpp` 的 thread-local `InstructionTraceState`、`ReserveInstructionTraceSequenceId`、`Append/CopyInstructionTraceRecords`；`include/pto/common/event.hpp` 的 `EventIdCounter`；A2/A3 与 A5 `TSync.hpp`。
+- 新覆盖建议对象：`ReconcileLease`、generation-bound `CanonicalState`、immutable evidence log、owner-epoch/revision CAS、terminal action ID 与 late-witness audit。
+- 新确认不变量：
+  1. CPU_SIM initialization CAS、mutex、condition variable、FIFO `commit_seq` 和 worker-local trace sequence 都有明确进程/对象作用域，不能冒充 durable recovery revision。
+  2. validated immutable evidence 可以多写者追加；同 ID/同 digest 幂等，同 ID/不同 digest 必须 conflict/quarantine。
+  3. canonical verdict、destructive reset 与 allocator free 必须由当前 owner 以 `owner_epoch + expected_revision` 同事务 CAS；epoch 防 stale owner，revision 防 lost update。
+  4. lease expiry 只撤销 apply/free authority，不取消已提交 query/reset；迟到返回可追加事实，但产生它的 stale reconciler 无权 apply。
+  5. late witness 只闭合原 attempt/generation；`Complete` 或 `ResetCovered` terminal 后只能补 audit，不重新提交业务结果或重新打开 attempt。
+  6. evidence durable append 与 canonical CAS 是两个线性化点；网络到达时间、trace 文件顺序、event/semaphore ID 与 timeout 均不能替代。
+- 具体演算：`16×16xf32` ND Tile=1024 B，双槽 backing=2048 B；`PARTIAL@r107/owner42` 缂 `AIV1/sem19→join`。owner42 的 Q8 在 owner43 接管后返回并追加 r108；旧 owner CAS 被 epoch fence 拒绝，owner43 基于 r108 提交 `COMPLETE@r109`，backing 只释放一次。若 `RESET_COVERED` 先 terminal，迟到 computation witness 只进 audit，新结果必须 attempt3 重算。
+- 直接测试事实：本次执行 `python3 tests/run_cpu.py -t ffts`，Release 构建 PASS，`ffts` 216 ms PASS；执行 `python3 tests/run_cpu.py -t ttrace --trace-mode`，Release 构建 PASS，`ttrace` 11 ms PASS。现有回归证明进程内 mode2 credit/可见性、lane 隔离/reset 和 worker-local trace/export，不证明 durable owner fence、CAS、store partition、late witness 或 allocator exactly-once。
+- 建议协议（非当前实现）：multi-writer immutable fact layer + deterministic join + single-writer `owner_epoch/revision` state layer；terminal state 单调，allocator 只消费 canonical result。
+- 新知识债：真实 lease/state/evidence schema、linearizable store、atomic epoch/revision CAS、action idempotency、canonical root、adapter signature、lease 校准、conflict resolution、allocator consume/repair，以及 partition/stale-owner/late-witness/A5 真机 Golden。
+- 下一章：**CAS 成了，Free 失败怎么办——Idempotent Apply、Compensation Record 与 Capacity Ledger Repair。**
+
