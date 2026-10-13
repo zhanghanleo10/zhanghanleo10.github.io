@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 54 章已把 owner-crash 恢复推进到三源对账：ledger 证明 authority，worker-local handle 证明 replayability，pool census 证明 reclaimability；恢复必须分别产出 `ReplayVerdict` 与 `CapacityVerdict`，证据冲突先 quarantine。下一章进入 quarantine deadline、升级阶梯与最小故障域 reset。
+- 当前主线：第 55 章把 tri-source quarantine 从静态状态推进为有界恢复流程：deadline 只终止等待，不生成 reclaim witness；数据面先按 key 降级 eager，再依据 lease、handle、pool、context 与 rank generation 证据按 `KEY → WRAPPER → POOL/WORKER → TP REPLICA → ENGINE` 扩大 reset scope。下一章进入 reset 后的 warmup admission、canary replay 与自动 rollback。
 
 ## 已完成章节
 
@@ -67,6 +67,7 @@
 | 2026-10-10 52 | `static size coverage → conditional marginal charge → utility queue → anti-thrashing` | [`7d1d8660`](https://github.com/vllm-project/vllm/commit/7d1d8660d620149bc4eadf795cbb80a1f884ddc2) | [Pool 有空间也不能全抓]({{ '/articles/vllm-cudagraph-benefit-per-byte-recapture-queue-antithrashing/' | relative_url }}) |
 | 2026-10-11 53 | `durable reservation → owner epoch takeover → worker/pool reconciliation → leak recovery` | [`276fbcff`](https://github.com/vllm-project/vllm/commit/276fbcff2717bd934cfa37c8a2e4c391f3e7237b) | [Ticket 扣了显存，Owner 崩了]({{ '/articles/vllm-cudagraph-durable-reservation-takeover-leak-recovery/' | relative_url }}) |
 | 2026-10-12 54 | `ledger + live handle + pool census → dual verdict → quarantine → auditable reclaim` | [`cc9b0f09`](https://github.com/vllm-project/vllm/commit/cc9b0f097d49abfa6fc94d1d773dca1cc2b9619c) | [账、Handle 和 Pool 对不上时信谁]({{ '/articles/vllm-cudagraph-tri-source-reconciliation-quarantine-auditable-reclaim/' | relative_url }}) |
+| 2026-10-13 55 | `tri-source quarantine → evidence/capacity/service deadlines → scope ladder → fresh-generation reconciliation` | [`f47792af`](https://github.com/vllm-project/vllm/commit/f47792af7fba76eb8e8f6a564b35cfad316d39f2) | [Quarantine 不能无限长]({{ '/articles/vllm-cudagraph-quarantine-deadline-escalation-minimal-reset/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -404,6 +405,11 @@
 - `GPUModelRunner.capture_model/_warmup_and_capture/_capture_cudagraphs`
 - `GPUModelRunner.profile_cudagraph_memory`（throwaway pool 与异常 teardown）
 - `ReservationTicket/owner_epoch/reclaim_witness`（第 53 章建议协议，尚未合入）
+- `CudagraphDispatcher.dispatch` 与 `GPUModelRunner force_eager`（per-batch eager gate）
+- `CUDAGraphWrapper.clear_graphs/clear_all_graphs`（wrapper 级逻辑 retirement）
+- `CuMemAllocator.discard/wake_up`、`CuMemBackend.suspend/discard/preserves_communicators`
+- `GPUWorker.sleep/wake_up/discard`、`EngineCore.shutdown/run_engine_core`
+- `QuarantineRecord/ResetAttempt/DeadlineDecision`（第 55 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -624,6 +630,13 @@
 211. coordinator crash 且 workers 存活时可以查询并续用 local graph；持有 handle 的 worker crash 时，同名 durable `LOCAL_DONE` 只能用于对账，不能授权 replay。
 212. Python registry 为空、graph handle 失效、pool 引用归零、allocator segment 可复用和 device-free bytes 上升是不同回收证据，不能互相越级替代。
 213. owner takeover 必须以单调 epoch fence 旧 publish；查询超时或 ledger/handle/pool 三方不一致时保持 reservation/quarantine 并走 eager。
+214. quarantine deadline 只授权“停止等待并选择下一动作”，不能把 `UNKNOWN` 升级为 `RECLAIMED`，也不能替代 handle retirement、lease drain 或 allocator witness。
+215. service state 与 capacity state 必须分离：某 graph key 可以 `EAGER_ONLY` 继续服务，同时旧 reservation 保持 `HELD/UNKNOWN`。
+216. reset 前必须先 fence new replay、drain generation-bound lease，再 retire handle、执行 allocator/context action，最后读取 fresh census；倒序会与在途 replay 形成 use-after-retire/unmap。
+217. `CUDAGraphWrapper.clear_graphs` 只清当前 wrapper entry，`clear_all_graphs` 清本进程所有 wrapper；二者都不是 physical-memory reclaim witness，也不是 per-key API。
+218. `CuMemAllocator.discard("cudagraph")` 的作用域是当前 allocator 中该 tag 的全部 mapped allocation，不是单个 `BatchDescriptor`；记录 reset scope 时不得降格为 KEY。
+219. 最小故障域是恢复全部被破坏不变量所需的最小真实作用域：key routing、wrapper entries、worker context、TP rank/communicator generation 与 engine control state 分层判断。
+220. reset 完成后仍需 current owner/revision、fresh worker attempt/context generation、expected-rank handshake、旧 lease=0 与同 revision pool/allocator census 才能结束 quarantine 和返还预算。
 
 ## 前置依赖与版本注意
 
@@ -682,6 +695,7 @@
 - Multiproc、Ray V2、legacy Ray 的主路径已对照；仍缺 `TP>1 × PP>1` 故障注入、非输出 rank exception aggregation、external launcher output ownership 与各 backend connector sideband 的统一 contract。
 - `_post_process_cudagraph_mode` 缺少 DP mixed-mode 直接单测；尚无 `DP=2 × TP=2` 下 FULL/PIECEWISE/NONE 收敛与 collective trace 对称性的 CI guard。
 - production 路径通常不检查 graph replay 输入 `data_ptr`；stale 地址、workspace resize 与多 stream 共享 graph pool 的 fail-fast 边界尚未建立。
+- 缺少真实 `QuarantineRecord/ResetAttempt`、dispatcher generation health gate、per-key retire、generation-bound replay lease、fake-clock 多 deadline controller、pool/key attribution、worker/replica reset adapter，以及 late witness、二次崩溃、partial-rank reset 和 supervisor fail-stop Golden。
 - CUDA Graph padding 的额外 FLOPs、DP all-reduce 同步点、capture pool 显存与 P99 收益缺少按 prefill/decode 分层的实测。
 - 缺少真实 decoder layer partition topology golden；operator rename、新 custom op 或条件分支可能改变 split 拓扑而 CI 不报错。
 - 缺少 attention output alias/poison 测试，以及 KV update→attention 在 AOT cache load、TP collective 与 CUDA Graph replay组合下的顺序 guard。
@@ -1326,4 +1340,31 @@
 - 建议协议（非当前实现）：`GraphLedgerRecord`、`LiveGraphReport`、`PoolCensus`、`ReplayVerdict`、`CapacityVerdict` 与 generation-bound `ReclaimRecord`。
 - 新知识债：snapshot/RPC schema、dispatcher generation gate、replay lease、pool revision/per-key 条件边际归因、backend-neutral census、审计保留期、quarantine deadline、普通 allocator/cuMem 统一，以及 crash/sleep/reset 交叉 Golden。
 - 下一章：**Quarantine 不能无限长——Deadline、Escalation 与最小故障域 Reset。**
+
+## 第 55 章课程账本增量
+
+- 日期：2026-10-13
+- 章节：**Quarantine 不能无限长：Deadline、Escalation 与最小故障域 Reset**
+- 源码基线：[`f47792af`](https://github.com/vllm-project/vllm/commit/f47792af7fba76eb8e8f6a564b35cfad316d39f2)，为研究时默认分支最新提交；相对起草基线 `98f72111` 只新增 ROCm MLA/DCP prefill 与 dummy weight dtype-aware 初始化相关文件，本文核对的 dispatcher、wrapper、allocator、worker、engine 与测试文件未变化。未合入 [PR #54553](https://github.com/vllm-project/vllm/pull/54553) 仅作为 fatal teardown 有界 fail-stop 的规划证据。
+- 课程位置：`tri-source reconciliation → quarantine → evidence/capacity/service deadlines → scope-aware reset → fresh-generation reconciliation`
+- 新覆盖文件与符号：
+  - `vllm/v1/cudagraph_dispatcher.py`：`dispatch` 的 `NONE` fallback、FULL exact key 与 PIECEWISE relaxed key
+  - `vllm/v1/worker/gpu_model_runner.py`：`force_eager` 与 forward-context dispatch 边界
+  - `vllm/compilation/cuda_graph.py`：`clear_graphs/clear_all_graphs`、entry dictionary 与 global graph pool
+  - `vllm/device_allocator/cumem.py`、`sleep_mode_backend.py`：tag-scoped discard、unmap、asleep/remap 与 communicator capability
+  - `vllm/v1/worker/gpu_worker.py`：sleep/wake/discard 与 ROCm 5 秒 memory observation loop
+  - `vllm/v1/engine/core.py`：`EngineCore.shutdown` 与 fatal finally teardown
+  - dispatcher、profiling teardown、cuMem selective discard 与 sleep-mode graph-pool 测试
+- 新确认不变量：
+  1. deadline 只结束原地等待；没有 fresh witness 时 verdict 仍为 `UNKNOWN`，只能 query、drain、扩大 reset scope 或 fail-stop。
+  2. `EAGER_ONLY` 是服务路径 verdict，不是容量回收证明；旧 reservation 在 handle/pool 证据闭合前继续占账。
+  3. 安全顺序是 fence new replay → drain leases → retire handles → allocator/context action → fresh census。
+  4. 当前公开 graph clear 是 wrapper/process-wide 逻辑清理，`discard("cudagraph")` 是 tag-wide unmap；都不是 per-key reclaim API。
+  5. 单 rank context 重建会使 collective graph/communicator generation 失配；expected rank set 不能闭合时最小安全域上升到整个 TP replica。
+  6. reset 成功后仍需 generation、rank handshake、lease=0 与 pool census 同 revision 对账，才能结束 quarantine。
+- 具体演算：TP=2、K8、旧 generation43，每 rank reservation 12 MiB、合计24 MiB；rank0 仍有2条 replay lease，rank1已换 worker attempt。K8 先降 eager，lease drain 后只能按真实 WRAPPER scope 清 entry；96 MiB shared pool 无法 per-key 归因时扩大到 `cudagraph` tag/worker，rank generation 不一致时再扩大到 TP replica。只有 generation44 与 fresh census 全部闭合才结束旧 charge。
+- 直接测试事实：dispatcher test 用 capture sizes `[1,8]` 验证 FULL/PIECEWISE/NONE 与 `valid_modes={NONE}`；wrapper test 用 `BatchDescriptor(num_tokens=10)` 验证 capture→replay/eager bypass；profiling suite 验证异常 teardown、clear 与 throwaway-pool 释放；cuMem/sleep tests 覆盖 tag selective discard、FULL/PIECEWISE/breakable、TP1/TP2 与分阶段 wake。当前没有 deadline controller、per-key retirement、partial-rank reset 或 supervisor restart Golden；本章未声称重跑 GPU 测试。
+- 建议协议（非当前实现）：`QuarantineRecord`、`ResetAttempt`、三类 deadline、generation-bound lease 与 `KEY → WRAPPER → POOL/WORKER → REPLICA → ENGINE` 升级阶梯。
+- 新知识债：真实 schema/store、timer wheel、capacity trend estimator、per-key pool attribution、worker/replica reset API、late-witness CAS、reset 二次崩溃、continuously escalating idempotency 与 crash×sleep×collective fault matrix。
+- 下一章：**Reset 后不能立刻全量接流——Warmup Admission、Canary Replay 与自动 Rollback。**
 
