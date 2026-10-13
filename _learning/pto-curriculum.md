@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-12。
+最后更新：2026-10-13。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 63 已把 partial-graph reconciliation 收紧为两层并发协议：immutable evidence 允许多写者追加，canonical verdict/reset/free 只能由当前 owner 在 `owner_epoch + expected_revision` 双 fence 下单写；late witness 在 durable append 时成为事实，但不能跨 attempt/generation 或重新打开 terminal state。下一步研究 canonical CAS 与 allocator side effect 之间的失败原子性。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 64 从 PTO `TFREE` 的 backend-specific credit 语义出发，把 terminal canonical CAS 与外部 release 副作用拆成独立线性化点：durable apply outbox 先记录意图，native witness 后才返还 capacity；ambiguous non-idempotent action 必须 generation fence、compensation 与 fresh census，不能盲重试或回滚 terminal verdict。下一步研究补偿动作自身失败时的 bounded quarantine、orphan action GC 与长期容量回收。
 
 ## 已完成章节
 
@@ -88,6 +88,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-10 | Correlation ID、Causal Link 与 Evidence Join | native trace/flag/semaphore → stable identity → typed causal DAG → backend closure → audit | [课程 61]({% post_url 2026-10-10-pto-isa-correlation-id-causal-link-evidence-join %}) |
 | 2026-10-11 | Partial Graph、Missing Witness 与 Fail-closed Reconciliation | frozen contract → deficit census → bounded reconciliation → complete/reset-covered/quarantine | [课程 62]({% post_url 2026-10-11-pto-isa-partial-graph-missing-witness-fail-closed-reconciliation %}) |
 | 2026-10-12 | Owner Fence、Revision CAS 与 Late-witness Linearization | immutable evidence append → deterministic join → epoch/revision CAS → one terminal state | [课程 63]({% post_url 2026-10-12-pto-isa-owner-fence-revision-cas-late-witness-linearization %}) |
+| 2026-10-13 | Idempotent Apply、Compensation Record 与 Capacity Ledger Repair | terminal CAS → durable apply outbox → native witness/compensation → exactly-once capacity repair | [课程 64]({% post_url 2026-10-13-pto-isa-idempotent-apply-compensation-capacity-ledger-repair %}) |
 
 ## ISA 知识地图
 
@@ -125,6 +126,7 @@ permalink: /learning/pto-curriculum/
 | Cleanup queue / starvation-free drain | recovery task 也必须按多维 peak 原子预占；最老 runnable task 的保护性声明禁止年轻任务侵占其必需 reserve，被前置条件阻塞时由 prerequisite 继承 ticket。owner lease 失效只撤销 apply/free 权，不证明物理 action 已终止 | 调度不变量与 crash 边界已讲透；真实 schema、CAS、fairness/设备 Golden 待实现 |
 | Durable revision / recovery handoff | revision 与 canonical recovery state 同事务推进；watch/notify 只触发 full reload。`RECOVERY_ONLY→NORMAL` 以 owner/revision 为 expected value，原子关闭 critical debt、归还 cleanup reserve并换 admission generation | 跨 crash no-lost-wake 与 handoff 不变量已讲透；store/watch/schema、audit 与 Golden 待实现 |
 | Concurrent evidence reconciliation | immutable evidence 可由 adapter/late query 多写者幂等追加；canonical verdict、reset 与 allocator free 必须由当前 owner 以 `owner_epoch + expected_revision` CAS 单写。late witness 不跨 attempt/generation，也不重新打开 `Complete/ResetCovered` | owner fence、revision CAS 与线性化边界已讲透；store/schema、action idempotency 与 fault Golden 待实现 |
+| Idempotent apply / capacity repair | `TFREE` 是 backend-specific FIFO credit release：A2/A3 TileData 随 `TPOP`，A5 可显式 signal，CPU_SIM 依 outstanding queue。terminal CAS、native receipt 与 ledger release 是三个线性化点；unknown action 必须 fence/reset/census 后修复，不能 blind retry | outbox/compensation/ledger contract 已闭合；durable schema、queryable receipt、fault injection 与真机 Golden 待实现 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -175,7 +177,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [418de18d](https://github.com/hw-native-sys/pto-isa/commit/418de18dde8fa33773dc5c384fdfe5506463b628) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 CPU_SIM worker-local trace、A2/A3 mode2 FFTS、A5 per-subblock/per-pipe sync，以及 correlation/causal/evidence-closure、partial-graph census、owner fence、revision CAS 与 late-witness linearization contract | ISA 深挖 37 |
+| pto-isa | [6a50f62b](https://github.com/hw-native-sys/pto-isa/commit/6a50f62b0695d7c2ae9a46a8f7ca70ca7a29780e) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 A2/A3/A5/CPU_SIM `TFREE` release-point 对齐、apply outbox、compensation record、capacity ledger repair 与 ack-loss/duplicate-free failure contract | ISA 深挖 38 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -189,6 +191,9 @@ permalink: /learning/pto-curriculum/
 - reconciliation 必须按 frozen contract 重放 identity、schema、digest 与 backend topology closure；late witness 只属于原 attempt，wrong-generation/unknown-schema/conflict 均保持 `UNKNOWN/quarantine`。
 - `Complete` 与 `ResetCovered` 必须分开：前者可证明 computation closure，后者只在 scope 覆盖全部 participant/pipeline/generation 时证明旧动作不再触碰 backing。
 - allocator 只消费当前 owner 以 expected revision 原子应用的 canonical state；adapter、joiner、timeout 或 notify 均无权直接释放资源。
+- canonical terminal verdict、native release receipt 与 capacity ledger release 是三个线性化点；durable outbox 先记录 action 意图，只有强 witness 或 generation-fenced reset census 才能把 capacity entry 幂等转为 released。
+- `TFREE` 归还 TPipe FIFO credit，不是任意 HBM free；A2/A3 TileData release 折叠在 `TPOP`，A5 explicit signal 不是自幂等操作，CPU_SIM outstanding queue 也不提供跨 crash durable receipt。
+- ambiguous non-idempotent apply 不能 blind retry、不能回滚已提交 terminal verdict，也不能按“预期差量”返还容量；必须保留 `RELEASE_PENDING`、fence 旧 generation，并以补偿记录和 fresh census 修复 ledger。
 
 - 跨 backend 证据连接必须先匹配 stable `operation_id + attempt_id + owner_epoch + execution_domain + workspace_generation + backend_profile`，再验证 causal edge；physical event ID、地址、worker sequence 与 timestamp 都不能替代时间身份。
 - logical causal DAG 可以统一，native topology 不可抹平：A2/A3 mode2 broadcast/reduce 压缩多条逻辑边；A5 必须逐 subblock、逐 pipe 验证 closure；CPU_SIM 跨 worker edge 必须由 launch/event adapter 提供。
@@ -1089,4 +1094,21 @@ permalink: /learning/pto-curriculum/
 - 建议协议（非当前实现）：multi-writer immutable fact layer + deterministic join + single-writer `owner_epoch/revision` state layer；terminal state 单调，allocator 只消费 canonical result。
 - 新知识债：真实 lease/state/evidence schema、linearizable store、atomic epoch/revision CAS、action idempotency、canonical root、adapter signature、lease 校准、conflict resolution、allocator consume/repair，以及 partition/stale-owner/late-witness/A5 真机 Golden。
 - 下一章：**CAS 成了，Free 失败怎么办——Idempotent Apply、Compensation Record 与 Capacity Ledger Repair。**
+
+## 第 64 章课程账本增量
+
+- 源码基线：pto-isa [`6a50f62b`](https://github.com/hw-native-sys/pto-isa/commit/6a50f62b0695d7c2ae9a46a8f7ca70ca7a29780e)，合入 [PR #343](https://github.com/hw-native-sys/pto-isa/pull/343)；该 PR 的直接相关变化是 `tests/run_st.sh` 聚合单例失败，本文核心 `TFREE` 语义来自当前规范、backend 头文件与 CPU_SIM 测试。
+- 新覆盖文件与符号：`docs/isa/TFREE_zh.md`、common `TFREE` wrapper、A2/A3 与 A5 `TPop/TFree.hpp`、CPU_SIM `SharedState/Consumer::free`、`tpushpop` overlapping/delayed-free/full-capacity tests。
+- 新覆盖建议对象（非当前实现）：generation-bound `ApplyRecord`、`CompensationRecord`、action-keyed `CapacityEntry`、queryable native receipt、`native_batch_id→action_id[]` 与 ledger repair transaction。
+- 新确认不变量：
+  1. `TFREE` 归还 FIFO slot/credit，不是任意 HBM 释放；slot credit 与整块 allocation lifetime 必须分层记账。
+  2. A2/A3 TileData release 在 `TPOP`，A5 explicit `TFREE` 发 signal，CPU_SIM 依最老 outstanding pop；portable apply 必须记录真实 native release point。
+  3. canonical CAS、native apply receipt 与 capacity release 是三个线性化点；terminal verdict 不因资源回收失败而回滚。
+  4. owner epoch、action ID 与 revision CAS 分别防 stale authority、重复 side effect 与 lost update，不能互相替代。
+  5. action 后 receipt 前 crash 产生 `UNKNOWN`；non-idempotent action 不能 blind retry，相关容量保持 `RELEASE_PENDING`。
+  6. compensation 不是反向 signal；先 fence/reset/quarantine 旧 generation，再以 fresh census 与 repair transaction 幂等修复 ledger。
+- 具体演算：`16×16xf32`、1024 B/Tile、`DIR_BOTH` 两向各两槽共 4096 B；C2V `slot0@epoch17` 在 native action 后 ack 前 crash，ledger 暂时只暴露 3072 B，generation fence + reset witness + fresh census 后只返还一次。
+- 直接测试事实：审计当前 `tpushpop` 的 overlapping pop/free、split delayed-free 和 DIR_BOTH full-capacity tests；它们证明正常配对下的 credit 守恒，不证明 duplicate/ack-loss/crash/owner takeover/durable repair。本章未把旧 checkout 的运行结果冒充当前基线。
+- 新知识债：durable apply/compensation/ledger schema、backend conditional release/query receipt、batch credit identity、reset scope、fresh census adapter、duplicate/wrong-epoch/crash/takeover fault matrix，以及 A2/A3/A5 真机 differential Golden。
+- 下一章：**Compensation 也失败怎么办——Bounded Quarantine、Orphan Action GC 与长期容量回收。**
 
