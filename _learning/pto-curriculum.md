@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-13。
+最后更新：2026-10-14。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 64 从 PTO `TFREE` 的 backend-specific credit 语义出发，把 terminal canonical CAS 与外部 release 副作用拆成独立线性化点：durable apply outbox 先记录意图，native witness 后才返还 capacity；ambiguous non-idempotent action 必须 generation fence、compensation 与 fresh census，不能盲重试或回滚 terminal verdict。下一步研究补偿动作自身失败时的 bounded quarantine、orphan action GC 与长期容量回收。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 65 结合 PTO 新增的统一 `Workspace` facade 与可枚举 completion records，明确 `DestroyWorkspace` 是正常析构、`AbandonWorkspace` 只是 clear-only fault escape；补偿失败后 quarantine 的线程/重试成本必须有界，但未知 capacity 必须继续 held，只有 generation fence 加完整 completion evidence，或 scoped reset 加 fresh census，才能由 action-keyed CAS 返还。下一步研究 GC 回收后的 epoch tombstone、reuse fence 与 ABA 防护。
 
 ## 已完成章节
 
@@ -89,6 +89,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-11 | Partial Graph、Missing Witness 与 Fail-closed Reconciliation | frozen contract → deficit census → bounded reconciliation → complete/reset-covered/quarantine | [课程 62]({% post_url 2026-10-11-pto-isa-partial-graph-missing-witness-fail-closed-reconciliation %}) |
 | 2026-10-12 | Owner Fence、Revision CAS 与 Late-witness Linearization | immutable evidence append → deterministic join → epoch/revision CAS → one terminal state | [课程 63]({% post_url 2026-10-12-pto-isa-owner-fence-revision-cas-late-witness-linearization %}) |
 | 2026-10-13 | Idempotent Apply、Compensation Record 与 Capacity Ledger Repair | terminal CAS → durable apply outbox → native witness/compensation → exactly-once capacity repair | [课程 64]({% post_url 2026-10-13-pto-isa-idempotent-apply-compensation-capacity-ledger-repair %}) |
+| 2026-10-14 | Bounded Quarantine、Orphan Action GC 与长期容量回收 | workspace abandon/completion record → bounded quarantine → orphan GC → evidence/reset-covered reclaim | [课程 65]({% post_url 2026-10-14-pto-isa-bounded-quarantine-orphan-action-gc-long-term-capacity-recovery %}) |
 
 ## ISA 知识地图
 
@@ -127,6 +128,7 @@ permalink: /learning/pto-curriculum/
 | Durable revision / recovery handoff | revision 与 canonical recovery state 同事务推进；watch/notify 只触发 full reload。`RECOVERY_ONLY→NORMAL` 以 owner/revision 为 expected value，原子关闭 critical debt、归还 cleanup reserve并换 admission generation | 跨 crash no-lost-wake 与 handoff 不变量已讲透；store/watch/schema、audit 与 Golden 待实现 |
 | Concurrent evidence reconciliation | immutable evidence 可由 adapter/late query 多写者幂等追加；canonical verdict、reset 与 allocator free 必须由当前 owner 以 `owner_epoch + expected_revision` CAS 单写。late witness 不跨 attempt/generation，也不重新打开 `Complete/ResetCovered` | owner fence、revision CAS 与线性化边界已讲透；store/schema、action idempotency 与 fault Golden 待实现 |
 | Idempotent apply / capacity repair | `TFREE` 是 backend-specific FIFO credit release：A2/A3 TileData 随 `TPOP`，A5 可显式 signal，CPU_SIM 依 outstanding queue。terminal CAS、native receipt 与 ledger release 是三个线性化点；unknown action 必须 fence/reset/census 后修复，不能 blind retry | outbox/compensation/ledger contract 已闭合；durable schema、queryable receipt、fault injection 与真机 Golden 待实现 |
+| Bounded quarantine / orphan GC | 当前统一 `Workspace` facade 将 backend destructor 与 clear-only `AbandonWorkspace` 分开；`AsyncCompletionRecord` 导出 SDMA/URMA/RDMA 的 native predicate，multi-queue/multi-jetty 必须全称闭合。abandon、deadline 与 retry exhaustion 都不证明 reclaim，未知 capacity 必须 held，直到同代 evidence 或 scoped reset + fresh census | 当前原语已确认；durable orphan schema、GC、reset certificate、capacity CAS 与 fault Golden 待实现 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -177,7 +179,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [6a50f62b](https://github.com/hw-native-sys/pto-isa/commit/6a50f62b0695d7c2ae9a46a8f7ca70ca7a29780e) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 A2/A3/A5/CPU_SIM `TFREE` release-point 对齐、apply outbox、compensation record、capacity ledger repair 与 ack-loss/duplicate-free failure contract | ISA 深挖 38 |
+| pto-isa | [fc62c8f8](https://github.com/hw-native-sys/pto-isa/commit/fc62c8f8d1555803695ccb5296a72639454d2922) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 unified `Workspace` create/destroy/abandon、`AsyncCompletionRecord`、SDMA persistent `nextPostId`、bounded quarantine/orphan GC 与 long-term capacity reclaim contract | ISA 深挖 39 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -1111,4 +1113,23 @@ permalink: /learning/pto-curriculum/
 - 直接测试事实：审计当前 `tpushpop` 的 overlapping pop/free、split delayed-free 和 DIR_BOTH full-capacity tests；它们证明正常配对下的 credit 守恒，不证明 duplicate/ack-loss/crash/owner takeover/durable repair。本章未把旧 checkout 的运行结果冒充当前基线。
 - 新知识债：durable apply/compensation/ledger schema、backend conditional release/query receipt、batch credit identity、reset scope、fresh census adapter、duplicate/wrong-epoch/crash/takeover fault matrix，以及 A2/A3/A5 真机 differential Golden。
 - 下一章：**Compensation 也失败怎么办——Bounded Quarantine、Orphan Action GC 与长期容量回收。**
+
+## 第 65 章课程账本增量
+
+- 源码基线：pto-isa [`fc62c8f8`](https://github.com/hw-native-sys/pto-isa/commit/fc62c8f8d1555803695ccb5296a72639454d2922)；核心接口由已合入提交 [`e6334fbd`](https://github.com/hw-native-sys/pto-isa/commit/e6334fbd6c5d6bfdf550201bbdb81a71831a99af) 引入。
+- 新覆盖文件与符号：`workspace.hpp` 的 `Workspace/WorkspaceRequest/CreateWorkspace/DestroyWorkspace/AbandonWorkspace`；`comm_types.hpp` 的 `CompletionKind/AsyncCompletionRecord/kCompletionRecordCountError`；`async_event_impl.hpp` 的 `CompletionRecordCount/At`；SDMA `SdmaRuntimeContext.nextPostId`、`PersistSqTails` 与逐 queue `postDone >= postId`。
+- 新覆盖建议对象（非当前实现）：generation-bound `OrphanAction`、bounded quarantine budget、completion-record snapshot lease、reset coverage certificate、fresh census 与 action-keyed capacity CAS。
+- 新确认不变量：
+  1. `DestroyWorkspace` 删除 backend manager 后清空 POD；`AbandonWorkspace` 只清空 POD，不析构 manager，也不证明 native allocation 已释放。
+  2. 非空 event 解析失败返回 `kCompletionRecordCountError`，不能降格为 0 records；`CompletionRecordAt.addr == nullptr` 同样是错误。
+  3. SDMA event 覆盖的全部 queue、URMA multi-jetty 的全部 jetty 都必须满足各自 predicate，首个完成记录不能授权整体退休。
+  4. completion witness 还需 workspace generation/owner fence 才能绑定到当前对象；裸地址或 post ID 相等不足以防 ABA。
+  5. bounded quarantine 限制 recovery worker、retry QPS 与 metadata；deadline、retry exhaustion、process exit、abandon 都不能把未知 capacity 变成 free。
+  6. orphan 的安全 reclaim 只能来自“同代完整 completion evidence”或“覆盖该代的 scoped reset”，并在 fresh census 后以 action ID 幂等返还 ledger。
+- 具体演算：`16×16xf32`、1024 B/Tile、`DIR_BOTH` 两向各两槽共 4096 B；`postId=101, queueCount=2` 先读到 `[103,99]` 时保持 1024 B held、可用 3072 B，后读到 `[103,101]` 且 fence/census 闭合后才恢复 4096 B。
+- 直接测试事实：当前 `tput_async_notify_kernel.cpp` 的 65-post ring reuse 与“2 notify + 127 ordinary post” interleaved case 验证 post ID、flag slot reuse、Wait、signal/payload/guard；提交记录报告 header compile 与 URMA 2-rank 6 cases，但 SDMA 跨芯片 runtime 未执行。未发现 abandon/crash/orphan GC/capacity repair direct test。
+- 待验证推断：completion record 的具体 cache-coherence、doorbell/CQE 微架构与 reset 覆盖范围不能由公开头文件确认；GC polling/backoff、reset scope 和 quarantine budget 必须用 device trace、故障驻留时间与容量压力分布标定。
+- 新知识债：durable orphan store、地址 lease 与 record snapshot、GC fairness/backoff、facade double-destroy/invalid-reuse/abandon tests、reset certificate、fresh census adapter、capacity CAS，以及 SDMA/URMA/RDMA 真机 crash differential Golden。
+- 下一章：**GC 说已经收回，如何证明不会误收——Epoch Tombstone、Reuse Fence 与 ABA 防护。**
+
 
