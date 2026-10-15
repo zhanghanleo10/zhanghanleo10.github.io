@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 55 章把 tri-source quarantine 从静态状态推进为有界恢复流程：deadline 只终止等待，不生成 reclaim witness；数据面先按 key 降级 eager，再依据 lease、handle、pool、context 与 rank generation 证据按 `KEY → WRAPPER → POOL/WORKER → TP REPLICA → ENGINE` 扩大 reset scope。下一章进入 reset 后的 warmup admission、canary replay 与自动 rollback。
+- 当前主线：第 56 章把 reset 后的新 CUDA Graph generation 从“已捕获”推进到“可准入”：启动期 all-worker warmup/capture 只能证明 handle 建立，#61496 进一步证明 host specialization 可能在 capture 无异常时烘入错误语义；因此新 generation 必须经过隔离 warmup、eager/graph synthetic oracle、有界真实 canary 与 generation-bound promotion/rollback。下一章进入 promotion 后的 sentinel sampling、drift detection 与 revalidation trigger。
 
 ## 已完成章节
 
@@ -68,6 +68,7 @@
 | 2026-10-11 53 | `durable reservation → owner epoch takeover → worker/pool reconciliation → leak recovery` | [`276fbcff`](https://github.com/vllm-project/vllm/commit/276fbcff2717bd934cfa37c8a2e4c391f3e7237b) | [Ticket 扣了显存，Owner 崩了]({{ '/articles/vllm-cudagraph-durable-reservation-takeover-leak-recovery/' | relative_url }}) |
 | 2026-10-12 54 | `ledger + live handle + pool census → dual verdict → quarantine → auditable reclaim` | [`cc9b0f09`](https://github.com/vllm-project/vllm/commit/cc9b0f097d49abfa6fc94d1d773dca1cc2b9619c) | [账、Handle 和 Pool 对不上时信谁]({{ '/articles/vllm-cudagraph-tri-source-reconciliation-quarantine-auditable-reclaim/' | relative_url }}) |
 | 2026-10-13 55 | `tri-source quarantine → evidence/capacity/service deadlines → scope ladder → fresh-generation reconciliation` | [`f47792af`](https://github.com/vllm-project/vllm/commit/f47792af7fba76eb8e8f6a564b35cfad316d39f2) | [Quarantine 不能无限长]({{ '/articles/vllm-cudagraph-quarantine-deadline-escalation-minimal-reset/' | relative_url }}) |
+| 2026-10-15 56 | `fresh generation → isolated warmup → synthetic oracle → bounded canary → promotion/rollback` | [`8530aed2`](https://github.com/vllm-project/vllm/commit/8530aed2b78a19eb00e242031c22bb78d615eea2) | [Reset 后不能立刻全量接流]({{ '/articles/vllm-cudagraph-warmup-admission-canary-replay-rollback/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1367,4 +1368,37 @@
 - 建议协议（非当前实现）：`QuarantineRecord`、`ResetAttempt`、三类 deadline、generation-bound lease 与 `KEY → WRAPPER → POOL/WORKER → REPLICA → ENGINE` 升级阶梯。
 - 新知识债：真实 schema/store、timer wheel、capacity trend estimator、per-key pool attribution、worker/replica reset API、late-witness CAS、reset 二次崩溃、continuously escalating idempotency 与 crash×sleep×collective fault matrix。
 - 下一章：**Reset 后不能立刻全量接流——Warmup Admission、Canary Replay 与自动 Rollback。**
+
+## 第 56 章课程账本增量
+
+- 日期：2026-10-15
+- 章节：**Reset 后不能立刻全量接流：Warmup Admission、Canary Replay 与自动 Rollback**
+- 源码基线：[`8530aed2`](https://github.com/vllm-project/vllm/commit/8530aed2b78a19eb00e242031c22bb78d615eea2)，为研究时默认分支最新提交；该提交删除 Medusa/MLP speculator 支持，与本章主路径无直接关系。直接相关的最新已合入证据是 [PR #61496](https://github.com/vllm-project/vllm/pull/61496) / [`9b5c6707`](https://github.com/vllm-project/vllm/commit/9b5c6707a3064db25e1045c1c47674b1885da54c)：修复 MRV2 DCP FULL graph 把无 context 的 host skip 分支烘入 graph。
+- 课程位置：`fresh generation → isolated warmup → synthetic eager/graph oracle → bounded real canary → promotion 或 automatic rollback`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`：KV cache 初始化后的 startup warmup/capture barrier
+  - `vllm/v1/executor/abstract.py`：`Executor.compile_or_warm_up_model` 的 all-worker RPC 与 max-rank compilation time
+  - `vllm/v1/worker/gpu_worker.py`：`GPUWorker._compile_or_warm_up_model`、kernel/JIT warmup、capture context、JIT/sync monitor activation
+  - `vllm/v1/worker/gpu_model_runner.py`、`vllm/v1/worker/gpu/cudagraph_utils.py`：MRV1/MRV2 capture、`lock_workspace`、`set_dcp_capture_context`、`dispatch_cg_and_sync_dp`
+  - `vllm/v1/cudagraph_dispatcher.py`、`vllm/compilation/cuda_graph.py`：eager fallback、`CUDAGraphEntry`、capture/replay 与 input-address check
+  - `tests/v1/cudagraph/test_cudagraph_dispatch.py`、`test_cudagraph_manager.py`、`tests/v1/worker/test_gpu_model_runner_v2.py`：eager/replay oracle、unseen-key bypass、DCP capture context 与 workspace-lock 时机
+- 新确认不变量：
+  1. startup barrier 中 all-worker capture 完成只证明 handle 建立；它不证明真实 metadata/KV 组合下的 replay 语义。
+  2. capture success、synthetic correctness、real-traffic health、旧 generation reclaim 是四类证据；任何一类都不能越级授权另一类。
+  3. synthetic eager 与 graph 路径必须使用隔离 KV slots 或可恢复 snapshot；否则第一次执行的 KV side effect 会污染 oracle。
+  4. canary admission 必须绑定 key、generation、expected ranks、workspace/pool revision 与有限 replay lease；任一 rank 不同代则整组 eager。
+  5. promotion 只扩大 routing 权；rollback 先 fence 新 replay、drain leases，再 retire handle。它不能撤销已经写入的 KV 或自动返还旧 reservation。
+  6. canary 上限应由 `admission rate × worst-case detection window ≤ error budget` 推导；固定百分比不是通用安全阈值。
+- 具体演算：TP=2、FULL K8、generation44；每 rank fresh headroom 64 MiB，capture peak 12 MiB、isolated canary peak 8 MiB、failure reserve 20 MiB，先验证 `64 ≥ 12+8+20`。若 DCP `cp_size=2, cp_interleave=1`，8 个 dummy requests 的 capture context 必须各为 2 tokens。教学策略每 step 最多准入 1 个 canary、最迟 2 steps 决策、错误预算 2 个请求；任一 digest/KV guard/rank generation 失败即 fence 44 并回 eager。
+- 直接测试/实验事实：简单 MLP test 比较 `BatchDescriptor(num_tokens=10)` 的 eager/replay 输出；capture sizes `[1,2]` test 覆盖两个 key 的 capture/replay、size3 eager 与禁捕后 unseen key 报错；workspace tests 覆盖真实 capture 锁一次、无 graph/profile-only 不锁；#61496 单测以 8 requests、DCP2 验证 FULL context=2、非 FULL=0。PR 报告 Qwen3-235B TP8/DCP2 needle 0/9→9/9；DBO E2E 与接近 `max_model_len` 的 clamp 风险仍未覆盖。本章未重跑 GPU 测试。
+- 建议协议（非当前实现）：`WarmupAdmission`、`CLOSED → WARMING → SYNTHETIC_OK → CANARY → PROMOTED`，以及 `ROLLBACK_PENDING → EAGER_ONLY → RETIRED`；generation-aware dispatcher、synthetic oracle schema 与 request checkpoint。
+- 新知识债：真实 admission store/CAS、隔离 KV/request slot、logits/KV digest tolerance、canary quota/lease、partial-KV request recovery、TP/PP group promotion、DBO/DeepEP 与 max-context E2E、rollback 后再次 recapture 的 anti-thrashing。
+- 下一章：**Promotion 后怎样持续证明健康——Sentinel Sampling、Drift Detection 与 Revalidation Trigger。**
+
+## 第八次七章知识图谱回顾（第 50–56 章）
+
+- 已打通：`bounded recapture final → orphan retirement → pool reclaim witness → benefit-per-byte admission → durable owner takeover → tri-source quarantine → scope-aware reset → staged readmission`。
+- 已闭合：authority、replayability、reclaimability 与 admissibility 已拆成四个独立 verdict；eager fallback 保障恢复期服务，generation/lease/census 约束资源和信任边界。
+- 当前最大盲区：这些协议仍主要是基于当前原语推导的设计；缺少跨 worker admission controller、KV-safe canary、partial-side-effect recovery 和 GPU/collective fault-injection Golden。
+- 后续路线调整：从异常后的 staged readmission 转向正常运行中的低开销 sentinel 与 drift detection，再回到 serving readiness 如何消费 graph health。
 
