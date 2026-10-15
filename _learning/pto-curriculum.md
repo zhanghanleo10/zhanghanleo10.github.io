@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-14。
+最后更新：2026-10-15。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 65 结合 PTO 新增的统一 `Workspace` facade 与可枚举 completion records，明确 `DestroyWorkspace` 是正常析构、`AbandonWorkspace` 只是 clear-only fault escape；补偿失败后 quarantine 的线程/重试成本必须有界，但未知 capacity 必须继续 held，只有 generation fence 加完整 completion evidence，或 scoped reset 加 fresh census，才能由 action-keyed CAS 返还。下一步研究 GC 回收后的 epoch tombstone、reuse fence 与 ABA 防护。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 66 以 SDMA persistent `nextPostId`、58-bit non-wrapping handle 与 completion record 为事实基础，区分旧软件 evidence 造成的逻辑 ABA 和旧 DMA/CQE writer 污染同址新 allocation 的物理 ABA；`EpochTombstone` 只能拒绝旧证据，安全复用还必须由 drain/reset 形成 `NoOldWriter` fence，并遵守 fence → tombstone → capacity release → fresh generation register 的顺序。下一步研究 completion watermark、reset certificate 与 consumer lease 如何证明 tombstone 可安全压缩。
 
 ## 已完成章节
 
@@ -90,6 +90,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-12 | Owner Fence、Revision CAS 与 Late-witness Linearization | immutable evidence append → deterministic join → epoch/revision CAS → one terminal state | [课程 63]({% post_url 2026-10-12-pto-isa-owner-fence-revision-cas-late-witness-linearization %}) |
 | 2026-10-13 | Idempotent Apply、Compensation Record 与 Capacity Ledger Repair | terminal CAS → durable apply outbox → native witness/compensation → exactly-once capacity repair | [课程 64]({% post_url 2026-10-13-pto-isa-idempotent-apply-compensation-capacity-ledger-repair %}) |
 | 2026-10-14 | Bounded Quarantine、Orphan Action GC 与长期容量回收 | workspace abandon/completion record → bounded quarantine → orphan GC → evidence/reset-covered reclaim | [课程 65]({% post_url 2026-10-14-pto-isa-bounded-quarantine-orphan-action-gc-long-term-capacity-recovery %}) |
+| 2026-10-15 | Epoch Tombstone、Reuse Fence 与 ABA 防护 | persistent postId/record → logical vs physical ABA → no-old-writer fence → retire-before-reuse | [课程 66]({% post_url 2026-10-15-pto-isa-epoch-tombstone-reuse-fence-aba-prevention %}) |
 
 ## ISA 知识地图
 
@@ -112,6 +113,7 @@ permalink: /learning/pto-curriculum/
 | Pipe mapping | TLOAD→MTE2、TADD→V、Vec TSTORE→MTE3、TMATMUL→M | 已讲基础 |
 | Event ID 生命周期 | Record 后必须有 Wait；ID 有限并按 pipe pair 管理 | 已讲基础 |
 | AsyncEvent/aggregate SDMA recovery | SDMA handle 只编码 `postId+queueCount`；`DEFER` 可在 doorbell 前返回 future handle。恢复必须绑定 domain/session/workspace generation 与 owner-range，按 physical post 共同 retire；query 不可用时只能可信 reset 或 quarantine | 已讲透恢复边界；runtime adapter/canary 待实现 |
+| Workspace reuse / ABA boundary | persistent `nextPostId` 与 58-bit fail-before-wrap 只保护 live workspace；fresh allocation 可从零状态开始。generation tombstone 拒绝旧 evidence，但同址 late write 必须由 drain/reset 的 `NoOldWriter` fence 消灭；安全顺序是 fence→tombstone→capacity release→g+1 register | 逻辑/物理 ABA 与顺序证明已讲透；registry、fence adapter、same-VA Golden 待实现 |
 | TPipe/TPUSH/TPOP | A2/A3 跨 Cube/Vector Tile 传递包含 GM payload ring 与 ready/free credit | 已讲基础 |
 | DIR_BOTH ownership | C2V/V2C 必须使用两条不重叠 ring；总 footprint=`2×SlotNum×SlotSize` | 已讲透核心缺陷 |
 | Credit batching | 初始 SlotNum 个 entries 免等待；之后 consumer 每 SyncPeriod 个 pop 发一个 credit，producer 每 SyncPeriod 个 wrap 前消费一个 | 已讲透 depth=8/40 entries |
@@ -179,7 +181,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [fc62c8f8](https://github.com/hw-native-sys/pto-isa/commit/fc62c8f8d1555803695ccb5296a72639454d2922) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 unified `Workspace` create/destroy/abandon、`AsyncCompletionRecord`、SDMA persistent `nextPostId`、bounded quarantine/orphan GC 与 long-term capacity reclaim contract | ISA 深挖 39 |
+| pto-isa | [fc62c8f8](https://github.com/hw-native-sys/pto-isa/commit/fc62c8f8d1555803695ccb5296a72639454d2922) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 unified `Workspace`/`AsyncCompletionRecord`、SDMA persistent `nextPostId` 与 handle/ring guard，并补齐 epoch tombstone、physical reuse fence 和 ABA contract | ISA 深挖 40 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -196,6 +198,9 @@ permalink: /learning/pto-curriculum/
 - canonical terminal verdict、native release receipt 与 capacity ledger release 是三个线性化点；durable outbox 先记录 action 意图，只有强 witness 或 generation-fenced reset census 才能把 capacity entry 幂等转为 released。
 - `TFREE` 归还 TPipe FIFO credit，不是任意 HBM free；A2/A3 TileData release 折叠在 `TPOP`，A5 explicit signal 不是自幂等操作，CPU_SIM outstanding queue 也不提供跨 crash durable receipt。
 - ambiguous non-idempotent apply 不能 blind retry、不能回滚已提交 terminal verdict，也不能按“预期差量”返还容量；必须保留 `RELEASE_PENDING`、fence 旧 generation，并以补偿记录和 fresh census 修复 ledger。
+- ABA 必须分成两个证明域：generation-bound tombstone 只拒绝旧软件 evidence；旧 DMA/NIC writer 对同址新 allocation 的物理污染只能由覆盖完整 queue/session/registration scope 的 drain/reset fence 排除。
+- 安全复用必须 retire-before-reuse：`NoOldWriter` 证据先落盘，再提交 tombstone 与 action-keyed capacity release，最后初始化并 register 新 generation；先 free 后补 tombstone 存在不可接受的同址暴露窗口。
+- SDMA persistent `nextPostId` 和 58-bit exhaustion fail-closed 保护同一 workspace 生命周期，不能被扩大解释为跨 destroy/reallocate 的 allocation identity。
 
 - 跨 backend 证据连接必须先匹配 stable `operation_id + attempt_id + owner_epoch + execution_domain + workspace_generation + backend_profile`，再验证 causal edge；physical event ID、地址、worker sequence 与 timestamp 都不能替代时间身份。
 - logical causal DAG 可以统一，native topology 不可抹平：A2/A3 mode2 broadcast/reduce 压缩多条逻辑边；A5 必须逐 subblock、逐 pipe 验证 closure；CPU_SIM 跨 worker edge 必须由 launch/event adapter 提供。
@@ -473,7 +478,7 @@ permalink: /learning/pto-curriculum/
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
 - Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–49 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery、admission 与 pressure-control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、device-wide `MemoryCensus`、scheduler-state charge、watermark state machine、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/OOM/A5 guard-page/canary/poison/性能矩阵。
-- TPipe recovery 主线已推进到 transition audit、cross-backend correlation、typed causal graph 与 topology-aware evidence closure；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor/StableReason/TransitionAudit/CorrelationId/EvidenceEnvelope/CausalLink` schema、canonical/evidence-root hash、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、native signal ordinal/adapter、reader lease、retention/redaction、真实 partial-graph/reconciliation schema、native query/reset adapter、owner-fenced CAS、orphan GC、ENOSPC/partition/crash replay/late-signal fault matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
+- TPipe recovery 主线已推进到 transition audit、cross-backend correlation、typed causal graph、orphan GC 与跨 allocation ABA 防护；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor/StableReason/TransitionAudit/CorrelationId/EvidenceEnvelope/CausalLink/EpochTombstone/ReuseFenceCertificate` schema、canonical/evidence-root hash、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、native signal ordinal/adapter、reader lease、retention/redaction、native query/reset fence、same-VA late-write/crash matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -483,7 +488,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：为 incomplete evidence graph 定义 `Missing/Conflicting/Stale` reason、required-participant closure、retry/late-arrival reconciliation 与 owner-fenced apply；补缺 worker、旧 attempt late signal、wrong generation/digest 和 A5 partial-lane Golden。
+1. 主线：定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
 2. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
 4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
@@ -1131,5 +1136,23 @@ permalink: /learning/pto-curriculum/
 - 待验证推断：completion record 的具体 cache-coherence、doorbell/CQE 微架构与 reset 覆盖范围不能由公开头文件确认；GC polling/backoff、reset scope 和 quarantine budget 必须用 device trace、故障驻留时间与容量压力分布标定。
 - 新知识债：durable orphan store、地址 lease 与 record snapshot、GC fairness/backoff、facade double-destroy/invalid-reuse/abandon tests、reset certificate、fresh census adapter、capacity CAS，以及 SDMA/URMA/RDMA 真机 crash differential Golden。
 - 下一章：**GC 说已经收回，如何证明不会误收——Epoch Tombstone、Reuse Fence 与 ABA 防护。**
+
+## 第 66 章课程账本增量
+
+- 源码基线：pto-isa [`fc62c8f8`](https://github.com/hw-native-sys/pto-isa/commit/fc62c8f8d1555803695ccb5296a72639454d2922)，默认分支相对第 65 章未变化；completion/workspace 接口继续基于已合入提交 [`e6334fbd`](https://github.com/hw-native-sys/pto-isa/commit/e6334fbd6c5d6bfdf550201bbdb81a71831a99af)。
+- 新覆盖文件与符号：`comm_types.hpp` 的 24 B `AsyncCompletionRecord` 与 sentinel；`async_event_impl.hpp` 的 per-queue/per-jetty record 枚举；SDMA `kSdmaHandleQueueBits/kSdmaHandlePostIdBits`、`GetNextPostIdAddr`、`ReserveSdmaPostEvent`、64-slot payload ring 和 `PersistSqTails`；`TPUT_ASYNC_NOTIFY.md` 的 session/workspace lifetime contract。
+- 新覆盖建议对象（非当前实现）：`EpochTombstone`、`ReuseFenceCertificate`、generation-bound evidence envelope、durable allocation registry、register-before-submit transaction 与 action-keyed capacity release。
+- 新确认不变量：
+  1. ABA 有逻辑与物理两类：tombstone 只能拒绝 wrong-generation software witness，不能阻止旧 DMA/NIC writer 修改同址的新 backing。
+  2. `ReuseSafe(A,g+1)` 至少要求 retired tombstone、覆盖 g 的 `NoOldWriter` fence、g+1 fresh init 和 register-before-submit；地址、post ID 或 timeout 都不能替代。
+  3. persistent `nextPostId`、64-slot reuse guard 与 58-bit exhaustion fail-closed 的作用域是 live workspace/channel-group；fresh workspace 零初始化后可以重新从 post ID 起点开始。
+  4. SDMA `>= expected` 在同址重分配时尤其危险：旧代较大的 late `postDone` 可直接满足新代较小 expected；因此不能只靠扩大 ID 位数或清零内存。
+  5. retire-before-reuse 顺序是 `NoOldWriter evidence → tombstone CAS → capacity CAS → g+1 init/register`；反序会暴露新对象或产生重复 capacity credit。
+  6. tombstone 不能按 TTL 删除；只有所有旧 witness consumer 越过 watermark，且旧 writer domain 已有不可撤销 fence，才能压缩到 safe cutoff。
+- 具体演算：`16×16xf32` ND payload=1024 B，UB scratch=256 B，`queueNum=2`。`alloc-9/g7` 的 `postId=130` 只完成 q0；若错误 free 并同址创建 g8，fresh `postId=1` 会被 g7 晚到的 `postDone=130` 以 `>=1` 假完成。正确协议在 q1 complete 或覆盖两 queue 的 reset 前一直 held；旧 g7 软件 witness 只能补 audit。
+- 直接测试事实：当前 65-post ring-reuse 与“`postId=2` + 127 ordinary posts + `postId=130`”测试覆盖 live workspace 中 64-slot reuse、post ID 单调、Wait、payload/signal/guard；提交记录报告 header compile 与 URMA 2-rank 6 cases。它们不覆盖 destroy/reallocate-same-VA、late device write、wrong generation、reset scope、tombstone/free crash window或 generation wrap。
+- 待验证推断：设备 MMU/MR 撤销、CQE/post-done cache coherence 与 reset 精确覆盖域无法由公开头文件确认；`NoOldWriter` certificate 必须由 backend 文档、deterministic late-write fault injection 和真机 trace 校准。
+- 新知识债：durable allocation/generation registry、tombstone/fence schema、backend drain/reset/MR adapter、same-VA allocator、late-write simulator、generation wrap policy、consumer watermark/reader lease、safe compaction，以及 SDMA/URMA/RDMA 真机 crash differential Golden。
+- 下一章：**Tombstone 什么时候可以删除——Completion Watermark、Reset Certificate 与 Safe Compaction。**
 
 
