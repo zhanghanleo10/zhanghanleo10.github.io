@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 56 章把 reset 后的新 CUDA Graph generation 从“已捕获”推进到“可准入”：启动期 all-worker warmup/capture 只能证明 handle 建立，#61496 进一步证明 host specialization 可能在 capture 无异常时烘入错误语义；因此新 generation 必须经过隔离 warmup、eager/graph synthetic oracle、有界真实 canary 与 generation-bound promotion/rollback。下一章进入 promotion 后的 sentinel sampling、drift detection 与 revalidation trigger。
+- 当前主线：第 57 章把 CUDA Graph 从“一次 promotion”推进到“持续、可撤销的 capability”：当前 dispatch/metrics 能证明 descriptor compatibility 与使用分布，不能证明 replay correctness；因此 health evidence 必须绑定 graph generation、code/model/backend/config/topology fingerprints、oracle schema、expected ranks 与 record revision。按 key/metadata regime 分层 sentinel，mismatch 或契约变化先 fence graph admission，再以隔离 oracle revalidate。下一章把局部 graph health 接到 serving readiness、degraded capacity 与 revalidation backlog。
 
 ## 已完成章节
 
@@ -69,6 +69,7 @@
 | 2026-10-12 54 | `ledger + live handle + pool census → dual verdict → quarantine → auditable reclaim` | [`cc9b0f09`](https://github.com/vllm-project/vllm/commit/cc9b0f097d49abfa6fc94d1d773dca1cc2b9619c) | [账、Handle 和 Pool 对不上时信谁]({{ '/articles/vllm-cudagraph-tri-source-reconciliation-quarantine-auditable-reclaim/' | relative_url }}) |
 | 2026-10-13 55 | `tri-source quarantine → evidence/capacity/service deadlines → scope ladder → fresh-generation reconciliation` | [`f47792af`](https://github.com/vllm-project/vllm/commit/f47792af7fba76eb8e8f6a564b35cfad316d39f2) | [Quarantine 不能无限长]({{ '/articles/vllm-cudagraph-quarantine-deadline-escalation-minimal-reset/' | relative_url }}) |
 | 2026-10-15 56 | `fresh generation → isolated warmup → synthetic oracle → bounded canary → promotion/rollback` | [`8530aed2`](https://github.com/vllm-project/vllm/commit/8530aed2b78a19eb00e242031c22bb78d615eea2) | [Reset 后不能立刻全量接流]({{ '/articles/vllm-cudagraph-warmup-admission-canary-replay-rollback/' | relative_url }}) |
+| 2026-10-16 57 | `promotion → stratified sentinel → drift verdict → eager fence → revalidation/retire` | [`a956a812`](https://github.com/vllm-project/vllm/commit/a956a8126e6bd184cb0a6b8f7318fe4717675c2f) | [Promotion 不是永久许可证]({{ '/articles/vllm-cudagraph-sentinel-sampling-drift-revalidation/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -411,6 +412,9 @@
 - `CuMemAllocator.discard/wake_up`、`CuMemBackend.suspend/discard/preserves_communicators`
 - `GPUWorker.sleep/wake_up/discard`、`EngineCore.shutdown/run_engine_core`
 - `QuarantineRecord/ResetAttempt/DeadlineDecision`（第 55 章建议协议，尚未合入）
+- `CUDAGraphStat/CUDAGraphLogging.observe/generate_metric_table`
+- `ModelCudaGraphManager.run_fullgraph`（persistent hidden-state slice 生命周期）
+- `GraphHealthRecord/SentinelPolicy/RevalidationVerdict`（第 57 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -1401,4 +1405,32 @@
 - 已闭合：authority、replayability、reclaimability 与 admissibility 已拆成四个独立 verdict；eager fallback 保障恢复期服务，generation/lease/census 约束资源和信任边界。
 - 当前最大盲区：这些协议仍主要是基于当前原语推导的设计；缺少跨 worker admission controller、KV-safe canary、partial-side-effect recovery 和 GPU/collective fault-injection Golden。
 - 后续路线调整：从异常后的 staged readmission 转向正常运行中的低开销 sentinel 与 drift detection，再回到 serving readiness 如何消费 graph health。
+
+## 第 57 章课程账本增量
+
+- 日期：2026-10-16
+- 章节：**Promotion 不是永久许可证：Sentinel Sampling、Drift Detection 与 Revalidation Trigger**
+- 源码基线：[`a956a812`](https://github.com/vllm-project/vllm/commit/a956a8126e6bd184cb0a6b8f7318fe4717675c2f)，为研究时默认分支最新提交；最新提交的 MoE/DeepGEMM 变化与本文 graph health 主路径无直接关系。直接相关已合入反例仍为 [PR #61496](https://github.com/vllm-project/vllm/pull/61496) / [`9b5c6707`](https://github.com/vllm-project/vllm/commit/9b5c6707a3064db25e1045c1c47674b1885da54c)。
+- 课程位置：`promotion → stratified sentinel → drift verdict → eager fence → isolated revalidation → promote/retire`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`：`EngineCore.step` 的 schedule→execute→sample→scheduler commit 链
+  - `vllm/v1/worker/gpu_worker.py`：`GPUWorker.execute_model`
+  - `vllm/v1/worker/gpu/model_runner.py`：`dispatch_cg_and_sync_dp`、FULL/PIECEWISE/eager 分流、`ExecuteModelState` 与 `sample_tokens`
+  - `vllm/v1/worker/gpu/cudagraph_utils.py`：`CudaGraphManager.dispatch/run_fullgraph`、`ModelCudaGraphManager` persistent outputs
+  - `vllm/compilation/cuda_graph.py`：`CUDAGraphStat/CUDAGraphLogging`、`CUDAGraphWrapper` input-address debug check
+  - `vllm/v1/metrics/loggers.py`：interval 内 graph mode/padding/count 聚合
+  - `tests/v1/cudagraph/test_cudagraph_dispatch.py`、`test_cudagraph_manager.py`
+- 新确认不变量：
+  1. `_graphs_captured`、descriptor compatibility、稳定地址与 replay 无异常都是执行/路由证据，不是语义正确性证明。
+  2. promotion verdict 必须绑定 graph generation、code/model/backend/config/topology fingerprints、oracle schema、expected ranks 与 record revision；任一契约变化使旧证据 stale。
+  3. `ModelCudaGraphManager.run_fullgraph` 返回 persistent output buffer 的切片 view；oracle 若跨下一次 replay 保留，必须先复制，否则观测会被覆盖。
+  4. sentinel 双跑必须隔离 KV/Mamba state、RNG、connector 和 collective side effect，或从同一可信 checkpoint 恢复；只比较最终 token 不足。
+  5. 直接 output mismatch 先 group-wide fence graph admission，再 revalidate；不能以多次观察或 rank 多数票继续 collective replay。
+  6. 抽样按 descriptor 与关键 metadata regime 分层，频率由错误预算、检测窗口、shadow cost 与 graph 收益校准；仓库没有通用固定百分比。
+  7. 现有 `CUDAGraphLogging` 提供命中/shape 分布的 denominator，不提供 correctness numerator 或 health state。
+- 具体演算：TP=2、FULL K8、generation44；8 个 one-token decode，`hidden_states[8,4096]: bf16` 约64 KiB。sentinel 以隔离 KV 和固定 RNG 比较 graph/eager；rank0 request3 超 tolerance 即 CAS `PROMOTED→SUSPECT`，整组先 eager，drain lease 后按同 fingerprint 重验或 retire。演算 shape/dtype 不是 vLLM 默认值。
+- 直接测试/实验事实：`test_capture_and_replay` 对 `SimpleMLP`/10 tokens 用 `assert_close` 比较单次 eager/replay；bypass test 以 capture sizes `[1,2]` 覆盖 unseen size3 eager；DCP test 以8 requests、DCP2验证 FULL context=2、非 FULL=0。#61496 报告 Qwen3-235B TP8/DCP2 needle 0/9→9/9。当前没有 promotion 后 drift、oracle view overwrite、side-effect isolation、rank disagreement、stale PASS、cold-key coverage 或 sentinel SLO 测试；本章未重跑 GPU 测试。
+- 建议协议（非当前实现）：`GraphHealthRecord`、`SentinelPolicy`、`PROMOTED→SUSPECT→EAGER_ONLY→REVALIDATING→PROMOTED/RETIRED`、generation-bound replay lease 与 all-rank CAS verdict。
+- 新知识债：真实 schema/store、hidden/logits oracle copy、KV/Mamba/RNG/connector snapshot、fingerprint 枚举、per-key coverage、tolerance/false-positive budget、同步/异步 sentinel SLO、revalidation queue 与 fault-injection Golden。
+- 下一章：**Graph 局部降级时服务还算 Ready 吗——Serving Readiness、Degraded Capacity 与 Revalidation Backlog。**
 
