@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-15。
+最后更新：2026-10-16。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 66 以 SDMA persistent `nextPostId`、58-bit non-wrapping handle 与 completion record 为事实基础，区分旧软件 evidence 造成的逻辑 ABA 和旧 DMA/CQE writer 污染同址新 allocation 的物理 ABA；`EpochTombstone` 只能拒绝旧证据，安全复用还必须由 drain/reset 形成 `NoOldWriter` fence，并遵守 fence → tombstone → capacity release → fresh generation register 的顺序。下一步研究 completion watermark、reset certificate 与 consumer lease 如何证明 tombstone 可安全压缩。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 67 从 SDMA per-queue `postDone` 和 URMA per-jetty CQE 出发，把 tombstone 的可删除性拆成三份证明：每个 producer domain 已由连续 completion frontier 或 scoped reset 覆盖、所有 active evidence reader 已越过 tombstone revision、checkpoint 已吸收 `retired_through` 与未决债务。只有先发布新的 compaction manifest，才能删除旧 segment；TTL、最大瞬时 record 或单个全局 watermark 都不能替代。下一步研究 snapshot/manifest/log segment 的 atomic cutover 与 crash recovery。
 
 ## 已完成章节
 
@@ -91,6 +91,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-13 | Idempotent Apply、Compensation Record 与 Capacity Ledger Repair | terminal CAS → durable apply outbox → native witness/compensation → exactly-once capacity repair | [课程 64]({% post_url 2026-10-13-pto-isa-idempotent-apply-compensation-capacity-ledger-repair %}) |
 | 2026-10-14 | Bounded Quarantine、Orphan Action GC 与长期容量回收 | workspace abandon/completion record → bounded quarantine → orphan GC → evidence/reset-covered reclaim | [课程 65]({% post_url 2026-10-14-pto-isa-bounded-quarantine-orphan-action-gc-long-term-capacity-recovery %}) |
 | 2026-10-15 | Epoch Tombstone、Reuse Fence 与 ABA 防护 | persistent postId/record → logical vs physical ABA → no-old-writer fence → retire-before-reuse | [课程 66]({% post_url 2026-10-15-pto-isa-epoch-tombstone-reuse-fence-aba-prevention %}) |
+| 2026-10-16 | Completion Watermark、Reset Certificate 与 Safe Compaction | per-domain frontier / reset coverage → reader ack → manifest publish → segment GC | [课程 67]({% post_url 2026-10-16-pto-isa-completion-watermark-reset-certificate-safe-compaction %}) |
 
 ## ISA 知识地图
 
@@ -114,6 +115,7 @@ permalink: /learning/pto-curriculum/
 | Event ID 生命周期 | Record 后必须有 Wait；ID 有限并按 pipe pair 管理 | 已讲基础 |
 | AsyncEvent/aggregate SDMA recovery | SDMA handle 只编码 `postId+queueCount`；`DEFER` 可在 doorbell 前返回 future handle。恢复必须绑定 domain/session/workspace generation 与 owner-range，按 physical post 共同 retire；query 不可用时只能可信 reset 或 quarantine | 已讲透恢复边界；runtime adapter/canary 待实现 |
 | Workspace reuse / ABA boundary | persistent `nextPostId` 与 58-bit fail-before-wrap 只保护 live workspace；fresh allocation 可从零状态开始。generation tombstone 拒绝旧 evidence，但同址 late write 必须由 drain/reset 的 `NoOldWriter` fence 消灭；安全顺序是 fence→tombstone→capacity release→g+1 register | 逻辑/物理 ABA 与顺序证明已讲透；registry、fence adapter、same-VA Golden 待实现 |
+| Completion frontier / tombstone compaction | SDMA watermark 必须逐 queue 维护连续、同代、已持久化的 `postId` 前缀；URMA 必须逐 `(peer,jetty)` 维护 logical `targetCqe`，raw owner bit 不可取 max。tombstone 仅在 producer completion/reset 全覆盖、active reader 越过创建 revision、checkpoint 吸收 `retired_through` 后，按 manifest-first 顺序压缩 | safe cutoff 与 crash 顺序已讲透；schema、reset certificate、reader lease、segment GC 与真机 Golden 待实现 |
 | TPipe/TPUSH/TPOP | A2/A3 跨 Cube/Vector Tile 传递包含 GM payload ring 与 ready/free credit | 已讲基础 |
 | DIR_BOTH ownership | C2V/V2C 必须使用两条不重叠 ring；总 footprint=`2×SlotNum×SlotSize` | 已讲透核心缺陷 |
 | Credit batching | 初始 SlotNum 个 entries 免等待；之后 consumer 每 SyncPeriod 个 pop 发一个 credit，producer 每 SyncPeriod 个 wrap 前消费一个 | 已讲透 depth=8/40 entries |
@@ -130,7 +132,7 @@ permalink: /learning/pto-curriculum/
 | Durable revision / recovery handoff | revision 与 canonical recovery state 同事务推进；watch/notify 只触发 full reload。`RECOVERY_ONLY→NORMAL` 以 owner/revision 为 expected value，原子关闭 critical debt、归还 cleanup reserve并换 admission generation | 跨 crash no-lost-wake 与 handoff 不变量已讲透；store/watch/schema、audit 与 Golden 待实现 |
 | Concurrent evidence reconciliation | immutable evidence 可由 adapter/late query 多写者幂等追加；canonical verdict、reset 与 allocator free 必须由当前 owner 以 `owner_epoch + expected_revision` CAS 单写。late witness 不跨 attempt/generation，也不重新打开 `Complete/ResetCovered` | owner fence、revision CAS 与线性化边界已讲透；store/schema、action idempotency 与 fault Golden 待实现 |
 | Idempotent apply / capacity repair | `TFREE` 是 backend-specific FIFO credit release：A2/A3 TileData 随 `TPOP`，A5 可显式 signal，CPU_SIM 依 outstanding queue。terminal CAS、native receipt 与 ledger release 是三个线性化点；unknown action 必须 fence/reset/census 后修复，不能 blind retry | outbox/compensation/ledger contract 已闭合；durable schema、queryable receipt、fault injection 与真机 Golden 待实现 |
-| Bounded quarantine / orphan GC | 当前统一 `Workspace` facade 将 backend destructor 与 clear-only `AbandonWorkspace` 分开；`AsyncCompletionRecord` 导出 SDMA/URMA/RDMA 的 native predicate，multi-queue/multi-jetty 必须全称闭合。abandon、deadline 与 retry exhaustion 都不证明 reclaim，未知 capacity 必须 held，直到同代 evidence 或 scoped reset + fresh census | 当前原语已确认；durable orphan schema、GC、reset certificate、capacity CAS 与 fault Golden 待实现 |
+| Bounded quarantine / orphan GC | 当前统一 `Workspace` facade 将 backend destructor 与 clear-only `AbandonWorkspace` 分开；`CompletionKind` 定义 SDMA/URMA/RDMA predicate，但当前 `AsyncEvent::CompletionRecordCount/At` 可见分支只导出 SDMA 与条件编译的 URMA，RDMA 落入 error。multi-queue/multi-jetty 必须全称闭合；abandon、deadline 与 retry exhaustion 都不证明 reclaim | SDMA/URMA 原语已确认；RDMA export、durable orphan schema、GC、reset certificate、capacity CAS 与 fault Golden 待实现 |
 | Double buffering | GEMM 的 L1 与 L0A/L0B 均以 ping-pong 运行；既需正向数据依赖，也需反向 slot 归还 | 已讲透一个真实实例 |
 | TMATMUL | Left×Right→Acc；A2/A3 half/bf16→fp32、int8→int32；运行时 M/K/N∈[1,4095] | 已讲基础与真实 kernel |
 | K-slice accumulation | 首 slice 用 TMATMUL 初始化 Acc，后续 slice 用 TMATMUL_ACC；Acc 跨全部 K-loop 常驻 | 已讲透基础 |
@@ -181,7 +183,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [fc62c8f8](https://github.com/hw-native-sys/pto-isa/commit/fc62c8f8d1555803695ccb5296a72639454d2922) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 unified `Workspace`/`AsyncCompletionRecord`、SDMA persistent `nextPostId` 与 handle/ring guard，并补齐 epoch tombstone、physical reuse fence 和 ABA contract | ISA 深挖 40 |
+| pto-isa | [cbca1e9b](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 SDMA per-queue、URMA per-jetty completion frontier 边界，以及 reset certificate、reader lease、manifest-first tombstone compaction contract | ISA 深挖 41 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -201,6 +203,9 @@ permalink: /learning/pto-curriculum/
 - ABA 必须分成两个证明域：generation-bound tombstone 只拒绝旧软件 evidence；旧 DMA/NIC writer 对同址新 allocation 的物理污染只能由覆盖完整 queue/session/registration scope 的 drain/reset fence 排除。
 - 安全复用必须 retire-before-reuse：`NoOldWriter` 证据先落盘，再提交 tombstone 与 action-keyed capacity release，最后初始化并 register 新 generation；先 free 后补 tombstone 存在不可接受的同址暴露窗口。
 - SDMA persistent `nextPostId` 和 58-bit exhaustion fail-closed 保护同一 workspace 生命周期，不能被扩大解释为跨 destroy/reallocate 的 allocation identity。
+- completion watermark 必须是 generation-bound、无洞且已持久化摄取的 logical frontier：SDMA 逐 queue，URMA 逐 `(peer,jetty)`；瞬时最大 record、raw CQ owner bit 或不同 domain 的数值最小值都不能替代。
+- tombstone 可压缩要求 producer domain 由 completion frontier 或 scope 完整的 reset certificate 全覆盖、所有 active reader ack 越过 tombstone revision、checkpoint 吸收 `retired_through` 与未决债务；三者是不同坐标空间的合取。
+- compaction 必须 manifest-first：先原子发布包含 retired summary 的 checkpoint，再 fencing/reload reader，最后幂等删除旧 segments；反序在 crash 后会同时丢失 tombstone 和替代摘要。
 
 - 跨 backend 证据连接必须先匹配 stable `operation_id + attempt_id + owner_epoch + execution_domain + workspace_generation + backend_profile`，再验证 causal edge；physical event ID、地址、worker sequence 与 timestamp 都不能替代时间身份。
 - logical causal DAG 可以统一，native topology 不可抹平：A2/A3 mode2 broadcast/reduce 压缩多条逻辑边；A5 必须逐 subblock、逐 pipe 验证 closure；CPU_SIM 跨 worker edge 必须由 launch/event adapter 提供。
@@ -1154,5 +1159,23 @@ permalink: /learning/pto-curriculum/
 - 待验证推断：设备 MMU/MR 撤销、CQE/post-done cache coherence 与 reset 精确覆盖域无法由公开头文件确认；`NoOldWriter` certificate 必须由 backend 文档、deterministic late-write fault injection 和真机 trace 校准。
 - 新知识债：durable allocation/generation registry、tombstone/fence schema、backend drain/reset/MR adapter、same-VA allocator、late-write simulator、generation wrap policy、consumer watermark/reader lease、safe compaction，以及 SDMA/URMA/RDMA 真机 crash differential Golden。
 - 下一章：**Tombstone 什么时候可以删除——Completion Watermark、Reset Certificate 与 Safe Compaction。**
+
+## 第 67 章课程账本增量
+
+- 源码基线：pto-isa [`cbca1e9b`](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88)，由已合入 [PR #347](https://github.com/hw-native-sys/pto-isa/pull/347) 同步；相对第 66 章的 `fc62c8f8`，本文直接引用的 comm 文件、规范与 notify 测试未变化。统一 workspace/completion 接口继续基于已合入提交 [`e6334fbd`](https://github.com/hw-native-sys/pto-isa/commit/e6334fbd6c5d6bfdf550201bbdb81a71831a99af)。
+- 新覆盖文件与符号：`comm_types.hpp` 的 `CompletionKind/AsyncCompletionRecord/kCompletionRecordCountError`；`async_event_impl.hpp` 的 SDMA per-queue 与 URMA multi-jetty record 枚举；SDMA `GetPostDoneRecordAddr/ReserveSdmaPostEvent/PersistSqTails/CheckPostDoneIds`；URMA `GetUrmaCompletionRecordAt` 的 CQ slot/lap owner predicate；`workspace.hpp` 与 `TPUT_ASYNC_NOTIFY.md`。
+- 新覆盖建议对象（非当前实现）：generation-bound `CompletionWatermark`、scoped `ResetCertificate`、reader lease/ack、`CompactionManifest`、`retired_through` 摘要与幂等 segment GC。
+- 结论修正：`CompletionKind` 虽定义 `RDMA_HNS1825_CQE`，当前 `async_event_impl.hpp` 的 record 导出分支只实现 SDMA 与条件编译的 URMA；RDMA 落入 default error。此前账本把 enum 定义写成统一导出能力，现更正为待补知识债。
+- 新确认不变量：
+  1. completion watermark 是同代、连续、已持久化摄取的 logical frontier，不是瞬时读到的最大 record；sequence 有洞时不能越过。
+  2. SDMA 必须逐 queue 维护 `postId` frontier；URMA 必须逐 `(workspace,peer,jetty)` 维护 logical `targetCqe`，raw owner bit 会随 CQ lap 翻转，不能取 max。
+  3. reset 只有在绑定 allocation/generation、完整 queue/QP/jetty/MR scope、freeze participant census、reset epoch 与 digest 时，才可替代缺失的 completion frontier；timeout 或“调用过 Reset”不是证书。
+  4. device completion frontier 与 evidence-reader revision 属于不同坐标空间；tombstone 删除要求 producer coverage、所有 active reader 越过创建 revision、checkpoint 吸收 retired summary三者合取。
+  5. reader lease 过期本身不授权忽略旧 reader；必须 fence 其访问 generation，并在重连时强制加载新 manifest。
+  6. compaction 必须先原子发布包含 `retired_through`、frontier/reset digest 与未决 debt 的 manifest，再 fencing/reload reader，最后幂等删除旧 segment；反序 crash 不可恢复。
+- 具体演算：`16×16xf32` ND payload=1024 B、UB scratch=256 B、`queueNum=2`；`alloc-9/g7` 的 `maxIssued=[130,130]`，设备 frontier `[130,129]`，reader ack `[220,218]`，tombstone revision 219。q1 与 reader c1 任一未越过都禁止 compaction；q1 可由 scope 完整的 reset certificate 替代。manifest 300 吸收 `retired_through[alloc-9]=7` 后才可删除旧 segment。
+- 直接测试事实：当前 65-post ring reuse 与“`postId=2` + 127 ordinary posts + `postId=130`”case 验证 live workspace 的 post ID、64-slot reuse、Wait、signal/payload/guard。提交记录报告 workspace header compile 与 URMA 2-rank 6 cases，明确 SDMA runtime 当时只编译；当前测试树未发现 `CompletionRecordCount/At` 的直接调用。
+- 未覆盖风险：watermark 洞、URMA CQ wrap、partial/wrong-scope reset、wrong generation/MR、stale reader、manifest CAS/torn write、ENOSPC、重复 GC、same-VA delayed writer，以及 SDMA/URMA/RDMA 真机 reset-scope differential Golden。
+- 下一章：**Compaction 崩溃怎么恢复——Snapshot Manifest、Log Segment 与 Atomic Cutover。**
 
 
