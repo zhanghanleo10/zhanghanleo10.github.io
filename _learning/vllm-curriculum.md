@@ -7,8 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 57 章把 CUDA Graph 从“一次 promotion”推进到“持续、可撤销的 capability”：当前 dispatch/metrics 能证明 descriptor compatibility 与使用分布，不能证明 replay correctness；因此 health evidence 必须绑定 graph generation、code/model/backend/config/topology fingerprints、oracle schema、expected ranks 与 record revision。按 key/metadata regime 分层 sentinel，mismatch 或契约变化先 fence graph admission，再以隔离 oracle revalidate。下一章把局部 graph health 接到 serving readiness、degraded capacity 与 revalidation backlog。
-
+- 当前主线：第 58 章把 graph semantic health 接到 serving control：当前 `/health` 只反映 EngineCore fatal/liveness，静态 admission 与 Scheduler metrics 尚未消费局部 graph health。某 key 降到 eager 仍可保证 correctness，但 mixed-route goodput、queue SLO 与 revalidation reserve 会改变安全容量；因此应区分 READY、DEGRADED 与 NOT_READY，并以 capacity revision 协调 routing、admission 与 LB。下一章研究多个失效 key 如何在有限 GPU/显存预算下调度 revalidation。\n
 ## 已完成章节
 
 | 日期/章节 | 主题 | vLLM commit | 文章 |
@@ -69,7 +68,7 @@
 | 2026-10-12 54 | `ledger + live handle + pool census → dual verdict → quarantine → auditable reclaim` | [`cc9b0f09`](https://github.com/vllm-project/vllm/commit/cc9b0f097d49abfa6fc94d1d773dca1cc2b9619c) | [账、Handle 和 Pool 对不上时信谁]({{ '/articles/vllm-cudagraph-tri-source-reconciliation-quarantine-auditable-reclaim/' | relative_url }}) |
 | 2026-10-13 55 | `tri-source quarantine → evidence/capacity/service deadlines → scope ladder → fresh-generation reconciliation` | [`f47792af`](https://github.com/vllm-project/vllm/commit/f47792af7fba76eb8e8f6a564b35cfad316d39f2) | [Quarantine 不能无限长]({{ '/articles/vllm-cudagraph-quarantine-deadline-escalation-minimal-reset/' | relative_url }}) |
 | 2026-10-15 56 | `fresh generation → isolated warmup → synthetic oracle → bounded canary → promotion/rollback` | [`8530aed2`](https://github.com/vllm-project/vllm/commit/8530aed2b78a19eb00e242031c22bb78d615eea2) | [Reset 后不能立刻全量接流]({{ '/articles/vllm-cudagraph-warmup-admission-canary-replay-rollback/' | relative_url }}) |
-| 2026-10-16 57 | `promotion → stratified sentinel → drift verdict → eager fence → revalidation/retire` | [`a956a812`](https://github.com/vllm-project/vllm/commit/a956a8126e6bd184cb0a6b8f7318fe4717675c2f) | [Promotion 不是永久许可证]({{ '/articles/vllm-cudagraph-sentinel-sampling-drift-revalidation/' | relative_url }}) |
+| 2026-10-16 57 | `promotion → stratified sentinel → drift verdict → eager fence → revalidation/retire` | [`a956a812`](https://github.com/vllm-project/vllm/commit/a956a8126e6bd184cb0a6b8f7318fe4717675c2f) | [Promotion 不是永久许可证]({{ '/articles/vllm-cudagraph-sentinel-sampling-drift-revalidation/' | relative_url }}) |\n| 2026-10-17 58 | `graph health → safe route → measured capacity → readiness/admission → revalidation backlog` | [`f019e3e1`](https://github.com/vllm-project/vllm/commit/f019e3e1055424075b440dfe40198d5d45e1dfe1) | [Graph 局部降级时服务还算 Ready 吗]({{ '/articles/vllm-serving-readiness-degraded-capacity-revalidation-backlog/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1432,5 +1431,30 @@
 - 直接测试/实验事实：`test_capture_and_replay` 对 `SimpleMLP`/10 tokens 用 `assert_close` 比较单次 eager/replay；bypass test 以 capture sizes `[1,2]` 覆盖 unseen size3 eager；DCP test 以8 requests、DCP2验证 FULL context=2、非 FULL=0。#61496 报告 Qwen3-235B TP8/DCP2 needle 0/9→9/9。当前没有 promotion 后 drift、oracle view overwrite、side-effect isolation、rank disagreement、stale PASS、cold-key coverage 或 sentinel SLO 测试；本章未重跑 GPU 测试。
 - 建议协议（非当前实现）：`GraphHealthRecord`、`SentinelPolicy`、`PROMOTED→SUSPECT→EAGER_ONLY→REVALIDATING→PROMOTED/RETIRED`、generation-bound replay lease 与 all-rank CAS verdict。
 - 新知识债：真实 schema/store、hidden/logits oracle copy、KV/Mamba/RNG/connector snapshot、fingerprint 枚举、per-key coverage、tolerance/false-positive budget、同步/异步 sentinel SLO、revalidation queue 与 fault-injection Golden。
-- 下一章：**Graph 局部降级时服务还算 Ready 吗——Serving Readiness、Degraded Capacity 与 Revalidation Backlog。**
+- 下一章：**Graph 局部降级时服务还算 Ready 吗——Serving Readiness、Degraded Capacity 与 Revalidation Backlog。**\n\n## 第 58 章课程账本增量
 
+- 日期：2026-10-17
+- 章节：**Graph 局部降级时服务还算 Ready 吗：Serving Readiness、Degraded Capacity 与 Revalidation Backlog**
+- 源码基线：[`f019e3e1`](https://github.com/vllm-project/vllm/commit/f019e3e1055424075b440dfe40198d5d45e1dfe1)，为研究时默认分支最新提交；该提交的 ROCm fusion 与本文链路无直接关系。直接相关进展为已合入 [PR #60398](https://github.com/vllm-project/vllm/pull/60398) / [`8733a21d`](https://github.com/vllm-project/vllm/commit/8733a21d5517d56fb7ef573b379eaeb7c08e1d03)。
+- 课程位置：`graph health → graph/eager route → mixed-route capacity → readiness/admission → revalidation backlog`
+- 新覆盖文件与符号：
+  - `vllm/entrypoints/serve/instrumentator/health.py`：HTTP `/health` 的 200/503 边界
+  - `vllm/v1/engine/async_llm.py`：`errored`、`check_health`、`check_admission`
+  - `vllm/v1/executor/{abstract,multiproc_executor,uniproc_executor}.py` 与 `vllm/v1/worker/worker_base.py`：executor/worker health contract 与 timeout fatal path
+  - `vllm/v1/core/sched/scheduler.py`：`max_num_active_reqs`、`make_stats`
+  - `vllm/v1/metrics/stats.py`：`SchedulerStats`、`cudagraph_stats`
+  - `tests/v1/engine/test_async_llm.py`、`tests/entrypoints/serve/instrumentator/test_basic.py`、`test_metrics.py`、`tests/v1/cudagraph/test_cudagraph_dispatch.py`
+- 新确认不变量：
+  1. 当前 `/health=200` 只证明未观察到 EngineCore fatal/output loop 停止，不证明 graph key 语义健康、设备进展或 SLO 容量。
+  2. semantic readiness 与 capacity readiness 不同：局部 key 有 generation-valid eager route 时可保持 correctness，但不能沿用 graph baseline 的容量声明。
+  3. `max_num_active_reqs`、queued request/token limits 是静态/近似 admission guard；当前不会因 K8 改走 eager 自动缩小。
+  4. `SchedulerStats` 已暴露 running/waiting/deferred/KV 与可选 graph 使用统计，可作 capacity evidence；它没有 graph health、effective capacity 或 revalidation backlog verdict。
+  5. DEGRADED 应先降权并收紧 admission；只有无安全路径，或减载后仍无法给出有界 SLO/恢复 reserve 时才 NOT_READY。
+  6. graph-health、capacity snapshot、admission/LB 更新必须绑定同一 `capacity_revision` 或 CAS，避免旧容量证据为新 eager route 放大流量。
+  7. revalidation backlog 必须按 GPU time、temporary bytes、age、traffic share 与 generation 计债，不能只计 job 数。
+- 具体演算：K1/K8/K16 traffic mix=60/30/10%；graph service time=2/4/7 ms，K8 eager=10 ms。加权时间从 3.1 ms 升到 4.9 ms，同 batching 假设下归一化容量约 63%。K8 是 8 个 one-token decode，教学 shape `hidden_states[8,4096]: bf16`，payload 约 64 KiB；数值不是 vLLM 默认 benchmark。
+- 直接测试/PR 事实：health 单测只覆盖 healthy、mock fatal 与恢复；HTTP basic test 只断言 200；dispatcher 用 capture sizes `[1,8]` 验证 size15→NONE 与 invalid FULL fallback；metrics test 固定检查 running/waiting/waiting_by_reason/KV。PR #60398 为 stuck `execute_dummy_batch` 增加 execute-model timeout，使“进程活着但无法前进”进入 fatal path；PR 作者报告参数化 6 tests passed。
+- 建议协议（非当前实现）：`CapacitySnapshot`、`ReadinessVerdict(READY/DEGRADED/NOT_READY)`、`RevalidationJob`、`capacity_revision`、capacity-aware admission/LB 与 hysteresis。
+- 新知识债：真实 schema/controller、per-key traffic share、mixed-route goodput estimator、动态 queue cap/LB weight、CAS/hysteresis、revalidation cost model、GPU/显存 reserve、TP/PP rank 一致性与多实例 fault-injection E2E。
+- 下一章：**Revalidation Scheduling、Priority Aging 与 Recovery Budget。**
+\n
