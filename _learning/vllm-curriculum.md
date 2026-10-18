@@ -7,7 +7,8 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 58 章把 graph semantic health 接到 serving control：当前 `/health` 只反映 EngineCore fatal/liveness，静态 admission 与 Scheduler metrics 尚未消费局部 graph health。某 key 降到 eager 仍可保证 correctness，但 mixed-route goodput、queue SLO 与 revalidation reserve 会改变安全容量；因此应区分 READY、DEGRADED 与 NOT_READY，并以 capacity revision 协调 routing、admission 与 LB。下一章研究多个失效 key 如何在有限 GPU/显存预算下调度 revalidation。\n
+- 当前主线：第 59 章把 revalidation backlog 变成受约束的恢复调度：当前 V1 priority queue 采用静态 `(priority, arrival_time, request_id)` 排序，跨 priority 没有 aging；推理 token/KV budget 也不能直接表达 graph capture/oracle 的 GPU 时间与临时显存。建议以独立 recovery lane、hard eligibility、GPU/显存双预算、utility 与 deadline bucket 协调恢复效率和最终进展。下一章研究 recovery job 执行中遇到在线负载突增时的安全抢占与恢复。
+
 ## 已完成章节
 
 | 日期/章节 | 主题 | vLLM commit | 文章 |
@@ -68,7 +69,9 @@
 | 2026-10-12 54 | `ledger + live handle + pool census → dual verdict → quarantine → auditable reclaim` | [`cc9b0f09`](https://github.com/vllm-project/vllm/commit/cc9b0f097d49abfa6fc94d1d773dca1cc2b9619c) | [账、Handle 和 Pool 对不上时信谁]({{ '/articles/vllm-cudagraph-tri-source-reconciliation-quarantine-auditable-reclaim/' | relative_url }}) |
 | 2026-10-13 55 | `tri-source quarantine → evidence/capacity/service deadlines → scope ladder → fresh-generation reconciliation` | [`f47792af`](https://github.com/vllm-project/vllm/commit/f47792af7fba76eb8e8f6a564b35cfad316d39f2) | [Quarantine 不能无限长]({{ '/articles/vllm-cudagraph-quarantine-deadline-escalation-minimal-reset/' | relative_url }}) |
 | 2026-10-15 56 | `fresh generation → isolated warmup → synthetic oracle → bounded canary → promotion/rollback` | [`8530aed2`](https://github.com/vllm-project/vllm/commit/8530aed2b78a19eb00e242031c22bb78d615eea2) | [Reset 后不能立刻全量接流]({{ '/articles/vllm-cudagraph-warmup-admission-canary-replay-rollback/' | relative_url }}) |
-| 2026-10-16 57 | `promotion → stratified sentinel → drift verdict → eager fence → revalidation/retire` | [`a956a812`](https://github.com/vllm-project/vllm/commit/a956a8126e6bd184cb0a6b8f7318fe4717675c2f) | [Promotion 不是永久许可证]({{ '/articles/vllm-cudagraph-sentinel-sampling-drift-revalidation/' | relative_url }}) |\n| 2026-10-17 58 | `graph health → safe route → measured capacity → readiness/admission → revalidation backlog` | [`f019e3e1`](https://github.com/vllm-project/vllm/commit/f019e3e1055424075b440dfe40198d5d45e1dfe1) | [Graph 局部降级时服务还算 Ready 吗]({{ '/articles/vllm-serving-readiness-degraded-capacity-revalidation-backlog/' | relative_url }}) |
+| 2026-10-16 57 | `promotion → stratified sentinel → drift verdict → eager fence → revalidation/retire` | [`a956a812`](https://github.com/vllm-project/vllm/commit/a956a8126e6bd184cb0a6b8f7318fe4717675c2f) | [Promotion 不是永久许可证]({{ '/articles/vllm-cudagraph-sentinel-sampling-drift-revalidation/' | relative_url }}) |
+| 2026-10-17 58 | `graph health → safe route → measured capacity → readiness/admission → revalidation backlog` | [`f019e3e1`](https://github.com/vllm-project/vllm/commit/f019e3e1055424075b440dfe40198d5d45e1dfe1) | [Graph 局部降级时服务还算 Ready 吗]({{ '/articles/vllm-serving-readiness-degraded-capacity-revalidation-backlog/' | relative_url }}) |
+| 2026-10-18 59 | `EAGER_ONLY backlog → eligibility/budget → utility + aging → isolated revalidation → capacity revision` | [`9c778e9f`](https://github.com/vllm-project/vllm/commit/9c778e9ff8d0c78a241d7f530c441c2dc1d67533) | [谁先修、修多久]({{ '/articles/vllm-cudagraph-revalidation-scheduling-priority-aging-recovery-budget/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -414,6 +417,8 @@
 - `CUDAGraphStat/CUDAGraphLogging.observe/generate_metric_table`
 - `ModelCudaGraphManager.run_fullgraph`（persistent hidden-state slice 生命周期）
 - `GraphHealthRecord/SentinelPolicy/RevalidationVerdict`（第 57 章建议协议，尚未合入）
+- `SchedulingPolicy/PriorityRequestQueue/Request.__lt__`（当前 V1 静态 priority ordering）
+- `RevalidationJob/RecoveryLease/RecoveryBudget`（第 59 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -641,6 +646,12 @@
 218. `CuMemAllocator.discard("cudagraph")` 的作用域是当前 allocator 中该 tag 的全部 mapped allocation，不是单个 `BatchDescriptor`；记录 reset scope 时不得降格为 KEY。
 219. 最小故障域是恢复全部被破坏不变量所需的最小真实作用域：key routing、wrapper entries、worker context、TP rank/communicator generation 与 engine control state 分层判断。
 220. reset 完成后仍需 current owner/revision、fresh worker attempt/context generation、expected-rank handshake、旧 lease=0 与同 revision pool/allocator census 才能结束 quarantine 和返还预算。
+221. V1 priority ordering 是静态 (priority, arrival_time, request_id)；arrival time 只在同 priority 内破平局，当前不存在跨 priority aging。
+222. time-varying effective priority 不能直接放进已有 heap comparator；aging 必须在调度边界显式提升到 deadline bucket 或重建有界候选集。
+223. revalidation eligibility（generation、fingerprint、expected ranks、隔离状态）是 correctness gate，任何 utility、age 或 deadline 都不能越过。
+224. recovery GPU time 与 temporary memory 是不同单位的硬预算；在线、恢复和 failure reserve 必须分别守恒，不能由单一 score 代替 admission。
+225. deadline 只保证 job 获得服务决策与升级路径，不授权突破当前 GPU/显存预算；资源不足时应减载、defer 或升级 readiness。
+226. RecoveryLease 到期只能阻止尚未开始的新阶段；已发起的 device work 必须由 completion/drain/reset witness 闭合，不能因 lease expiry 假定停止。
 
 ## 前置依赖与版本注意
 
@@ -648,6 +659,8 @@
 - 直接向 InputProcessor 传 raw prompt、向 LLMEngine 传 `EngineCoreRequest` 均处于 v0.18 移除迁移期。
 
 ## 尚未解释的知识债
+
+- 缺少真实 `RevalidationJob/RecoveryLease/RecoveryBudget`、per-key traffic/cost estimator、mandatory-deadline bucket、动态 admission/LB 联动，以及 starvation、online spike、partial-rank 与 worker-crash 联合 Golden。
 
 - 缺少实际 `OwnerLease/KillIntent/ProcessFinal/GroupFinal` durable registry、register-before-create token、orphan discovery、destructive-action epoch enforcement，以及 create/register/kill/reap/final/checkpoint 的 deterministic failpoint/replay oracle。
 - 缺少 `BackendQueryVerdict/RecoveryRecord`、attempt-scoped tombstone、`ACTION_UNKNOWN` recovery loop、stable evidence reason 和 quarantine policy；尚无 journal + backend snapshot + epoch 的可执行 reconciliation oracle。
@@ -1431,7 +1444,9 @@
 - 直接测试/实验事实：`test_capture_and_replay` 对 `SimpleMLP`/10 tokens 用 `assert_close` 比较单次 eager/replay；bypass test 以 capture sizes `[1,2]` 覆盖 unseen size3 eager；DCP test 以8 requests、DCP2验证 FULL context=2、非 FULL=0。#61496 报告 Qwen3-235B TP8/DCP2 needle 0/9→9/9。当前没有 promotion 后 drift、oracle view overwrite、side-effect isolation、rank disagreement、stale PASS、cold-key coverage 或 sentinel SLO 测试；本章未重跑 GPU 测试。
 - 建议协议（非当前实现）：`GraphHealthRecord`、`SentinelPolicy`、`PROMOTED→SUSPECT→EAGER_ONLY→REVALIDATING→PROMOTED/RETIRED`、generation-bound replay lease 与 all-rank CAS verdict。
 - 新知识债：真实 schema/store、hidden/logits oracle copy、KV/Mamba/RNG/connector snapshot、fingerprint 枚举、per-key coverage、tolerance/false-positive budget、同步/异步 sentinel SLO、revalidation queue 与 fault-injection Golden。
-- 下一章：**Graph 局部降级时服务还算 Ready 吗——Serving Readiness、Degraded Capacity 与 Revalidation Backlog。**\n\n## 第 58 章课程账本增量
+- 下一章：**Graph 局部降级时服务还算 Ready 吗——Serving Readiness、Degraded Capacity 与 Revalidation Backlog。**
+
+## 第 58 章课程账本增量
 
 - 日期：2026-10-17
 - 章节：**Graph 局部降级时服务还算 Ready 吗：Serving Readiness、Degraded Capacity 与 Revalidation Backlog**
@@ -1457,4 +1472,27 @@
 - 建议协议（非当前实现）：`CapacitySnapshot`、`ReadinessVerdict(READY/DEGRADED/NOT_READY)`、`RevalidationJob`、`capacity_revision`、capacity-aware admission/LB 与 hysteresis。
 - 新知识债：真实 schema/controller、per-key traffic share、mixed-route goodput estimator、动态 queue cap/LB weight、CAS/hysteresis、revalidation cost model、GPU/显存 reserve、TP/PP rank 一致性与多实例 fault-injection E2E。
 - 下一章：**Revalidation Scheduling、Priority Aging 与 Recovery Budget。**
-\n
+
+## 第 59 章课程账本增量
+
+- 日期：2026-10-18
+- 章节：**谁先修、修多久：Revalidation Scheduling、Priority Aging 与 Recovery Budget**
+- 源码基线：[`9c778e9f`](https://github.com/vllm-project/vllm/commit/9c778e9ff8d0c78a241d7f530c441c2dc1d67533)，为研究时默认分支最新提交；该提交修复 EPLB/NIXL pending expert buffer copy 等待，与本文主路径无直接关系。直接相关已合入修复为 [`4d341ca8`](https://github.com/vllm-project/vllm/commit/4d341ca829d7fbad351b3a5a17d1405e63dc5bf2)，RFC [#51608](https://github.com/vllm-project/vllm/issues/51608) 只作规划证据。
+- 课程位置：`EAGER_ONLY keys → immutable recovery jobs → eligibility/budget → utility + priority aging → isolated revalidation → capacity revision`
+- 新覆盖文件与符号：
+  - `vllm/v1/request.py`：`Request.priority/arrival_time/__lt__`
+  - `vllm/v1/core/sched/request_queue.py`：`SchedulingPolicy`、`PriorityRequestQueue`、`create_request_queue`
+  - `vllm/v1/core/sched/scheduler.py`：waiting admission、token/input budget、priority victim selection 与 cursor mutation
+  - `vllm/config/scheduler.py`：`policy`、`max_num_batched_tokens`、`max_num_scheduled_tokens`、`max_num_active_seqs`
+  - `tests/v1/core/test_scheduler.py`、`test_priority_scheduler_random.py` 与 commit `4d341ca8` 的 regression test
+- 新确认不变量：
+  1. 当前 priority 是静态整数排序；arrival time 只在同级破平局，没有跨 priority aging。
+  2. 动态 aging 不能直接写入 heap comparator，应在 scheduling boundary 用 deadline bucket 或有界重排显式实现。
+  3. revalidation 的 generation/rank/isolation eligibility 是 hard gate，排序和 deadline 无权越过。
+  4. GPU time 与 temporary memory 必须分别守恒；deadline 只授予服务决策，不授予突破物理预算。
+  5. RecoveryLease 到期不能证明在途 device work 已停止；停止/重做仍需 completion、drain 或 reset witness。
+- 具体演算：1 秒窗口中 online 760 ms、safety reserve 120 ms，recovery GPU budget=120 ms；64 MiB headroom 扣 24 MiB failure reserve，temporary budget=40 MiB。K8/K1/K16 的 cost 分别为 40/15/90 ms、12/4/20 MiB；第一窗按 utility 选择 K8+K1，第二窗 K16 到 60 秒 deadline 后进入 mandatory bucket，但仍须满足 90 ms/20 MiB eligibility。
+- 直接测试/commit 事实：basic/mixed/arrival tests 覆盖静态排序；block size16、6 blocks 的 preemption test 覆盖低优先级 victim；random blast 在两种容量配置、prefix cache 开关、spec tokens 三组下运行20,000 step并检查输出结构；`4d341ca8` 覆盖 victim 删除后的 cursor 修正。当前没有持续高优先流量下的 starvation upper bound、aging、recovery budget 或 serving SLO 联合测试；本章未声称重跑 GPU 测试。
+- 建议协议（非当前实现）：`RevalidationJob`、`RecoveryLease`、`RecoveryBudget`、mandatory-deadline bucket、capacity-revision CAS 与 estimated/actual cost feedback。
+- 新知识债：schema/store、cost estimator、动态 admission/LB、TP/PP lease、可抢占阶段、deadline/hysteresis 校准，以及 online-load×worker-crash×partial-rank fault matrix。
+- 下一章：**Revalidation 执行到一半在线流量突增怎么办——Preemptible Recovery、Checkpoint 与 Safe Resume。**
