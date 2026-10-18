@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-17。
+最后更新：2026-10-18。
 
 ## 总体路线
 
@@ -19,7 +19,8 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 68 在 completion frontier 与 tombstone compaction 之上，明确 `AsyncCompletionRecord`/GM counter 不是 durable log；crash-safe compaction 必须在 revision R 旋转 segment，完整发布 immutable snapshot 与 versioned manifest，再以 `CURRENT` 原子切换作为启动入口，reader ack/fence 后才幂等删除旧对象。任意 crash 只能留下 orphan 或空间泄漏，不能形成状态缺口。下一步研究 compaction 速率、write amplification、checkpoint cadence 与 backpressure。\n
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 69 在 crash-safe snapshot/manifest cutover 之上，把连续 compaction 约束化：checkpoint cadence 必须同时满足 write-amplification 下界、replay RTO 与 durable-space 上界；当 canonical 输入速率长期不低于 compactor 吸收速率时，调周期无法让 backlog 收敛，必须向新 admission 传播 backpressure，同时为已提交 operation 的 completion/reset evidence 保留不可阻塞 safety lane。下一步研究 recovery-only drain 后的 catch-up proof、debt closure 与 hysteresis release。
+
 ## 已完成章节
 
 | 日期 | 章节 | 核心中间产物 | 文章 |
@@ -91,6 +92,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-14 | Bounded Quarantine、Orphan Action GC 与长期容量回收 | workspace abandon/completion record → bounded quarantine → orphan GC → evidence/reset-covered reclaim | [课程 65]({% post_url 2026-10-14-pto-isa-bounded-quarantine-orphan-action-gc-long-term-capacity-recovery %}) |
 | 2026-10-15 | Epoch Tombstone、Reuse Fence 与 ABA 防护 | persistent postId/record → logical vs physical ABA → no-old-writer fence → retire-before-reuse | [课程 66]({% post_url 2026-10-15-pto-isa-epoch-tombstone-reuse-fence-aba-prevention %}) |
 | 2026-10-16 | Completion Watermark、Reset Certificate 与 Safe Compaction | per-domain frontier / reset coverage → reader ack → manifest publish → segment GC | [课程 67]({% post_url 2026-10-16-pto-isa-completion-watermark-reset-certificate-safe-compaction %}) |\n| 2026-10-17 | Snapshot Manifest、Log Segment 与 Atomic Cutover | seal at R → immutable snapshot/manifest → atomic CURRENT → reader ack → idempotent GC | [课程 68]({% post_url 2026-10-17-pto-isa-snapshot-manifest-log-segment-atomic-cutover %}) |
+| 2026-10-18 | Checkpoint Cadence、Write Amplification 与 Backpressure | WA/RTO/space feasible interval → debt watermarks → safety lane → admission backpressure | [课程 69]({% post_url 2026-10-18-pto-isa-checkpoint-cadence-write-amplification-backpressure %}) |
 
 ## ISA 知识地图
 
@@ -115,6 +117,7 @@ permalink: /learning/pto-curriculum/
 | AsyncEvent/aggregate SDMA recovery | SDMA handle 只编码 `postId+queueCount`；`DEFER` 可在 doorbell 前返回 future handle。恢复必须绑定 domain/session/workspace generation 与 owner-range，按 physical post 共同 retire；query 不可用时只能可信 reset 或 quarantine | 已讲透恢复边界；runtime adapter/canary 待实现 |
 | Workspace reuse / ABA boundary | persistent `nextPostId` 与 58-bit fail-before-wrap 只保护 live workspace；fresh allocation 可从零状态开始。generation tombstone 拒绝旧 evidence，但同址 late write 必须由 drain/reset 的 `NoOldWriter` fence 消灭；安全顺序是 fence→tombstone→capacity release→g+1 register | 逻辑/物理 ABA 与顺序证明已讲透；registry、fence adapter、same-VA Golden 待实现 |
 | Completion frontier / tombstone compaction | SDMA watermark 必须逐 queue 维护连续、同代、已持久化的 `postId` 前缀；URMA 必须逐 `(peer,jetty)` 维护 logical `targetCqe`，raw owner bit 不可取 max。tombstone 仅在 producer completion/reset 全覆盖、active reader 越过创建 revision、checkpoint 吸收 `retired_through` 后，按 manifest-first 顺序压缩 | safe cutoff 与 crash 顺序已讲透；schema、reset certificate、reader lease、segment GC 与真机 Golden 待实现 |\n| Snapshot/manifest atomic cutover | current `AsyncCompletionRecord` 是 borrowed runtime view，GM `nextPostId` 只保证 live workspace/session 连续性。建议在 revision R seal segment，先 durable immutable snapshot/manifest，再 CAS/rename `CURRENT`；R+1 起无 gap replay，reader fence 后幂等 GC | cutover/recovery 不变量已讲透；durable store、owner-fenced rotation、reader token、ENOSPC 与 crash harness 待实现 |
+| Compaction cadence / backpressure | cadence 必须落在 WA 下界与 replay RTO、durable-space 上界的交集；若 canonical 输入长期不低于 compactor 吸收能力，调周期不能收敛。backpressure 只能抑制新债务，已提交 operation 的完整 completion/reset evidence 必须走预留 safety lane | 稳定性与压力传播边界已讲透；真实 census、benchmark、emergency segment、admission controller 与 ENOSPC Golden 待实现 |
 | TPipe/TPUSH/TPOP | A2/A3 跨 Cube/Vector Tile 传递包含 GM payload ring 与 ready/free credit | 已讲基础 |
 | DIR_BOTH ownership | C2V/V2C 必须使用两条不重叠 ring；总 footprint=`2×SlotNum×SlotSize` | 已讲透核心缺陷 |
 | Credit batching | 初始 SlotNum 个 entries 免等待；之后 consumer 每 SyncPeriod 个 pop 发一个 credit，producer 每 SyncPeriod 个 wrap 前消费一个 | 已讲透 depth=8/40 entries |
@@ -182,7 +185,7 @@ permalink: /learning/pto-curriculum/
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [cbca1e9b](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 borrowed completion view 与 durable identity 边界、sealed segment、immutable snapshot/versioned manifest、atomic `CURRENT` cutover 和 reader-fenced GC contract | ISA 深挖 42 |
+| pto-isa | [cbca1e9b](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 borrowed completion view、atomic snapshot/manifest cutover、cadence 可行区间、三维 debt watermarks、safety lane 与 admission backpressure 边界 | ISA 深挖 43 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -1206,3 +1209,28 @@ permalink: /learning/pto-curriculum/
 - 新知识债：durable store/schema、stable identity、owner-fenced rotation、snapshot builder、digest/gap verifier、POSIX/object-store adapter、reader lease、ENOSPC reserve、orphan sweeper、idempotent GC、same-VA late write 与逐 crash-point fault harness。
 - 下一章：**Compaction 跟不上 retire 速率怎么办——Checkpoint Cadence、Write Amplification 与 Backpressure。**
 \n
+
+## 第 69 章课程账本增量
+
+- 日期：2026-10-18
+- 章节：**Compaction 追不上 Retire 怎么办：Checkpoint Cadence、Write Amplification 与 Backpressure**
+- 源码基线：pto-isa [`cbca1e9b`](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88)，默认分支相对第 68 章未变化；统一 workspace/completion facade 继续基于已合入 [`e6334fbd`](https://github.com/hw-native-sys/pto-isa/commit/e6334fbd6c5d6bfdf550201bbdb81a71831a99af)。
+- 课程位置：`complete record-set → canonical append → cadence feasibility → snapshot/manifest cutover → reader fence/GC`；不可行时进入 `THROTTLED/RECOVERY_ONLY`，但保留 safety evidence intake。
+- 新覆盖文件与符号：
+  - `include/pto/comm/comm_types.hpp`：24 B runtime `AsyncCompletionRecord` 与 error sentinel
+  - `include/pto/comm/async_common/async_event_impl.hpp`：SDMA/URMA 完整 record-set 枚举
+  - `include/pto/comm/async/sdma/sdma_async_detail_post.hpp`：`ReserveSdmaPostEvent/PersistSqTails/CheckPostDoneIds`
+  - `include/pto/comm/workspace.hpp`：`DestroyWorkspace` 与 clear-only `AbandonWorkspace`
+  - A2/A3 `tput_async_notify` 的 65-post、postId 2→130、queue4 与并发 AIV tests
+- 当前实现边界：仓库没有 checkpoint scheduler、durable compactor、write-amplification/backlog metric、emergency segment 或 backpressure controller；本文公式、状态机与接口均为基于当前 ownership/lifetime 事实的 Host recovery 建议。
+- 新确认不变量：
+  1. cadence 是约束区间：snapshot WA 给下界，replay RTO 与 durable headroom 给上界；交集为空时不能伪造“最佳周期”。
+  2. backlog 由 `λ_b-μ_c` 决定；长期 `λ_b≥μ_c` 时调 cadence 只改变粒度，不能恢复稳定。
+  3. uncheckpointed bytes、reader-pinned bytes 与 unreclaimed device capacity 是不同债务，不能用单一 queue length 代替。
+  4. backpressure 可阻止新 workspace/admission 与非关键重试，不得阻塞已提交 operation 的完整 completion/reset/capacity evidence。
+  5. storage pressure 不改变 per-queue/per-jetty completion 合取，也不把 `AbandonWorkspace` 变成 native free。
+  6. mode transition 与 census/admission 必须绑定 revision；解除降级需要 fresh low-watermark 稳定窗口，不能由一次瞬时下降触发。
+- 具体演算：教学参数 `λ=2000 records/s`、`b=256 B`、snapshot 16 MiB、replay 20k records/s、base 2 s、RTO 8 s、`WA_max=2`、durable headroom 24 MiB，推出 cadence 合法区间 `[32 s,48 s]`；选 40 s 时 WA=1.8×、最坏恢复约 6 s。若 compactor 仅 400 KiB/s 而输入 500 KiB/s，积压每分钟约增 5.86 MiB，必须 backpressure。
+- 直接测试/提交事实：当前 notify cases 证明 live workspace 的 post ID、64-slot reuse、payload/signal/guard 与并发行为；`e6334fbd` 报告 workspace header compile、URMA 2-rank 6 cases，SDMA runtime 当时仅编译。它们不覆盖 Host cadence、backlog 收敛、WA、ENOSPC、safety-lane reserve 或 hysteresis；本章未重跑 NPU。
+- 新知识债：durable record-size/mix census、snapshot/replay/compaction benchmark、revision-bound watermarks、emergency segment、owner-fenced mode CAS、admission verdict、reader-pinned attribution、object-store/ENOSPC adapter，以及 burst×stale-reader×partial-completion fault Golden。
+- 下一章：**Backpressure 后如何安全恢复——Catch-up Watermark、Debt Closure 与 Hysteresis Release。**
