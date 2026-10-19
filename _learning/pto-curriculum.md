@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-18。
+最后更新：2026-10-19。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 69 在 crash-safe snapshot/manifest cutover 之上，把连续 compaction 约束化：checkpoint cadence 必须同时满足 write-amplification 下界、replay RTO 与 durable-space 上界；当 canonical 输入速率长期不低于 compactor 吸收速率时，调周期无法让 backlog 收敛，必须向新 admission 传播 backpressure，同时为已提交 operation 的 completion/reset evidence 保留不可阻塞 safety lane。下一步研究 recovery-only drain 后的 catch-up proof、debt closure 与 hysteresis release。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 70 把 recovery-only 之后的恢复条件拆成四份证据：canonical prefix catch-up、snapshot/manifest absorption、reader fence/GC 与 generation-bound capacity receipt/fresh census；低水位由 replay RTO、durable headroom、snapshot peak、检测窗口和下一档输入率共同推导，模式通过 pressure-epoch CAS 按 `RECOVERY_ONLY → THROTTLED → NORMAL` 逐级恢复。下一步研究 admission token 与 census revision 的 TOCTOU-free 容量保留。
 
 ## 已完成章节
 
@@ -93,6 +93,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-15 | Epoch Tombstone、Reuse Fence 与 ABA 防护 | persistent postId/record → logical vs physical ABA → no-old-writer fence → retire-before-reuse | [课程 66]({% post_url 2026-10-15-pto-isa-epoch-tombstone-reuse-fence-aba-prevention %}) |
 | 2026-10-16 | Completion Watermark、Reset Certificate 与 Safe Compaction | per-domain frontier / reset coverage → reader ack → manifest publish → segment GC | [课程 67]({% post_url 2026-10-16-pto-isa-completion-watermark-reset-certificate-safe-compaction %}) |\n| 2026-10-17 | Snapshot Manifest、Log Segment 与 Atomic Cutover | seal at R → immutable snapshot/manifest → atomic CURRENT → reader ack → idempotent GC | [课程 68]({% post_url 2026-10-17-pto-isa-snapshot-manifest-log-segment-atomic-cutover %}) |
 | 2026-10-18 | Checkpoint Cadence、Write Amplification 与 Backpressure | WA/RTO/space feasible interval → debt watermarks → safety lane → admission backpressure | [课程 69]({% post_url 2026-10-18-pto-isa-checkpoint-cadence-write-amplification-backpressure %}) |
+| 2026-10-19 | Catch-up Watermark、Debt Closure 与 Hysteresis Release | prefix catch-up + pending capacity → vector debt closure → pressure-epoch mode CAS → staged admission | [课程 70]({% post_url 2026-10-19-pto-isa-catch-up-watermark-debt-closure-hysteresis-release %}) |
 
 ## ISA 知识地图
 
@@ -180,12 +181,13 @@ permalink: /learning/pto-curriculum/
 | Async lease 与 generation fence | `AsyncEvent` 分离 submit/completion，但未绑定 owner/range/generation；timeout、`Test=false`、cancel requested 都不授权复用。只有同代 completion、confirmed cancel 或可信 execution-domain reset 可结束 quarantine | 当前 EmitC 链与 VPTO fail-closed 已确认；token/cancel/quarantine 实现待补 |
 | Runtime Lease Registry | PlanMemory 只产出静态 root/reuse-group/offset；pypto 已用 retained Buffer/object identity 拒绝同地址 stale free。权威 registry 必须位于控制真实 allocation/free list 且能消费 backend terminal evidence 的 runtime owner | 所有权边界与 crash fail-closed 已闭合；durable schema/golden 待实现 |
 | Workspace quarantine / admission | simpler `WorkspaceManager` 已将 current backing、run reference 与 obsolete generation 分离；completion facts 未闭合时 whole-block quarantine，有限 `workspace_budget_bytes` 超限即拒绝且不改变 published state。report 明示 partial coverage，retained scheduler-state 的 per-slot current/failed/growth bytes 仍在预算外 | whole-allocation hard gate 已落地；device census、measured reserve、high/low pressure state、structured reason 与 subrange physical release 待补 |
+| Catch-up / debt closure / release | canonical revision prefix 只证明 durable append/snapshot/reader 连续性；乱序 capacity action 另以 generation-bound pending set 收敛。`U/P/C` 分别由 manifest、reader fence、capacity receipt+fresh census 闭合；low watermark 从 RTO/space/service-rate 推导，pressure-epoch CAS 分级恢复 admission | 当前源码仅提供完整 completion record-set 与 workspace ownership；Host controller/schema/store/fault Golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [cbca1e9b](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 borrowed completion view、atomic snapshot/manifest cutover、cadence 可行区间、三维 debt watermarks、safety lane 与 admission backpressure 边界 | ISA 深挖 43 |
+| pto-isa | [cbca1e9b](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 borrowed completion view、atomic cutover、cadence/backpressure、catch-up prefix、capacity pending set、vector debt closure 与 staged hysteresis release 边界 | ISA 深挖 44 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -402,6 +404,11 @@ permalink: /learning/pto-curriculum/
 - checkpoint manifest 与 compaction cutoff 只能由当前 owner epoch 以 CAS 发布；旧 owner 的 checksum-valid candidate 不能推进 canonical state，也无权删除新 owner 的恢复证据。
 - quarantine 被 checkpoint 物化只表示隔离义务迁移成功，不表示 backing 可复用；释放仍需同代 completion、confirmed cancel 或可信 execution-domain reset。
 - 恢复启动必须先重建 quarantine/operation registry，再开放 allocator/free list；WAL segment 缺失永远不能解释为对应 debt 已不存在。
+- catch-up watermark 只能证明 canonical revision 的连续前缀；乱序、per-allocation 的 capacity debt 必须另以 generation-bound pending set 收敛，不能压成同一 scalar frontier。
+- uncheckpointed、reader-pinned 与 unreclaimed device capacity 分别由 manifest absorption、reader ack/fence、capacity receipt+ledger CAS+fresh census 闭合；任一观测不能越级替代另一类证据。
+- recovery-only 的 low watermark 必须由 replay RTO、durable free space、snapshot peak、emergency reserve、检测窗口和 `λ_next` 共同推导；固定百分比不是安全契约。
+- mode release 前必须证明下一档 projected evidence rate 小于 compactor effective service rate；当前 debt 清零不保证恢复流量后仍稳定。
+- `RECOVERY_ONLY→THROTTLED→NORMAL` 的每次转换必须绑定 pressure epoch、observed revision、debt digest 与 fresh census，并以 CAS fencing stale controller/admission token。
 
 ## 待验证推断
 
@@ -489,6 +496,7 @@ permalink: /learning/pto-curriculum/
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
 - Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–49 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery、admission 与 pressure-control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、device-wide `MemoryCensus`、scheduler-state charge、watermark state machine、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/OOM/A5 guard-page/canary/poison/性能矩阵。
 - TPipe recovery 主线已推进到 transition audit、cross-backend correlation、typed causal graph、orphan GC 与跨 allocation ABA 防护；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor/StableReason/TransitionAudit/CorrelationId/EvidenceEnvelope/CausalLink/EpochTombstone/ReuseFenceCertificate` schema、canonical/evidence-root hash、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、native signal ordinal/adapter、reader lease、retention/redaction、native query/reset fence、same-VA late-write/crash matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
+- durable compaction/backpressure 仍欠 `CatchUpWatermark/DebtClosureProof/PendingCapacity/ModeTransition` schema、snapshot/reader/capacity receipt store、`λ/μ_c` 分位数与 burst estimator、pressure-epoch CAS、fresh census adapter，以及 stale controller、reader resurrection、partial record-set、wrong-epoch apply、ENOSPC 和 crash-at-transition fault matrix。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
 - 生成 C++ 需要固定的 barrier-count/topology golden，并以设备 poison/delay 压测验证删减后的低概率 race；当前 `run.py` 只验证终值与总 latency。
 - A2/A3 与 A5 的同步、DMA、layout 和数值差异。
@@ -1234,3 +1242,36 @@ permalink: /learning/pto-curriculum/
 - 直接测试/提交事实：当前 notify cases 证明 live workspace 的 post ID、64-slot reuse、payload/signal/guard 与并发行为；`e6334fbd` 报告 workspace header compile、URMA 2-rank 6 cases，SDMA runtime 当时仅编译。它们不覆盖 Host cadence、backlog 收敛、WA、ENOSPC、safety-lane reserve 或 hysteresis；本章未重跑 NPU。
 - 新知识债：durable record-size/mix census、snapshot/replay/compaction benchmark、revision-bound watermarks、emergency segment、owner-fenced mode CAS、admission verdict、reader-pinned attribution、object-store/ENOSPC adapter，以及 burst×stale-reader×partial-completion fault Golden。
 - 下一章：**Backpressure 后如何安全恢复——Catch-up Watermark、Debt Closure 与 Hysteresis Release。**
+
+
+## 第 70 章课程账本增量
+
+- 日期：2026-10-19
+- 章节：**Backpressure 何时能解除：Catch-up Watermark、Debt Closure 与 Hysteresis Release**
+- 源码基线：pto-isa [`cbca1e9b`](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88)，默认分支相对第 69 章未变化；统一 workspace/completion facade 继续基于已合入 [`e6334fbd`](https://github.com/hw-native-sys/pto-isa/commit/e6334fbd6c5d6bfdf550201bbdb81a71831a99af)。
+- 课程位置：`RECOVERY_ONLY → canonical prefix catch-up → vector debt closure → THROTTLED ramp → NORMAL`。
+- 新覆盖文件与符号：
+  - `include/pto/comm/comm_types.hpp`：24 B `AsyncCompletionRecord`、completion kind 与 error sentinel
+  - `include/pto/comm/async_common/async_event_impl.hpp`：SDMA per-queue、URMA multi-jetty 完整 record-set
+  - `include/pto/comm/async/sdma/sdma_async_detail_post.hpp`：`CheckPostDoneIds`、persistent `nextPostId` 与 queue conjunction
+  - `include/pto/comm/workspace.hpp`：`DestroyWorkspace` 与 clear-only `AbandonWorkspace`
+  - A2/A3 `tput_async_notify` 的 queue4、65-post、postId2→130 与 concurrent AIV tests
+- 当前实现边界：仓库没有 canonical revision、snapshot/manifest store、reader fence、capacity receipt、fresh census、pressure epoch 或 admission mode controller；本章对象和状态机均为基于当前 completion/workspace 事实的建议协议。
+- 新确认不变量：
+  1. prefix catch-up watermark 不覆盖乱序 capacity debt，后者需要 generation-bound pending set。
+  2. `U/P/C` 三类 debt 分别由 manifest、reader fence、capacity receipt+fresh census 闭合。
+  3. low watermark 由 replay RTO、durable headroom、snapshot peak、emergency reserve、检测窗口和下一档输入率求交。
+  4. release 前必须证明 `λ_next<μ_c` 并覆盖稳定窗口；debt 瞬时下降不授权 NORMAL。
+  5. mode transition 绑定 pressure epoch、revision、debt digest 与 census，并以 CAS fencing stale controller。
+- 具体演算：`16×16xf32=1024 B`、UB scratch256 B、SDMA queue4。recovery-only 下 `U=18 MiB`，safety lane50 KiB/s、compactor400 KiB/s，40 秒后降到约4.33 MiB；但 reader pin10 MiB 与 queue frontiers `[130,130,130,129]` 仍阻止 release。reader fence/GC、queue3完成、capacity receipt和fresh census闭合后，下一档300 KiB/s小于400 KiB/s且34 MiB free满足29.86 MiB reserve，才进入 THROTTLED。
+- 直接测试/提交事实：notify tests 覆盖2-rank queue4、payload consume、AtomicAdd、65-post、interleaved reuse、non-zero group和concurrent AIV；`e6334fbd` 报告 workspace header compile、URMA 2-rank 6 cases，SDMA runtime当时只编译。当前没有 Host catch-up、debt closure、rate-boundary、mode CAS或crash test；本章未重跑NPU。
+- 建议协议（非当前实现）：`CatchUpWatermark`、`PendingCapacity`、`DebtClosureProof`、`ModeTransition`、pressure-epoch CAS 与 staged admission。
+- 新知识债：canonical store/schema、reader/owner fencing、capacity census、速率/burst estimator、snapshot/cutover benchmark、stale controller/reader resurrection/wrong-epoch apply/ENOSPC/crash-at-CAS fault matrix。
+- 下一章：**放流和分配必须是同一事务——Admission Token、Census Revision 与 TOCTOU-free Capacity Reservation。**
+
+## 第十次七章知识图谱回顾（课程 64–70）
+
+- 已打通：`terminal CAS → idempotent apply/compensation → orphan GC → epoch tombstone/reuse fence → completion/reset watermark → snapshot/manifest cutover → cadence/backpressure → catch-up release`。
+- 统一边界：软件 terminal、旧 device writer 消失、physical capacity 返还和新 generation admission 是四个提交点；timeout、地址复用、Host pointer 清空或 used-bytes 下降都不能越级。
+- 当前最大盲区：课程协议仍缺 Host durable schema/store、backend reset certificate、reader/owner fencing、capacity census、mode/admission CAS 与 crash-injection harness。
+- 后续调整：先闭合 admission token 与 census revision 的 TOCTOU，再评估转入 PTOAS/pypto generation/lease lowering，以把 Host recovery 协议接回完整 PTO 栈。
