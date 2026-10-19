@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 59 章把 revalidation backlog 变成受约束的恢复调度：当前 V1 priority queue 采用静态 `(priority, arrival_time, request_id)` 排序，跨 priority 没有 aging；推理 token/KV budget 也不能直接表达 graph capture/oracle 的 GPU 时间与临时显存。建议以独立 recovery lane、hard eligibility、GPU/显存双预算、utility 与 deadline bucket 协调恢复效率和最终进展。下一章研究 recovery job 执行中遇到在线负载突增时的安全抢占与恢复。
+- 当前主线：第 60 章把 revalidation 从“整项可取消”的错觉拆成 stage 状态机：未提交阶段可立即撤销，已提交 replay/copy/collective 只能进入 `CANCEL_REQUESTED` 并等待 event/handle completion；persistent output 必须先 snapshot/digest，safe resume 再验证 generation、fingerprint、expected ranks、capacity revision 与 worker/context attempt。下一章研究迟到 receipt、重复 attempt 与 exactly-once promotion。
 
 ## 已完成章节
 
@@ -72,6 +72,7 @@
 | 2026-10-16 57 | `promotion → stratified sentinel → drift verdict → eager fence → revalidation/retire` | [`a956a812`](https://github.com/vllm-project/vllm/commit/a956a8126e6bd184cb0a6b8f7318fe4717675c2f) | [Promotion 不是永久许可证]({{ '/articles/vllm-cudagraph-sentinel-sampling-drift-revalidation/' | relative_url }}) |
 | 2026-10-17 58 | `graph health → safe route → measured capacity → readiness/admission → revalidation backlog` | [`f019e3e1`](https://github.com/vllm-project/vllm/commit/f019e3e1055424075b440dfe40198d5d45e1dfe1) | [Graph 局部降级时服务还算 Ready 吗]({{ '/articles/vllm-serving-readiness-degraded-capacity-revalidation-backlog/' | relative_url }}) |
 | 2026-10-18 59 | `EAGER_ONLY backlog → eligibility/budget → utility + aging → isolated revalidation → capacity revision` | [`9c778e9f`](https://github.com/vllm-project/vllm/commit/9c778e9ff8d0c78a241d7f530c441c2dc1d67533) | [谁先修、修多久]({{ '/articles/vllm-cudagraph-revalidation-scheduling-priority-aging-recovery-budget/' | relative_url }}) |
+| 2026-10-19 60 | `RecoveryLease → stage submit → completion fence → checkpoint → safe resume` | [`689effee`](https://github.com/vllm-project/vllm/commit/689effee6d07bfeb0afe42d44046141657238c23) | [执行到一半能停吗]({{ '/articles/vllm-cudagraph-preemptible-revalidation-checkpoint-safe-resume/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -419,6 +420,9 @@
 - `GraphHealthRecord/SentinelPolicy/RevalidationVerdict`（第 57 章建议协议，尚未合入）
 - `SchedulingPolicy/PriorityRequestQueue/Request.__lt__`（当前 V1 静态 priority ordering）
 - `RevalidationJob/RecoveryLease/RecoveryBudget`（第 59 章建议协议，尚未合入）
+- `AsyncGPUModelRunnerOutput.async_copy_ready_event/get_output`、`GPUWorker._pp_send_work`（当前 completion/ownership fence）
+- `BreakableCUDAGraphCapture.add_eager/replay`（capture 分段，不是任意 job cancellation）
+- `RecoveryCheckpoint/StageReceipt/CANCEL_REQUESTED`（第 60 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -652,6 +656,13 @@
 224. recovery GPU time 与 temporary memory 是不同单位的硬预算；在线、恢复和 failure reserve 必须分别守恒，不能由单一 score 代替 admission。
 225. deadline 只保证 job 获得服务决策与升级路径，不授权突破当前 GPU/显存预算；资源不足时应减载、defer 或升级 readiness。
 226. RecoveryLease 到期只能阻止尚未开始的新阶段；已发起的 device work 必须由 completion/drain/reset witness 闭合，不能因 lease expiry 假定停止。
+227. recovery 的安全抢占点必须落在 Host 可观察的 completion/ownership 边界；`SUBMITTED` 之后只能记录 cancel intent，不能立即返还 stream、buffer 或 reservation。
+228. `CUDAGraphWrapper.replay()` 返回只表示 Host 已 enqueue；当前没有 per-graph cancel handle，device completion 仍需 event、synchronize、communication handle 或覆盖该 scope 的 reset witness。
+229. persistent CUDA Graph output 是可被下一 replay 覆盖的工作区；跨 pause 保存普通 Tensor view 不能构成 checkpoint，必须复制到隔离存储或在 completion fence 后保存 digest。
+230. `RecoveryCheckpoint` 只能保存 control intent、identity、stage receipt 与 snapshot reference，不能序列化或复活 worker 进程内 graph executable。
+231. safe resume 必须重新验证 job attempt、graph/worker/context generation、fingerprint、expected ranks、capacity revision、reservation 与 snapshot receipt；任一不匹配都回退到更早安全点。
+232. breakable CUDA Graph 的 graph/eager segmentation 只是 capture/replay 编排；若没有 side-effect receipt、static-buffer ownership 与 all-rank fence，segment boundary 不能自动升级为 safe preemption point。
+233. TP/PP recovery checkpoint 是 group-level verdict；部分 rank 完成或旧 attempt 迟到 receipt 都不能授权 resume/commit。
 
 ## 前置依赖与版本注意
 
@@ -713,6 +724,7 @@
 - `_post_process_cudagraph_mode` 缺少 DP mixed-mode 直接单测；尚无 `DP=2 × TP=2` 下 FULL/PIECEWISE/NONE 收敛与 collective trace 对称性的 CI guard。
 - production 路径通常不检查 graph replay 输入 `data_ptr`；stale 地址、workspace resize 与多 stream 共享 graph pool 的 fail-fast 边界尚未建立。
 - 缺少真实 `QuarantineRecord/ResetAttempt`、dispatcher generation health gate、per-key retire、generation-bound replay lease、fake-clock 多 deadline controller、pool/key attribution、worker/replica reset adapter，以及 late witness、二次崩溃、partial-rank reset 和 supervisor fail-stop Golden。
+- 缺少真实 `RecoveryCheckpoint`/stage lease、CUDA event/PP-TP handle completion receipt adapter、persistent-output snapshot store、load-revision revoke、all-rank safe-resume CAS，以及 stage-point cancel/partial-rank crash/stale receipt/duplicate promotion Golden。
 - CUDA Graph padding 的额外 FLOPs、DP all-reduce 同步点、capture pool 显存与 P99 收益缺少按 prefill/decode 分层的实测。
 - 缺少真实 decoder layer partition topology golden；operator rename、新 custom op 或条件分支可能改变 split 拓扑而 CI 不报错。
 - 缺少 attention output alias/poison 测试，以及 KV update→attention 在 AOT cache load、TP collective 与 CUDA Graph replay组合下的顺序 guard。
@@ -1496,3 +1508,29 @@
 - 建议协议（非当前实现）：`RevalidationJob`、`RecoveryLease`、`RecoveryBudget`、mandatory-deadline bucket、capacity-revision CAS 与 estimated/actual cost feedback。
 - 新知识债：schema/store、cost estimator、动态 admission/LB、TP/PP lease、可抢占阶段、deadline/hysteresis 校准，以及 online-load×worker-crash×partial-rank fault matrix。
 - 下一章：**Revalidation 执行到一半在线流量突增怎么办——Preemptible Recovery、Checkpoint 与 Safe Resume。**
+
+
+## 第 60 章课程账本增量
+
+- 日期：2026-10-19
+- 章节：**执行到一半能停吗：Preemptible Revalidation、Stage Checkpoint 与 Safe Resume**
+- 源码基线：[`689effee`](https://github.com/vllm-project/vllm/commit/689effee6d07bfeb0afe42d44046141657238c23)，为研究时默认分支最新提交；该提交修复 Triton MLA decode 的 int32 overflow 与 logits workspace 计账，与本文主路径无直接关系。直接相关的最新已合入证据是 [`36e0ae2d`](https://github.com/vllm-project/vllm/commit/36e0ae2df2882de8027bb484da9179c10646ccee)：为 DeepEP high-throughput DBO 跨 stream Tensor 增加 `record_stream` 生命周期保护。
+- 课程位置：`RecoveryLease → stage submit → completion fence → stable snapshot → pause → validate-and-resume`
+- 新覆盖文件与符号：
+  - `vllm/compilation/cuda_graph.py`：`CUDAGraphWrapper.__call__`、input address check、offloader sync、`replay` 与 output weak refs
+  - `vllm/compilation/breakable_cudagraph.py`：`BreakableCUDAGraphCapture.add_eager/replay` 的 graph/eager segmentation
+  - `vllm/v1/worker/gpu/cudagraph_utils.py`：`store_capture_output` 与 persistent hidden/intermediate buffers
+  - `vllm/v1/worker/gpu_model_runner.py`：`AsyncGPUModelRunnerOutput`、`async_copy_ready_event`、`get_output`、`execute_model_state/sample_tokens`
+  - `vllm/v1/worker/gpu_worker.py`：non-blocking PP send handles 与下一轮 forward fence
+  - `tests/v1/cudagraph/test_cudagraph_dispatch.py`、`test_breakable_cudagraph.py`
+- 新确认不变量：
+  1. 已提交 replay/copy/collective 只能进入 `CANCEL_REQUESTED` 并等待 completion/drain/reset；lease expiry 不返还物理资源。
+  2. persistent output view 可被下一 replay 覆盖，跨 pause 必须复制或在 completion fence 后保存 digest。
+  3. checkpoint 保存 intent、identity、receipt 与 snapshot reference，不保存 graph executable。
+  4. safe resume 必须重新验证 graph/worker/context generation、fingerprint、expected ranks、capacity revision 和 reservation。
+  5. breakable graph segment 不是天然抢占点；side-effect、ownership 与 all-rank fence 仍需显式证明。
+- 具体演算：TP=2、FULL K16、hidden size4096、bf16，每 rank output 128 KiB。replay 10 ms 后负载突增，只撤销下一 stage；两 rank event 完成后 snapshot，再暂停 40 ms eager oracle。任一 rank worker attempt 变化则从更早安全点重做。
+- 直接测试/commit 事实：dispatch test 用 `BatchDescriptor(num_tokens=10)` 验证 capture→replay 与 eager 数值等价；breakable test 在 replay 后显式 synchronize 并验证 graph/eager/graph 顺序；`36e0ae2d` 说明跨 stream allocator 生命周期必须用 `record_stream` 显式延长。当前没有 stage cancel、延迟 event/handle、partial-rank crash、output overwrite 或 duplicate commit 测试；本章未声称重跑 GPU 测试。
+- 建议协议（非当前实现）：`RecoveryCheckpoint`、`StageReceipt`、`CANCEL_REQUESTED`、stable snapshot、group safe-resume 与 all-rank commit CAS。
+- 新知识债：统一 completion receipt adapter、snapshot schema/store 与 placement、真实开销模型、load revision、worker reset resume policy、stream priority，以及在线流量×partial-rank crash×stale receipt fault matrix。
+- 下一章：**迟到结果不能复活旧任务：Attempt Fencing、Stage Receipt 与 Exactly-once Promotion。**
