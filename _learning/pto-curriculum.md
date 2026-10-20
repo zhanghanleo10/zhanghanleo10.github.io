@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-19。
+最后更新：2026-10-20。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 70 把 recovery-only 之后的恢复条件拆成四份证据：canonical prefix catch-up、snapshot/manifest absorption、reader fence/GC 与 generation-bound capacity receipt/fresh census；低水位由 replay RTO、durable headroom、snapshot peak、检测窗口和下一档输入率共同推导，模式通过 pressure-epoch CAS 按 `RECOVERY_ONLY → THROTTLED → NORMAL` 逐级恢复。下一步研究 admission token 与 census revision 的 TOCTOU-free 容量保留。
+当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 71 把 staged admission 闭合为 revisioned reservation：fresh census 只提供证据快照，`AdmissionToken` 通过 pressure epoch、census revision 与多维 resource vector 的 conditional reserve 获得唯一容量所有权；workspace 初始化、completion/reset、backend finalize 与 fresh census 分别承担分配、退休和返还。下一步转入 pypto/PTOAS，研究 resource intent 与 lease lowering 边界。
 
 ## 已完成章节
 
@@ -94,6 +94,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-16 | Completion Watermark、Reset Certificate 与 Safe Compaction | per-domain frontier / reset coverage → reader ack → manifest publish → segment GC | [课程 67]({% post_url 2026-10-16-pto-isa-completion-watermark-reset-certificate-safe-compaction %}) |\n| 2026-10-17 | Snapshot Manifest、Log Segment 与 Atomic Cutover | seal at R → immutable snapshot/manifest → atomic CURRENT → reader ack → idempotent GC | [课程 68]({% post_url 2026-10-17-pto-isa-snapshot-manifest-log-segment-atomic-cutover %}) |
 | 2026-10-18 | Checkpoint Cadence、Write Amplification 与 Backpressure | WA/RTO/space feasible interval → debt watermarks → safety lane → admission backpressure | [课程 69]({% post_url 2026-10-18-pto-isa-checkpoint-cadence-write-amplification-backpressure %}) |
 | 2026-10-19 | Catch-up Watermark、Debt Closure 与 Hysteresis Release | prefix catch-up + pending capacity → vector debt closure → pressure-epoch mode CAS → staged admission | [课程 70]({% post_url 2026-10-19-pto-isa-catch-up-watermark-debt-closure-hysteresis-release %}) |
+| 2026-10-20 | Admission Token、Census Revision 与 Capacity Reservation | fresh census → revision CAS reserve → workspace allocation → completion/finalize → capacity release | [课程 71]({% post_url 2026-10-20-pto-isa-admission-token-census-revision-capacity-reservation %}) |
 
 ## ISA 知识地图
 
@@ -182,12 +183,13 @@ permalink: /learning/pto-curriculum/
 | Runtime Lease Registry | PlanMemory 只产出静态 root/reuse-group/offset；pypto 已用 retained Buffer/object identity 拒绝同地址 stale free。权威 registry 必须位于控制真实 allocation/free list 且能消费 backend terminal evidence 的 runtime owner | 所有权边界与 crash fail-closed 已闭合；durable schema/golden 待实现 |
 | Workspace quarantine / admission | simpler `WorkspaceManager` 已将 current backing、run reference 与 obsolete generation 分离；completion facts 未闭合时 whole-block quarantine，有限 `workspace_budget_bytes` 超限即拒绝且不改变 published state。report 明示 partial coverage，retained scheduler-state 的 per-slot current/failed/growth bytes 仍在预算外 | whole-allocation hard gate 已落地；device census、measured reserve、high/low pressure state、structured reason 与 subrange physical release 待补 |
 | Catch-up / debt closure / release | canonical revision prefix 只证明 durable append/snapshot/reader 连续性；乱序 capacity action 另以 generation-bound pending set 收敛。`U/P/C` 分别由 manifest、reader fence、capacity receipt+fresh census 闭合；low watermark 从 RTO/space/service-rate 推导，pressure-epoch CAS 分级恢复 admission | 当前源码仅提供完整 completion record-set 与 workspace ownership；Host controller/schema/store/fault Golden 待实现 |
+| Admission token / capacity reservation | fresh census 是证据快照而非容量所有权；admission 必须以 pressure epoch + census revision + resource vector 原子预留。token 单次消费，ALLOCATING 失联进入 quarantine；release 需 completion/reset、backend finalize 与 fresh census。`Workspace.bytes` 只描述发布 workspace，不能替代完整 allocation plan | TOCTOU-free 协议已闭合；allocation-plan API、durable ledger、all-rank token、quarantine 与 fault Golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
-| pto-isa | [cbca1e9b](https://github.com/hw-native-sys/pto-isa/commit/cbca1e9b9775c6aedeb49647a4c5e023b8658f88) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 borrowed completion view、atomic cutover、cadence/backpressure、catch-up prefix、capacity pending set、vector debt closure 与 staged hysteresis release 边界 | ISA 深挖 44 |
+| pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
 | PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
 | pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
@@ -201,6 +203,7 @@ permalink: /learning/pto-curriculum/
 - reconciliation 必须按 frozen contract 重放 identity、schema、digest 与 backend topology closure；late witness 只属于原 attempt，wrong-generation/unknown-schema/conflict 均保持 `UNKNOWN/quarantine`。
 - `Complete` 与 `ResetCovered` 必须分开：前者可证明 computation closure，后者只在 scope 覆盖全部 participant/pipeline/generation 时证明旧动作不再触碰 backing。
 - allocator 只消费当前 owner 以 expected revision 原子应用的 canonical state；adapter、joiner、timeout 或 notify 均无权直接释放资源。
+- fresh census 只提供带时刻的容量证据；只有绑定 pressure epoch、expected census revision 与完整 resource vector 的 conditional reservation 才授予 admission。`Workspace.bytes` 不是 backend 总 charge，token expiry 也不撤销已开始的 allocator 副作用。
 - canonical terminal verdict、native release receipt 与 capacity ledger release 是三个线性化点；durable outbox 先记录 action 意图，只有强 witness 或 generation-fenced reset census 才能把 capacity entry 幂等转为 released。
 - `TFREE` 归还 TPipe FIFO credit，不是任意 HBM free；A2/A3 TileData release 折叠在 `TPOP`，A5 explicit signal 不是自幂等操作，CPU_SIM outstanding queue 也不提供跨 crash durable receipt。
 - ambiguous non-idempotent apply 不能 blind retry、不能回滚已提交 terminal verdict，也不能按“预期差量”返还容量；必须保留 `RELEASE_PENDING`、fence 旧 generation，并以补偿记录和 fresh census 修复 ledger。
@@ -1275,3 +1278,29 @@ permalink: /learning/pto-curriculum/
 - 统一边界：软件 terminal、旧 device writer 消失、physical capacity 返还和新 generation admission 是四个提交点；timeout、地址复用、Host pointer 清空或 used-bytes 下降都不能越级。
 - 当前最大盲区：课程协议仍缺 Host durable schema/store、backend reset certificate、reader/owner fencing、capacity census、mode/admission CAS 与 crash-injection harness。
 - 后续调整：先闭合 admission token 与 census revision 的 TOCTOU，再评估转入 PTOAS/pypto generation/lease lowering，以把 Host recovery 协议接回完整 PTO 栈。
+
+## 第 71 章课程账本增量
+
+- 日期：2026-10-20
+- 章节：**放流不是分配：Admission Token、Census Revision 与 TOCTOU-free Capacity Reservation**
+- 源码基线：pto-isa [`b1d460ee`](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf)，为研究时默认分支最新提交；统一 workspace/completion facade 来自 [`e6334fbd`](https://github.com/hw-native-sys/pto-isa/commit/e6334fbd6c5d6bfdf550201bbdb81a71831a99af)。
+- 课程位置：`fresh census → revision/epoch reserve → one-shot AdmissionToken → workspace allocation → completion/reset → finalize → capacity release`。
+- 新覆盖文件与符号：
+  - `include/pto/comm/workspace.hpp`：`WorkspaceRequest`、`Workspace`、`CreateWorkspace`、`DestroyWorkspace`、`AbandonWorkspace`
+  - `include/pto/comm/async_common/sdma_constants.hpp`：`kSdmaWorkspaceBytes`
+  - SDMA/URMA/RDMA `*WorkspaceManager`：真实 allocation、published workspace size 与 finalize
+  - `include/pto/comm/comm_types.hpp`：`AsyncCompletionRecord`、`RDMA_HNS1825_CQE`
+  - `include/pto/comm/async_common/async_event_impl.hpp` 与 HNS1825 backend：RDMA completion record export
+  - A2/A3 `tput_async_notify` queue4、65-post、concurrent AIV tests
+- 源码变化修正：最新 `b1d460ee` 已把 HNS1825 RDMA record 接入 `CompletionRecordCount/At`；第 67 章“kind 已定义但导出未闭合”不再是当前事实。
+- 新确认不变量：
+  1. fresh census 是 snapshot，不授予容量；检查与扣减必须由 expected revision/pressure epoch CAS 合并。
+  2. token 绑定完整 resource vector、owner/rank set 与 request digest，只能消费一次。
+  3. `Workspace.bytes` 只描述发布 workspace；reservation 必须计 manager 的 persistent/temporary allocation、stream/queue/CQ 等资源。
+  4. token expiry 不撤销已开始的 allocator 副作用；失联 `ALLOCATING` 进入 quarantine。
+  5. completion record 是 reclaim 必要证据，不是 free receipt；release 还需 backend finalize 与 fresh census/allocator receipt。
+- 具体演算：SDMA published workspace=53,248 B；已知额外 persistent device table 为 3,072 B streams + 64 B op-resource，因此可证明下界=56,384 B，仍不含 runtime stream 资源和动态 `aclnnWsSize`。两个 controller 同读 revision900 时，只有 conditional reserve 的赢家进入 allocator，失败者刷新 revision。
+- 直接测试/提交事实：notify tests 证明 live workspace 内 queue/post/wait 行为；`e6334fbd` 提交说明报告 workspace header compile、URMA 2-rank 6 cases 与 SDMA compile；当前没有 admission token、concurrent reservation、partial-rank allocation、crash reconciliation 或 RDMA record direct test，本章未重跑 NPU。
+- 建议协议（非当前实现）：`CapacityCensus`、`AdmissionToken`、resource-vector allocation plan/receipt、`RESERVED→ALLOCATING→ACTIVE→DRAINING→RECLAIMING→RELEASED` 与 `QUARANTINED` reconciliation。
+- 新知识债：backend dry-run/allocation-plan API、durable ledger、all-rank token、allocator receipt、stream/CQ/SQ census、generation-bound address reuse 与 crash fault matrix。
+- 下一章：**资源租约如何进入生成链——pypto/PTOAS 的 Resource Lease Lowering 边界。**
