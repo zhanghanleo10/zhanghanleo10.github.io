@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 60 章把 revalidation 从“整项可取消”的错觉拆成 stage 状态机：未提交阶段可立即撤销，已提交 replay/copy/collective 只能进入 `CANCEL_REQUESTED` 并等待 event/handle completion；persistent output 必须先 snapshot/digest，safe resume 再验证 generation、fingerprint、expected ranks、capacity revision 与 worker/context attempt。下一章研究迟到 receipt、重复 attempt 与 exactly-once promotion。
+- 当前主线：第 61 章以当前 async scheduler 的 stale-output 防护为事实底座，明确本地 FIFO 只是进程内隐式 identity；可恢复 revalidation 必须把 attempt、stage、graph/worker/context generation、rank set 与 oracle 写入 `StageReceipt`。all-rank verdict 只聚合同一 attempt 的完整证据，promotion 通过 CAS 达到 effect exactly-once。下一章研究 receipt retention、snapshot reclamation 与 no-reader fence。
 
 ## 已完成章节
 
@@ -73,6 +73,7 @@
 | 2026-10-17 58 | `graph health → safe route → measured capacity → readiness/admission → revalidation backlog` | [`f019e3e1`](https://github.com/vllm-project/vllm/commit/f019e3e1055424075b440dfe40198d5d45e1dfe1) | [Graph 局部降级时服务还算 Ready 吗]({{ '/articles/vllm-serving-readiness-degraded-capacity-revalidation-backlog/' | relative_url }}) |
 | 2026-10-18 59 | `EAGER_ONLY backlog → eligibility/budget → utility + aging → isolated revalidation → capacity revision` | [`9c778e9f`](https://github.com/vllm-project/vllm/commit/9c778e9ff8d0c78a241d7f530c441c2dc1d67533) | [谁先修、修多久]({{ '/articles/vllm-cudagraph-revalidation-scheduling-priority-aging-recovery-budget/' | relative_url }}) |
 | 2026-10-19 60 | `RecoveryLease → stage submit → completion fence → checkpoint → safe resume` | [`689effee`](https://github.com/vllm-project/vllm/commit/689effee6d07bfeb0afe42d44046141657238c23) | [执行到一半能停吗]({{ '/articles/vllm-cudagraph-preemptible-revalidation-checkpoint-safe-resume/' | relative_url }}) |
+| 2026-10-20 61 | `stage completion → attempt fence → all-rank receipt aggregate → promotion CAS` | [`2296c12e`](https://github.com/vllm-project/vllm/commit/2296c12e47be87d44037d14e2a74028710c29f36) | [迟到回执不能复活旧 Attempt]({{ '/articles/vllm-revalidation-attempt-fencing-stage-receipt-exactly-once-promotion/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1534,3 +1535,30 @@
 - 建议协议（非当前实现）：`RecoveryCheckpoint`、`StageReceipt`、`CANCEL_REQUESTED`、stable snapshot、group safe-resume 与 all-rank commit CAS。
 - 新知识债：统一 completion receipt adapter、snapshot schema/store 与 placement、真实开销模型、load revision、worker reset resume policy、stream priority，以及在线流量×partial-rank crash×stale receipt fault matrix。
 - 下一章：**迟到结果不能复活旧任务：Attempt Fencing、Stage Receipt 与 Exactly-once Promotion。**
+
+## 第 61 章课程账本增量
+
+- 日期：2026-10-20
+- 章节：**迟到回执不能复活旧 Attempt：Stage Receipt、Generation Fence 与 Exactly-once Promotion**
+- 源码基线：[`2296c12e`](https://github.com/vllm-project/vllm/commit/2296c12e47be87d44037d14e2a74028710c29f36)，为研究时默认分支最新提交；该提交只更新 DeepSeek-V4.1 部署文档，与本文主路径无直接关系。直接相关的最新已合入修复是 PR [#48245](https://github.com/vllm-project/vllm/pull/48245)，merge commit [`a0c092ee`](https://github.com/vllm-project/vllm/commit/a0c092ee72c0dcefbb3b3e74f97ac62d842e5f4b)。
+- 课程位置：`stage completion → identity/generation fence → all-rank receipt aggregate → verdict → promotion CAS`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`：`EngineCore.step`、`step_with_batch_queue` 与 `(future, SchedulerOutput, exec_future)` 队列
+  - `vllm/v1/executor/abstract.py`：`execute_model`、`sample_tokens` 的 collective RPC/return-rank 边界
+  - `vllm/v1/core/sched/output.py`：`SchedulerOutput`
+  - `vllm/v1/outputs.py`：`ModelRunnerOutput`
+  - `vllm/v1/worker/gpu_model_runner.py`：`AsyncGPUModelRunnerOutput.get_output`、copy-stream event 与 device reference 生命周期
+  - `vllm/v1/core/sched/scheduler.py`：`_preempt_request`、`update_from_output`、stale/in-flight output drain
+  - `vllm/v1/core/sched/async_scheduler.py`：stale output 与 `num_output_placeholders` 隔离
+  - `tests/v1/core/test_async_scheduler.py`、`tests/v1/engine/test_engine_core.py`
+- 新确认不变量：
+  1. 当前 batch queue 依靠同进程 FIFO 把 future 与 `SchedulerOutput` 配对；`ModelRunnerOutput` 本身没有 attempt/generation，因此该隐式 identity 不能直接跨 crash、pause 或 retry。
+  2. completion 只证明某 stage 的 device work 可观察，不证明结果属于当前 attempt；接受前必须同时校验 job/attempt/stage、graph/worker/context generation、input digest、rank set 与 oracle schema。
+  3. TP/PP 证据只能聚合同一 attempt、同一 generation、完整 expected-rank set；不同 attempt 的局部成功不得拼成 group success。
+  4. 迟到旧 receipt 可以保留为诊断证据，但不得改变 current-attempt verdict、capacity revision 或 routing。
+  5. exactly-once 应约束 promotion effect：执行和验证允许 at-least-once，唯一 publish 通过 `CAS(expected_attempt, expected_revision)` 实现。
+- 具体演算：TP=2、K16、每 rank `bf16[16,4096]`，输出各 128 KiB。attempt 7 的 rank1 receipt 在 attempt 8 开始后迟到；即使数值 digest 正确，也因 attempt/generation fence 只能被记为 `STALE`。attempt 8 必须收齐 rank0+rank1 的同代 receipt 才可 promotion，不能用 rank0/a7 与 rank1/a8 拼接。
+- 直接测试/PR 事实：async scheduler KV-pressure 测试用 PP=3、queue depth=4、8 个请求、prompt 8、max tokens 24，并覆盖 speculative tokens 0/3，断言 token exactly-once、顺序与 position 一致；EngineCore concurrent-batch 测试强制两个在途 batch 并验证 FIFO，还需 deepcopy 防止下一 batch 复用输出对象。PR #48245 修复 preemption 下 `num_output_placeholders` underflow。当前没有显式 attempt ID、跨进程 receipt store、partial-rank restart、旧 receipt 延迟注入或 promotion CAS fault-injection；本章未声称重跑 GPU 测试。
+- 建议协议（非当前实现）：`StageReceipt`、`COMPLETED_LOCAL → DURABLE_ACCEPTED → GROUP_ELIGIBLE` 状态机、generation fence、all-rank aggregate 与 effect-level promotion CAS。
+- 新知识债：receipt schema/store 与幂等键、持久化顺序和批量 fsync、TP/PP group digest、promotion record、旧 attempt 清理时机、snapshot reader tracking，以及 crash-after-CAS/before-ack 测试。
+- 下一章：**旧 Attempt 的证据何时可删——Receipt Retention、Snapshot Reclamation 与 No-reader Fence。**
