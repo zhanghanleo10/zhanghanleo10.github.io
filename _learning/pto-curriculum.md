@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-20。
+最后更新：2026-10-21。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：ISA 语义与 compiler/runtime ownership 交替推进。课程 71 把 staged admission 闭合为 revisioned reservation：fresh census 只提供证据快照，`AdmissionToken` 通过 pressure epoch、census revision 与多维 resource vector 的 conditional reserve 获得唯一容量所有权；workspace 初始化、completion/reset、backend finalize 与 fresh census 分别承担分配、退休和返还。下一步转入 pypto/PTOAS，研究 resource intent 与 lease lowering 边界。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 72 以 `async_prefetch` 证明 resource intent、invocation-local opaque handle、Artifact requirement 与 hidden workspace binding 必须分层：kernel definition 可去重，dispatch lease 不可随定义合并；PTOAS 只消费已绑定 pointer，不承担全局 capacity admission。下一步研究 dispatch binding 的 generation fence、hidden-arg ABI 与 graph replay。
 
 ## 已完成章节
 
@@ -95,6 +95,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-18 | Checkpoint Cadence、Write Amplification 与 Backpressure | WA/RTO/space feasible interval → debt watermarks → safety lane → admission backpressure | [课程 69]({% post_url 2026-10-18-pto-isa-checkpoint-cadence-write-amplification-backpressure %}) |
 | 2026-10-19 | Catch-up Watermark、Debt Closure 与 Hysteresis Release | prefix catch-up + pending capacity → vector debt closure → pressure-epoch mode CAS → staged admission | [课程 70]({% post_url 2026-10-19-pto-isa-catch-up-watermark-debt-closure-hysteresis-release %}) |
 | 2026-10-20 | Admission Token、Census Revision 与 Capacity Reservation | fresh census → revision CAS reserve → workspace allocation → completion/finalize → capacity release | [课程 71]({% post_url 2026-10-20-pto-isa-admission-token-census-revision-capacity-reservation %}) |
+| 2026-10-21 | Resource Lease 的 Prefetch Handle/Lowering 边界 | local handle → Artifact requirement → runtime hidden binding → PTOAS/EmitC → completion | [课程 72]({% post_url 2026-10-21-pypto-resource-lease-prefetch-handle-lowering %}) |
 
 ## ISA 知识地图
 
@@ -184,6 +185,7 @@ permalink: /learning/pto-curriculum/
 | Workspace quarantine / admission | simpler `WorkspaceManager` 已将 current backing、run reference 与 obsolete generation 分离；completion facts 未闭合时 whole-block quarantine，有限 `workspace_budget_bytes` 超限即拒绝且不改变 published state。report 明示 partial coverage，retained scheduler-state 的 per-slot current/failed/growth bytes 仍在预算外 | whole-allocation hard gate 已落地；device census、measured reserve、high/low pressure state、structured reason 与 subrange physical release 待补 |
 | Catch-up / debt closure / release | canonical revision prefix 只证明 durable append/snapshot/reader 连续性；乱序 capacity action 另以 generation-bound pending set 收敛。`U/P/C` 分别由 manifest、reader fence、capacity receipt+fresh census 闭合；low watermark 从 RTO/space/service-rate 推导，pressure-epoch CAS 分级恢复 admission | 当前源码仅提供完整 completion record-set 与 workspace ownership；Host controller/schema/store/fault Golden 待实现 |
 | Admission token / capacity reservation | fresh census 是证据快照而非容量所有权；admission 必须以 pressure epoch + census revision + resource vector 原子预留。token 单次消费，ALLOCATING 失联进入 quarantine；release 需 completion/reset、backend finalize 与 fresh census。`Workspace.bytes` 只描述发布 workspace，不能替代完整 allocation plan | TOCTOU-free 协议已闭合；allocation-plan API、durable ledger、all-rank token、quarantine 与 fault Golden 待实现 |
+| Resource intent / lease lowering | PyPTO `PrefetchAsyncContext/AsyncEvent/AsyncSession` 是 invocation-local opaque SSA handle；Artifact 当前只以 `enable_sdma` 声明需求，wrapper 从 runtime args 注入 hidden workspace，PTOAS 消费已绑定 pointer。definition dedup 不得合并 caller dispatch/lease/completion identity | 当前生成链与 locality contract 已确认；versioned requirement manifest、generation-bound binding、graph replay/fault Golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
@@ -191,8 +193,8 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
-| PTOAS | [f5eff3e](https://github.com/hw-native-sys/PTOAS/commit/f5eff3ee249697f6157088f649c6434fcc9d7c5b) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO/EmitC memory path；复核 async op/type verifier、MemoryEffects 与 EmitC SDMA lowering 未变，并补齐其不能提供跨进程 operation identity 的边界 | 跨仓深挖 25 |
-| pypto | [e5927cf](https://github.com/hw-native-sys/pypto/commit/e5927cff83b0b23dd913b27cc6e6b9a8c4c776a6) | 既有 Tensor→Tile/partition lowering；新增 `Worker._owned_tensors`、`DeviceTensor.buffer`、`DistributedWorker._device_buffers`、stale pointer reuse 与 foreign-owner rejection | 跨仓深挖 3 |
+| PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
+| pypto | [d7f69564](https://github.com/hw-native-sys/pypto/commit/d7f69564aed501502e90ae5ec6bc6e8db5d200d5) | 既有 Tensor→Tile/partition 与 runtime owner；新增 prefetch opaque handle、flat-static-GM verifier、AIV affinity、hidden SDMA workspace/`enable_sdma` Artifact、PR #3080 invocation-local handle dedup contract | 跨仓深挖 4 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -204,6 +206,9 @@ permalink: /learning/pto-curriculum/
 - `Complete` 与 `ResetCovered` 必须分开：前者可证明 computation closure，后者只在 scope 覆盖全部 participant/pipeline/generation 时证明旧动作不再触碰 backing。
 - allocator 只消费当前 owner 以 expected revision 原子应用的 canonical state；adapter、joiner、timeout 或 notify 均无权直接释放资源。
 - fresh census 只提供带时刻的容量证据；只有绑定 pressure epoch、expected census revision 与完整 resource vector 的 conditional reservation 才授予 admission。`Workspace.bytes` 不是 backend 总 charge，token expiry 也不撤销已开始的 allocator 副作用。
+- 编译期 resource requirement 与 runtime lease binding 必须分离：Artifact/cache identity 记录稳定需求，dispatch 以 generation-bound hidden slot 绑定 concrete workspace；地址、token 和 completion identity 不进入 reusable kernel definition。
+- opaque handle 的类型相等不等于实例同源：prefetch context/event/session 只能由本地 producer 产生并在同 invocation use-graph 内闭合；跨参数、返回、metadata、alias 或 cross-context wait 必须 fail closed。
+- outlined-kernel definition reuse 只减少代码对象，不得删除 caller 的 Call/Submit，也不授权并发 dispatch 共享 ACTIVE lease；dispatch 数、reservation 与 completion record 必须逐实例保留。
 - canonical terminal verdict、native release receipt 与 capacity ledger release 是三个线性化点；durable outbox 先记录 action 意图，只有强 witness 或 generation-fenced reset census 才能把 capacity entry 幂等转为 released。
 - `TFREE` 归还 TPipe FIFO credit，不是任意 HBM free；A2/A3 TileData release 折叠在 `TPOP`，A5 explicit signal 不是自幂等操作，CPU_SIM outstanding queue 也不提供跨 crash durable receipt。
 - ambiguous non-idempotent apply 不能 blind retry、不能回滚已提交 terminal verdict，也不能按“预期差量”返还容量；必须保留 `RELEASE_PENDING`、fence 旧 generation，并以补偿记录和 fresh census 修复 ledger。
@@ -498,6 +503,7 @@ permalink: /learning/pto-curriculum/
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
 - Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–49 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery、admission 与 pressure-control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、device-wide `MemoryCensus`、scheduler-state charge、watermark state machine、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/OOM/A5 guard-page/canary/poison/性能矩阵。
+- PyPTO/PTOAS resource lease 链仍只有 `enable_sdma` boolean 与 hidden pointer：缺 versioned `ResourceRequirement`、artifact digest、dispatch `LeaseBinding`、generation fence、rank/provider validation、stale hidden-arg/graph replay/concurrent dispatch fault Golden，以及 A5/simulator/onboard parity。
 - TPipe recovery 主线已推进到 transition audit、cross-backend correlation、typed causal graph、orphan GC 与跨 allocation ABA 防护；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor/StableReason/TransitionAudit/CorrelationId/EvidenceEnvelope/CausalLink/EpochTombstone/ReuseFenceCertificate` schema、canonical/evidence-root hash、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、native signal ordinal/adapter、reader lease、retention/redaction、native query/reset fence、same-VA late-write/crash matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
 - durable compaction/backpressure 仍欠 `CatchUpWatermark/DebtClosureProof/PendingCapacity/ModeTransition` schema、snapshot/reader/capacity receipt store、`λ/μ_c` 分位数与 burst estimator、pressure-epoch CAS、fresh census adapter，以及 stale controller、reader resurrection、partial record-set、wrong-epoch apply、ENOSPC 和 crash-at-transition fault matrix。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
@@ -509,11 +515,12 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
-2. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
-3. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
-4. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
-5. 用 device trace 量化 QK/PV 与 P/GU overlap、reduce tree、credit batching和 Compact 的同步/搬运 stall。
+1. 主线：沿 PyPTO Artifact/launcher 追踪同一 kernel definition 的多 dispatch binding，定义 requirement digest、hidden-arg ABI、lease generation fence、graph replay invalidation 与 stale-pointer negative tests。
+2. 定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
+3. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
+4. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
+5. 为 partition dynamic OOB、signed 64-bit overflow 与 static/dynamic lowering 等价性建立跨仓 CI contract。
+6. 用 device trace 量化 QK/PV 与 P/GU overlap、reduce tree、credit batching和 Compact 的同步/搬运 stall。
 
 ## 第二次七章知识图谱回顾（课程 08–14）
 
@@ -1304,3 +1311,26 @@ permalink: /learning/pto-curriculum/
 - 建议协议（非当前实现）：`CapacityCensus`、`AdmissionToken`、resource-vector allocation plan/receipt、`RESERVED→ALLOCATING→ACTIVE→DRAINING→RECLAIMING→RELEASED` 与 `QUARANTINED` reconciliation。
 - 新知识债：backend dry-run/allocation-plan API、durable ledger、all-rank token、allocator receipt、stream/CQ/SQ census、generation-bound address reuse 与 crash fault matrix。
 - 下一章：**资源租约如何进入生成链——pypto/PTOAS 的 Resource Lease Lowering 边界。**
+
+## 第 72 章课程账本增量
+
+- 日期：2026-10-21
+- 章节：**Resource Lease 不该成为普通 Tensor：Prefetch Handle 的 Locality Contract 与 Lowering 边界**
+- 源码基线：PyPTO [`d7f69564`](https://github.com/hw-native-sys/pypto/commit/d7f69564aed501502e90ae5ec6bc6e8db5d200d5)，PTOAS [`739480c3`](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9)，均为研究时默认分支最新提交。
+- 课程位置：`resource intent → invocation-local opaque handles → Artifact requirement → revisioned runtime reservation → hidden workspace binding → PTOAS/EmitC → event/session completion`。
+- 新覆盖文件与符号：
+  - PyPTO `prefetch_ops.py`、`type.h`、`prefetch_async.cpp`：`PrefetchAsyncContextType/AsyncEventType/AsyncSessionType`、flat-static-logical-1D GM verifier、AIV affinity
+  - `pto_ops_prefetch.cpp`、`pto_codegen.cpp`、`pto_backend.py`：whole-source partition view、hidden `ptr<i8>`、`get_dma_workspace`、Artifact `enable_sdma`
+  - `deduplicate_outlined_kernels_pass.cpp`：local producer/consumer、same-context wait、no escape/forwarding、definition reuse 保留 dispatch
+  - PTOAS `PTOOps.td`、`TLoad.cpp`、`tprefetch_async_emitc.pto`：context/event/session type、workspace pointer、`TPREFETCH_ASYNC` 与 `event.Wait(session)`
+- 新确认不变量：
+  1. Tensor 表达逻辑数据；opaque handle 表达 invocation-local 控制能力；runtime lease 表达容量所有权，三者不能互相替代。
+  2. 用户 IR 无 workspace operand；codegen/runtime hidden ABI 负责绑定，provider 缺失 fail closed。
+  3. handle type 相同不代表实例同源；event/session 必须由同一 local context 产生并闭合。
+  4. definition dedup 不能合并 caller dispatch、reservation、ACTIVE lease 或 completion identity。
+  5. PTOAS 可验证已绑定 pointer/type/shape，却没有全局 census/revision/rank 并发信息，不承担 admission。
+- 具体演算：`[1,4096] FP32` 的逻辑 prefetch 范围为 16 KiB，但上一章证明 SDMA workspace 当前可见资源下界至少 56,384 B；`src.nbytes` 与 `enable_sdma=True` 都不能替代完整 resource vector。两个等价 kernel definition 可合并为一个，两个 caller dispatch 与两份 lease binding 仍必须保留。
+- 直接测试/提交事实：PyPTO op/codegen tests 覆盖 shape/type、hidden arg 顺序、AIV-only、Artifact 配置；dedup test 仅允许 `discard/wait`，拒绝 return/metadata/alias/parameter/cross-context 且始终保留两个 call；A2/A3 ST 做 `1×128 FP32` bit-exact copy；PTOAS lit 检查 context/TPREFETCH/session/wait EmitC。PR #3080 报告 17,952 UT、CTEST 3/3 与 43 层模型 compile-only，未做硬件数值执行。
+- 建议设计（非当前实现）：versioned `ResourceRequirement` 进入 Artifact digest；runtime 消费课程 71 的 token 生成 generation-bound `LeaseBinding` 并填 hidden launch slot；completion/finalize/receipt 后 release。
+- 新知识债：requirement schema/cache fingerprint、dispatch generation fence、partial-rank/provider mismatch、stale hidden arg、concurrent dispatch、provider crash/reset、graph replay 与 A5/simulator parity。
+- 下一章：**Kernel 定义可复用，Lease 不能复用——Dispatch Binding、Generation Fence 与 Hidden-arg ABI。**
