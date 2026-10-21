@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 61 章以当前 async scheduler 的 stale-output 防护为事实底座，明确本地 FIFO 只是进程内隐式 identity；可恢复 revalidation 必须把 attempt、stage、graph/worker/context generation、rank set 与 oracle 写入 `StageReceipt`。all-rank verdict 只聚合同一 attempt 的完整证据，promotion 通过 CAS 达到 effect exactly-once。下一章研究 receipt retention、snapshot reclamation 与 no-reader fence。
+- 当前主线：第 62 章从当前 batch queue、async D2H event、stale-output drain 与 CUDA Graph output 复用出发，区分 logical obsolete、no-reader 与 no-old-writer 三种证明；旧 receipt/snapshot 只有在 reader epoch 越过 retirement revision、writer generation 已 fence、durable refcount 归零且 manifest 已吸收幂等证据后才可 tombstone + 幂等删除。下一章研究 tombstone/manifest 的 crash-safe GC。
 
 ## 已完成章节
 
@@ -74,6 +74,7 @@
 | 2026-10-18 59 | `EAGER_ONLY backlog → eligibility/budget → utility + aging → isolated revalidation → capacity revision` | [`9c778e9f`](https://github.com/vllm-project/vllm/commit/9c778e9ff8d0c78a241d7f530c441c2dc1d67533) | [谁先修、修多久]({{ '/articles/vllm-cudagraph-revalidation-scheduling-priority-aging-recovery-budget/' | relative_url }}) |
 | 2026-10-19 60 | `RecoveryLease → stage submit → completion fence → checkpoint → safe resume` | [`689effee`](https://github.com/vllm-project/vllm/commit/689effee6d07bfeb0afe42d44046141657238c23) | [执行到一半能停吗]({{ '/articles/vllm-cudagraph-preemptible-revalidation-checkpoint-safe-resume/' | relative_url }}) |
 | 2026-10-20 61 | `stage completion → attempt fence → all-rank receipt aggregate → promotion CAS` | [`2296c12e`](https://github.com/vllm-project/vllm/commit/2296c12e47be87d44037d14e2a74028710c29f36) | [迟到回执不能复活旧 Attempt]({{ '/articles/vllm-revalidation-attempt-fencing-stage-receipt-exactly-once-promotion/' | relative_url }}) |
+| 2026-10-21 62 | `promotion CAS → logical retirement → no-reader/no-writer proof → tombstone/reclaim` | [`532a7d19`](https://github.com/vllm-project/vllm/commit/532a7d19d2ae70b1fd9188d82620d26f028564fb) | [旧 Attempt 的证据何时可删]({{ '/articles/vllm-revalidation-receipt-retention-no-reader-fence/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -424,6 +425,7 @@
 - `AsyncGPUModelRunnerOutput.async_copy_ready_event/get_output`、`GPUWorker._pp_send_work`（当前 completion/ownership fence）
 - `BreakableCUDAGraphCapture.add_eager/replay`（capture 分段，不是任意 job cancellation）
 - `RecoveryCheckpoint/StageReceipt/CANCEL_REQUESTED`（第 60 章建议协议，尚未合入）
+- `ReceiptRecord/SnapshotRef/reader epoch/writer generation/GC tombstone`（第 62 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -1562,3 +1564,29 @@
 - 建议协议（非当前实现）：`StageReceipt`、`COMPLETED_LOCAL → DURABLE_ACCEPTED → GROUP_ELIGIBLE` 状态机、generation fence、all-rank aggregate 与 effect-level promotion CAS。
 - 新知识债：receipt schema/store 与幂等键、持久化顺序和批量 fsync、TP/PP group digest、promotion record、旧 attempt 清理时机、snapshot reader tracking，以及 crash-after-CAS/before-ack 测试。
 - 下一章：**旧 Attempt 的证据何时可删——Receipt Retention、Snapshot Reclamation 与 No-reader Fence。**
+
+## 第 62 章课程账本增量
+
+- 日期：2026-10-21
+- 章节：**旧 Attempt 的证据何时可删：Receipt Retention、Snapshot Reclamation 与 No-reader Fence**
+- 源码基线：[`532a7d19`](https://github.com/vllm-project/vllm/commit/532a7d19d2ae70b1fd9188d82620d26f028564fb)，为研究时默认分支最新提交；该提交只修正 KV connector tests 的 MyPy 错误，与本文主路径无直接改动。直接相关已合入证据仍包括 [PR #48245](https://github.com/vllm-project/vllm/pull/48245)。
+- 课程位置：`promotion CAS → logical retirement → no-reader/no-writer proof → durable tombstone → idempotent snapshot reclaim`
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py`：`step_with_batch_queue` 的 `appendleft/pop` FIFO 与 tuple lifetime
+  - `vllm/v1/worker/gpu_model_runner.py`：`AsyncGPUModelRunnerOutput`、copy-stream event、device reference release
+  - `vllm/v1/request.py`、`vllm/v1/core/sched/{scheduler,async_scheduler}.py`：stale/in-flight share 的 drain/drop
+  - `vllm/compilation/cuda_graph.py`：graph-pool output、weak refs 与 replay reuse
+  - `tests/v1/engine/test_engine_core.py`、`tests/v1/core/test_async_scheduler.py`
+- 新确认不变量：
+  1. logical obsolete 只禁止旧 receipt 影响 verdict；它不授权物理删除。
+  2. no-reader、no-old-writer 与 durable manifest absorption 是独立 proof，缺一则 retain/quarantine。
+  3. reader epoch 必须严格越过 retirement revision；timeout 本身不能证明慢 reader 或旧 writer 已消失。
+  4. async copy event 同步后才可释放对应 device references，但这仍不证明 host snapshot 无 reader。
+  5. graph output weakref/Python GC 不等于 graph pool 或 allocator capacity 可回收；跨 replay 证据必须先稳定复制或取 digest。
+  6. 安全删除顺序是 logical retire → drain readers → fence writers → tombstone CAS → idempotent object delete。
+- 具体演算：TP=2、K16，每 rank `bf16[16,4096]` 为 128 KiB，两 rank snapshot 256 KiB；8 个未回收 attempt 的 payload 为 2 MiB。attempt8 在 revision42 promotion，但 revision41 reader 仍阻止 a7 删除；待最小 reader revision=43、两 rank writer completion/generation fence 闭合、refcount=0 且 manifest 已吸收 digest，才能 tombstone + delete。
+- 直接测试/PR 事实：concurrent-batch 测试强制多 batch 在途并 deepcopy 可复用 output；async scheduler 测试用 PP=3、queue4、8 请求、prompt8/max24、spec0/3，验证带在途 output 的 preemption、token exactly-once 与 position 一致；reset-prefix-cache 测试覆盖 PP1/3、连续 reset、stale re-preempt 与最终 counter 归零。当前没有 reader lease、durable refcount、tombstone/object delete、partial-rank writer 或 crash-safe GC 测试；本章未重跑 GPU 测试。
+- 建议协议（非当前实现）：`ReceiptRecord`、`SnapshotRef`、reader epoch/lease、writer generation、`RETAINED → LOGICALLY_OBSOLETE → READER_DRAINING → RECLAIMABLE → TOMBSTONED → DELETED`。
+- 新知识债：真实 schema/store、reader crash revoke、GPU/collective writer receipt adapter、manifest/refcount CAS、对象存储 tombstone、snapshot/graph-pool charge 分离与 fault matrix。
+- 下一章：**删除到一半崩溃怎么办——Receipt Tombstone、GC Manifest 与 Crash-safe Reclamation。**第 63 章末追加第 57–63 章知识图谱回顾。
+
