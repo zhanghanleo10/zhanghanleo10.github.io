@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 62 章从当前 batch queue、async D2H event、stale-output drain 与 CUDA Graph output 复用出发，区分 logical obsolete、no-reader 与 no-old-writer 三种证明；旧 receipt/snapshot 只有在 reader epoch 越过 retirement revision、writer generation 已 fence、durable refcount 归零且 manifest 已吸收幂等证据后才可 tombstone + 幂等删除。下一章研究 tombstone/manifest 的 crash-safe GC。
+- 当前主线：第 63 章以当前 `vllm/snapshot` 的 atomic manifest publish 为代码锚点，区分 atomic visibility、payload power-loss durability 与 crash-safe deletion；建议 revalidation GC 在 no-reader/no-writer/absorption proof 闭合后，先 CAS 发布 durable tombstone，再按 immutable object set 幂等删除。下一章研究多 GC owner 的 claim lease 与 generation fencing。
 
 ## 已完成章节
 
@@ -75,6 +75,7 @@
 | 2026-10-19 60 | `RecoveryLease → stage submit → completion fence → checkpoint → safe resume` | [`689effee`](https://github.com/vllm-project/vllm/commit/689effee6d07bfeb0afe42d44046141657238c23) | [执行到一半能停吗]({{ '/articles/vllm-cudagraph-preemptible-revalidation-checkpoint-safe-resume/' | relative_url }}) |
 | 2026-10-20 61 | `stage completion → attempt fence → all-rank receipt aggregate → promotion CAS` | [`2296c12e`](https://github.com/vllm-project/vllm/commit/2296c12e47be87d44037d14e2a74028710c29f36) | [迟到回执不能复活旧 Attempt]({{ '/articles/vllm-revalidation-attempt-fencing-stage-receipt-exactly-once-promotion/' | relative_url }}) |
 | 2026-10-21 62 | `promotion CAS → logical retirement → no-reader/no-writer proof → tombstone/reclaim` | [`532a7d19`](https://github.com/vllm-project/vllm/commit/532a7d19d2ae70b1fd9188d82620d26f028564fb) | [旧 Attempt 的证据何时可删]({{ '/articles/vllm-revalidation-receipt-retention-no-reader-fence/' | relative_url }}) |
+| 2026-10-22 63 | `atomic manifest publish → durable tombstone → idempotent delete → GC checkpoint` | [`30aded62`](https://github.com/vllm-project/vllm/commit/30aded62d46dfcf52c815925a8acec5a8bebddc6) | [Manifest 是提交点，删除不是提交点]({{ '/articles/vllm-snapshot-manifest-tombstone-crash-safe-reclamation/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -426,6 +427,10 @@
 - `BreakableCUDAGraphCapture.add_eager/replay`（capture 分段，不是任意 job cancellation）
 - `RecoveryCheckpoint/StageReceipt/CANCEL_REQUESTED`（第 60 章建议协议，尚未合入）
 - `ReceiptRecord/SnapshotRef/reader epoch/writer generation/GC tombstone`（第 62 章建议协议，尚未合入）
+- `vllm.snapshot.controller.create_snapshot/restore_snapshot`
+- `SnapshotManifest`、`write_manifest_atomic/read_manifest`、`_write_json_atomic`
+- `LocalSnapshotTools.publish`、`write_ready_atomic`
+- `GCTombstone/GCCheckpoint/immutable object set`（第 63 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -666,6 +671,10 @@
 231. safe resume 必须重新验证 job attempt、graph/worker/context generation、fingerprint、expected ranks、capacity revision、reservation 与 snapshot receipt；任一不匹配都回退到更早安全点。
 232. breakable CUDA Graph 的 graph/eager segmentation 只是 capture/replay 编排；若没有 side-effect receipt、static-buffer ownership 与 all-rank fence，segment boundary 不能自动升级为 safe preemption point。
 233. TP/PP recovery checkpoint 是 group-level verdict；部分 rank 完成或旧 attempt 迟到 receipt 都不能授权 resume/commit。
+234. 当前 initialized snapshot 以 `manifest.json` 的 single-assignment atomic install 作为 artifact 可见性提交点；payload 文件存在本身不构成 reader 可用证明。
+235. `fsync(temp) → os.replace → fsync(artifact dir) → fsync(parent dir)` 保证 manifest 的完整可见与命名持久化，但当前没有 flush 全部 captured payload，因此不提供 unclean power-loss durability。
+236. crash-safe reclamation 必须先 durable tombstone、后幂等 delete；删除 cursor 只用于加速，不能取代 manifest 可达性与 immutable object set。
+237. tombstone 只授权删除其精确列出的 immutable keys；reader 若能绕过 manifest 直接寻址 payload，manifest 便不再是唯一可达性根，协议失效。
 
 ## 前置依赖与版本注意
 
@@ -760,6 +769,7 @@
 - 缺少结构化 `ShutdownReport`，无法区分 `drained`、`failed`、`blocked_by_dependency` 与 `abandoned_by_deadline`。
 - P2P tier 已有 3 秒内部 drain，但各 owner 尚未共享父级绝对 deadline；嵌套 per-owner timeout 可能把总关闭时间叠加放大。
 - 缺少 cleanup DAG 与资源依赖声明；平铺的 catch-all best effort 会隐藏泄漏，也可能错误关闭仍被失败子层引用的 backing resource。
+- initialized snapshot 尚无 payload 全量 flush/power-loss guarantee；revalidation 侧仍缺真实 manifest/tombstone schema、reader lease、object-store CAS、GC owner fencing、immutable key、tombstone compaction 与 fsync/delete 每边界 fault injection。
 
 ## 第 23 章课程账本增量
 
@@ -1588,5 +1598,35 @@
 - 直接测试/PR 事实：concurrent-batch 测试强制多 batch 在途并 deepcopy 可复用 output；async scheduler 测试用 PP=3、queue4、8 请求、prompt8/max24、spec0/3，验证带在途 output 的 preemption、token exactly-once 与 position 一致；reset-prefix-cache 测试覆盖 PP1/3、连续 reset、stale re-preempt 与最终 counter 归零。当前没有 reader lease、durable refcount、tombstone/object delete、partial-rank writer 或 crash-safe GC 测试；本章未重跑 GPU 测试。
 - 建议协议（非当前实现）：`ReceiptRecord`、`SnapshotRef`、reader epoch/lease、writer generation、`RETAINED → LOGICALLY_OBSOLETE → READER_DRAINING → RECLAIMABLE → TOMBSTONED → DELETED`。
 - 新知识债：真实 schema/store、reader crash revoke、GPU/collective writer receipt adapter、manifest/refcount CAS、对象存储 tombstone、snapshot/graph-pool charge 分离与 fault matrix。
-- 下一章：**删除到一半崩溃怎么办——Receipt Tombstone、GC Manifest 与 Crash-safe Reclamation。**第 63 章末追加第 57–63 章知识图谱回顾。
+- 下一章：**删除到一半崩溃怎么办——Receipt Tombstone、GC Manifest 与 Crash-safe Reclamation。**
 
+## 第 63 章课程账本增量
+
+- 日期：2026-10-22
+- 章节：**Manifest 是提交点，删除不是提交点：Snapshot Tombstone 与 Crash-safe Reclamation**
+- 源码基线：[`30aded62`](https://github.com/vllm-project/vllm/commit/30aded62d46dfcf52c815925a8acec5a8bebddc6)，为研究时默认分支最新提交；该提交修复 CPU offload pool 在 PP/spec-decode worker 间不一致，与本文 snapshot 主路径无直接改动。initialized snapshot 由 [PR #51360](https://github.com/vllm-project/vllm/pull/51360) 合入。
+- 课程位置：`no-reader/no-writer proof → atomic manifest publish → durable tombstone → idempotent object delete → GC checkpoint`
+- 新覆盖文件与符号：
+  - `vllm/snapshot/controller.py`：`create_snapshot/restore_snapshot` 的 publish/rollback 与 restore 前校验链
+  - `vllm/snapshot/manifest.py`：`SnapshotManifest`、`_write_json_atomic`、`write_manifest_atomic/read_manifest`、private-path contract
+  - `vllm/snapshot/runtime.py`：`LocalSnapshotTools.publish` 的 artifact-dir/parent-dir fsync 边界
+  - `vllm/snapshot/server.py`：atomic ready marker、one-token canary 与 release barrier
+  - `docs/features/initialized_snapshots.md`、`tests/entrypoints/launchers/test_launch_cli.py`、PR #51360
+- 新确认不变量：
+  1. 当前 manifest 是 initialized snapshot 的可见性提交点；payload 文件存在不等于 artifact 已发布。
+  2. atomic JSON visibility 与 multi-file power-loss durability 不同；官方文档明确说明 payload 未全部 flush，unclean shutdown 后应重建。
+  3. crash-safe GC 先以 revision CAS 持久化 tombstone，再按 immutable object set 幂等删除；missing object 可视为 delete 已完成。
+  4. cursor/progress ack 只优化重放；正确性由 manifest 可达性、tombstone 与 empty census 决定。
+  5. 当前 initialized snapshot 没有 revalidation tombstone/GC，本文 GC 状态机是基于现有原语的建议协议。
+- 具体演算：延续 TP=2、K16、每 rank `bf16[16,4096]`=128 KiB，两 rank 256 KiB。M42 引用 attempt7；M43 durable tombstone 后逐对象删除。CAS 前 crash 保留 M42；CAS 后、首删前或 mid-delete crash 都由 M43 重放；全删后、ack 前 crash 以 empty census 补 checkpoint。
+- 直接测试/实验事实：failed dump test 断言 child abort 与 target 消失；identity mismatch 在 restore 前失败；strict manifest 参数化 unknown/schema/PID/CUDA holder/oracle；security test 覆盖 symlink/world-writable path；cache fingerprint round-trip；oracle mismatch cleanup。PR #51360 报告 H200 lifecycle acceptance 与特定 H100/Qwen3-32B 的 3-sample activation measurements。当前没有 fsync 间 crash、power-loss、tombstone、mid-delete、GC takeover 或 reader-lease test；本章未重跑 GPU/CRIU 测试。
+- 建议协议（非当前实现）：`GCTombstone(snapshot_id, expected_revision, owner_generation, immutable_objects)`、manifest CAS、idempotent delete、empty census 与 `GCCheckpoint`。
+- 新知识债：多 GC owner claim/fence、reader crash revoke、object-store conditional write、payload checksum/flush policy、tombstone compaction、delete rate limit 与 crash-at-every-boundary Golden。
+- 下一章：**两个 GC Owner 都认为自己接管了怎么办——Claim Lease、Generation Fence 与 Audit Checkpoint。**
+
+## 第九次七章知识图谱回顾（第 57–63 章）
+
+- 已打通：`promotion → sentinel drift detection → degraded capacity → budgeted revalidation → safe checkpoint → fenced receipt → no-reader reclamation → crash-safe delete`。
+- 已闭合：执行完成、路由生效、物理删除三类提交点已经拆开；前两者分别由 stage receipt 与 promotion CAS 证明，删除权由 no-reader/no-writer proof 加 durable tombstone 证明。
+- 当前最大盲区：真实 revalidation controller/store 尚未合入；多 owner GC、跨 object store CAS、payload power-loss durability 与 tombstone compaction 仍缺实现和 deterministic fault harness。
+- 后续路线调整：下一章先闭合 GC owner takeover/fencing，再研究 audit tail compaction 与长期证据成本。
