@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-21。
+最后更新：2026-10-22。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 72 以 `async_prefetch` 证明 resource intent、invocation-local opaque handle、Artifact requirement 与 hidden workspace binding 必须分层：kernel definition 可去重，dispatch lease 不可随定义合并；PTOAS 只消费已绑定 pointer，不承担全局 capacity admission。下一步研究 dispatch binding 的 generation fence、hidden-arg ABI 与 graph replay。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 73 已把 SDMA hidden binding 的真实边界钉在 Worker lifetime：Artifact 的 `enable_sdma` 只声明需求，PyPTO 在 register 前做 capability gate，simpler provision provider 并经 `InitArgs/GlobalContext` 发布 GM pointer；同一 Worker 可跨 dispatch 复用 provider，close 后即进入新代，地址相同也不授权旧 graph。当前 SDMA capture/replay 与 borrowed-context 组合被保守拒绝。下一步研究 versioned capability schema、Artifact fingerprint 与 provider matrix。
 
 ## 已完成章节
 
@@ -96,6 +96,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-19 | Catch-up Watermark、Debt Closure 与 Hysteresis Release | prefix catch-up + pending capacity → vector debt closure → pressure-epoch mode CAS → staged admission | [课程 70]({% post_url 2026-10-19-pto-isa-catch-up-watermark-debt-closure-hysteresis-release %}) |
 | 2026-10-20 | Admission Token、Census Revision 与 Capacity Reservation | fresh census → revision CAS reserve → workspace allocation → completion/finalize → capacity release | [课程 71]({% post_url 2026-10-20-pto-isa-admission-token-census-revision-capacity-reservation %}) |
 | 2026-10-21 | Resource Lease 的 Prefetch Handle/Lowering 边界 | local handle → Artifact requirement → runtime hidden binding → PTOAS/EmitC → completion | [课程 72]({% post_url 2026-10-21-pypto-resource-lease-prefetch-handle-lowering %}) |
+| 2026-10-22 | SDMA Hidden Binding 与 Generation Fence | Artifact requirement → Worker capability → provider → GlobalContext → hidden pointer → dispatch | [课程 73]({% post_url 2026-10-22-pypto-sdma-hidden-binding-generation-fence %}) |
 
 ## ISA 知识地图
 
@@ -185,16 +186,16 @@ permalink: /learning/pto-curriculum/
 | Workspace quarantine / admission | simpler `WorkspaceManager` 已将 current backing、run reference 与 obsolete generation 分离；completion facts 未闭合时 whole-block quarantine，有限 `workspace_budget_bytes` 超限即拒绝且不改变 published state。report 明示 partial coverage，retained scheduler-state 的 per-slot current/failed/growth bytes 仍在预算外 | whole-allocation hard gate 已落地；device census、measured reserve、high/low pressure state、structured reason 与 subrange physical release 待补 |
 | Catch-up / debt closure / release | canonical revision prefix 只证明 durable append/snapshot/reader 连续性；乱序 capacity action 另以 generation-bound pending set 收敛。`U/P/C` 分别由 manifest、reader fence、capacity receipt+fresh census 闭合；low watermark 从 RTO/space/service-rate 推导，pressure-epoch CAS 分级恢复 admission | 当前源码仅提供完整 completion record-set 与 workspace ownership；Host controller/schema/store/fault Golden 待实现 |
 | Admission token / capacity reservation | fresh census 是证据快照而非容量所有权；admission 必须以 pressure epoch + census revision + resource vector 原子预留。token 单次消费，ALLOCATING 失联进入 quarantine；release 需 completion/reset、backend finalize 与 fresh census。`Workspace.bytes` 只描述发布 workspace，不能替代完整 allocation plan | TOCTOU-free 协议已闭合；allocation-plan API、durable ledger、all-rank token、quarantine 与 fault Golden 待实现 |
-| Resource intent / lease lowering | PyPTO `PrefetchAsyncContext/AsyncEvent/AsyncSession` 是 invocation-local opaque SSA handle；Artifact 当前只以 `enable_sdma` 声明需求，wrapper 从 runtime args 注入 hidden workspace，PTOAS 消费已绑定 pointer。definition dedup 不得合并 caller dispatch/lease/completion identity | 当前生成链与 locality contract 已确认；versioned requirement manifest、generation-bound binding、graph replay/fault Golden 待实现 |
+| Resource intent / lease lowering | PyPTO `PrefetchAsyncContext/AsyncEvent/AsyncSession` 是 invocation-local opaque SSA handle；Artifact 当前只以 `enable_sdma` 声明需求，launcher 在 register 前做 capability gate；simpler Worker provision provider，经 `InitArgs/GlobalContext` 向 wrapper 注入 hidden workspace。definition/`cid`/provider 可在同一 Worker 内复用，但 close 后同址不等代；当前 SDMA caller capture 与 borrowed context 被拒绝 | locality 与 Worker-scoped binding 已确认；versioned capability/requirement、provider generation、cache fingerprint、graph invalidation/fault Golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
-| simpler | [c5f3ba1](https://github.com/hw-native-sys/simpler/commit/c5f3ba1449c3c9514e6b55194e4c8a52f4531fc3) | 既有 Worker/task fan-in、workspace owner 与 structured admission 边界；新增 `SimplerWorkspaceReport` partial census、`RetainedSchedulerStorage` per-slot current/failed block、A5 `layout.total_size` bind/upload chain，以及 measured watermark/reserve/hysteresis contract | 跨仓深挖 4 |
+| simpler | [7503761a](https://github.com/hw-native-sys/simpler/commit/7503761a6c01a6d07ccd8d9c82b8060da843d1af) | 既有 Worker/task fan-in、workspace owner、census/admission；新增 `enable_sdma` Worker capability、`DeviceRunnerBase::ensure_dma_workspace_provisioned/ensure_aicpu_init_launched`、A2/A3 `SdmaWorkspaceManager`、`InitArgs/GlobalContext::dma_workspace`、AICore `get_dma_workspace` 与 capture/replay 拒绝边界 | 跨仓深挖 5 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [d7f69564](https://github.com/hw-native-sys/pypto/commit/d7f69564aed501502e90ae5ec6bc6e8db5d200d5) | 既有 Tensor→Tile/partition 与 runtime owner；新增 prefetch opaque handle、flat-static-GM verifier、AIV affinity、hidden SDMA workspace/`enable_sdma` Artifact、PR #3080 invocation-local handle dedup contract | 跨仓深挖 4 |
+| pypto | [390a7536](https://github.com/hw-native-sys/pypto/commit/390a75363f06dd5e538dcb749b92742a20962bde) | 既有 Tensor→Tile/partition、prefetch opaque handle 与 hidden workspace；新增 `CompiledProgram → runner → _execute_on_device → ChipWorker.current/_check_binding/_run_chip` capability/dispatch 链、`cid` register cache、one-shot Worker 与 close→fresh backend 生命周期 | 跨仓深挖 5 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -206,7 +207,7 @@ permalink: /learning/pto-curriculum/
 - `Complete` 与 `ResetCovered` 必须分开：前者可证明 computation closure，后者只在 scope 覆盖全部 participant/pipeline/generation 时证明旧动作不再触碰 backing。
 - allocator 只消费当前 owner 以 expected revision 原子应用的 canonical state；adapter、joiner、timeout 或 notify 均无权直接释放资源。
 - fresh census 只提供带时刻的容量证据；只有绑定 pressure epoch、expected census revision 与完整 resource vector 的 conditional reservation 才授予 admission。`Workspace.bytes` 不是 backend 总 charge，token expiry 也不撤销已开始的 allocator 副作用。
-- 编译期 resource requirement 与 runtime lease binding 必须分离：Artifact/cache identity 记录稳定需求，dispatch 以 generation-bound hidden slot 绑定 concrete workspace；地址、token 和 completion identity 不进入 reusable kernel definition。
+- 编译期 resource requirement 与 runtime lease binding 必须分离：Artifact/cache identity 记录稳定需求，dispatch 以 hidden slot 借用 concrete workspace；地址、token 和 completion identity 不进入 reusable kernel definition。当前实现的具体稳定域是 Worker lifetime，而非 per-kernel/per-device generation；close 后即使地址相同也不能继承旧 binding。
 - opaque handle 的类型相等不等于实例同源：prefetch context/event/session 只能由本地 producer 产生并在同 invocation use-graph 内闭合；跨参数、返回、metadata、alias 或 cross-context wait 必须 fail closed。
 - outlined-kernel definition reuse 只减少代码对象，不得删除 caller 的 Call/Submit，也不授权并发 dispatch 共享 ACTIVE lease；dispatch 数、reservation 与 completion record 必须逐实例保留。
 - canonical terminal verdict、native release receipt 与 capacity ledger release 是三个线性化点；durable outbox 先记录 action 意图，只有强 witness 或 generation-fenced reset census 才能把 capacity entry 幂等转为 released。
@@ -503,7 +504,7 @@ permalink: /learning/pto-curriculum/
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
 - Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–49 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery、admission 与 pressure-control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、device-wide `MemoryCensus`、scheduler-state charge、watermark state machine、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/OOM/A5 guard-page/canary/poison/性能矩阵。
-- PyPTO/PTOAS resource lease 链仍只有 `enable_sdma` boolean 与 hidden pointer：缺 versioned `ResourceRequirement`、artifact digest、dispatch `LeaseBinding`、generation fence、rank/provider validation、stale hidden-arg/graph replay/concurrent dispatch fault Golden，以及 A5/simulator/onboard parity。
+- PyPTO/simpler/PTOAS resource lease 链仍只有 `enable_sdma` boolean 与 Worker-scoped hidden pointer；当前 caller capture/replay 与 borrowed-SDMA 组合被拒绝，且 A2/A3 provider 明确没有 per-device generation gate。仍缺 versioned `ResourceRequirement/Capability`、artifact/cache digest、provider generation、rank/provider validation、stale hidden-arg/same-VA/fatal-reset/graph replay/concurrent dispatch fault Golden，以及 A5 onboard parity。
 - TPipe recovery 主线已推进到 transition audit、cross-backend correlation、typed causal graph、orphan GC 与跨 allocation ABA 防护；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor/StableReason/TransitionAudit/CorrelationId/EvidenceEnvelope/CausalLink/EpochTombstone/ReuseFenceCertificate` schema、canonical/evidence-root hash、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、native signal ordinal/adapter、reader lease、retention/redaction、native query/reset fence、same-VA late-write/crash matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
 - durable compaction/backpressure 仍欠 `CatchUpWatermark/DebtClosureProof/PendingCapacity/ModeTransition` schema、snapshot/reader/capacity receipt store、`λ/μ_c` 分位数与 burst estimator、pressure-epoch CAS、fresh census adapter，以及 stale controller、reader resurrection、partial record-set、wrong-epoch apply、ENOSPC 和 crash-at-transition fault matrix。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
@@ -515,7 +516,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：沿 PyPTO Artifact/launcher 追踪同一 kernel definition 的多 dispatch binding，定义 requirement digest、hidden-arg ABI、lease generation fence、graph replay invalidation 与 stale-pointer negative tests。
+1. 主线：把 Artifact 的 `enable_sdma` boolean 演进为 versioned capability/requirement schema，定义 provider backend、workspace ABI、rank、capture policy、cache fingerprint 与 compatibility matrix，并补 stale-pointer/same-VA/fatal-reset negative tests。
 2. 定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
 3. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 4. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
@@ -1334,3 +1335,26 @@ permalink: /learning/pto-curriculum/
 - 建议设计（非当前实现）：versioned `ResourceRequirement` 进入 Artifact digest；runtime 消费课程 71 的 token 生成 generation-bound `LeaseBinding` 并填 hidden launch slot；completion/finalize/receipt 后 release。
 - 新知识债：requirement schema/cache fingerprint、dispatch generation fence、partial-rank/provider mismatch、stale hidden arg、concurrent dispatch、provider crash/reset、graph replay 与 A5/simulator parity。
 - 下一章：**Kernel 定义可复用，Lease 不能复用——Dispatch Binding、Generation Fence 与 Hidden-arg ABI。**
+
+
+## 第 73 章课程账本增量
+
+- 日期：2026-10-22
+- 章节：**Kernel 定义可复用，Lease 不能复用：SDMA Hidden Binding 与 Generation Fence**
+- 源码基线：PyPTO [`390a7536`](https://github.com/hw-native-sys/pypto/commit/390a75363f06dd5e538dcb749b92742a20962bde)，simpler [`7503761a`](https://github.com/hw-native-sys/simpler/commit/7503761a6c01a6d07ccd8d9c82b8060da843d1af)，均为研究时默认分支最新提交；两仓最新改动与本文 SDMA binding 路径无直接语义变化。
+- 课程位置：`Artifact requirement → PyPTO Worker capability gate → simpler provider provision → InitArgs/GlobalContext → hidden GM pointer → dispatch`。
+- 新覆盖文件与符号：
+  - PyPTO `compiled_program.py`、`runner.py`、`device_runner.py`、`worker.py`、`execute_artifact.py`：`CompiledProgram.__call__`、`_execute_on_device`、`ChipWorker.current/_check_binding/_run_chip`、one-shot Worker 与 `cid` cache
+  - simpler `worker.py`、`device_runner_base.cpp/.h`、`comm_hccl.cpp`、`intrinsic.h`：`enable_sdma`、`ensure_dma_workspace_provisioned`、`ensure_aicpu_init_launched`、`SdmaWorkspaceManager`、`GlobalContext::dma_workspace`、`get_dma_workspace`
+  - `docs/design/run-completion-fence.md`：caller-stream capture/replay rejection、borrowed context generation 与 borrowed-SDMA rejection
+- 新确认不变量：
+  1. Artifact `enable_sdma` 是 requirement，不是 provider/lease identity；普通 Worker 必须在 register 前拒绝 SDMA Artifact，SDMA Worker 可运行普通 Artifact。
+  2. provider 与 workspace address 在 Worker lifetime 内稳定，可被多个 dispatch 借用；dispatch 输入/完成事实仍逐次存在。
+  3. `ChipWorker` 可跨 run 复用同一 callable 的 `cid`，但 `close→init` 会创建 fresh simpler Worker；同址不等同代。
+  4. hidden pointer 经 `InitArgs → GlobalContext → get_dma_workspace` 注入，wrapper 只借用、不拥有、不释放。
+  5. 当前 A2/A3 SDMA provider 没有 per-device generation gate；SDMA capture/replay 安全靠组合路径被拒绝，不是靠自动 rebind。
+- 具体演算：`K([1,4096] FP32)` 的逻辑 prefetch 为 16 KiB；`W0` provision `H0/P0` 后，两次 run 复用 `cid=7` 与 `P0`，但用户地址分别为 `X0/X1`。关闭 `W0`、创建 `W1/H1/P1` 后，即使 `P1==P0`，旧 graph 也没有 generation 证据可证明有效。
+- 直接测试事实：PyPTO UT 覆盖同 callable register-once/run-twice、普通 active Worker 拒绝 SDMA requirement、one-shot capability 转发、close 后 fresh backend、混合 Artifact batch 的 capability 提升；simpler sim UT 以 inert 16 KiB block 验证相同发布链及顺序 Worker 独立 ownership。尚无 provider generation、same-VA、fatal reset、stale GlobalContext 或 SDMA replay Golden；本章未重跑 NPU。
+- 建议设计（非当前实现）：若未来开放 replay，以 `environment_identity + context_generation + provider_generation + capability_digest + workspace_addr` 校验 binding；失配时 invalidate/re-record，不能凭地址相等复用。
+- 新知识债：versioned capability/requirement schema、Artifact/cache fingerprint、provider generation、A5 onboard parity、same-VA/fatal-reset/stale-pointer/concurrent-replay fault matrix。
+- 下一章：**一个 `enable_sdma` 布尔值够不够——Capability Schema、Artifact Fingerprint 与 Provider Matrix。**
