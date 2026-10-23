@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 63 章以当前 `vllm/snapshot` 的 atomic manifest publish 为代码锚点，区分 atomic visibility、payload power-loss durability 与 crash-safe deletion；建议 revalidation GC 在 no-reader/no-writer/absorption proof 闭合后，先 CAS 发布 durable tombstone，再按 immutable object set 幂等删除。下一章研究多 GC owner 的 claim lease 与 generation fencing。
+- 当前主线：第 64 章以当前 `vllm/snapshot` 的目录 winner、manifest single-assignment 与原子发布为代码锚点，把多 GC owner 的“执行所有权”和“提交所有权”分开：claim expiry 只撤销旧 owner 的 checkpoint/capacity/compaction authority，不证明旧 I/O 已停止；冻结、generation-scoped 的 tombstone key 可被多个 worker 幂等删除，但 empty-census verdict、容量返还与压缩必须绑定最新 owner generation 条件提交。下一章研究 audit tail 与 tombstone 的 reader-safe compaction。
 
 ## 已完成章节
 
@@ -76,6 +76,7 @@
 | 2026-10-20 61 | `stage completion → attempt fence → all-rank receipt aggregate → promotion CAS` | [`2296c12e`](https://github.com/vllm-project/vllm/commit/2296c12e47be87d44037d14e2a74028710c29f36) | [迟到回执不能复活旧 Attempt]({{ '/articles/vllm-revalidation-attempt-fencing-stage-receipt-exactly-once-promotion/' | relative_url }}) |
 | 2026-10-21 62 | `promotion CAS → logical retirement → no-reader/no-writer proof → tombstone/reclaim` | [`532a7d19`](https://github.com/vllm-project/vllm/commit/532a7d19d2ae70b1fd9188d82620d26f028564fb) | [旧 Attempt 的证据何时可删]({{ '/articles/vllm-revalidation-receipt-retention-no-reader-fence/' | relative_url }}) |
 | 2026-10-22 63 | `atomic manifest publish → durable tombstone → idempotent delete → GC checkpoint` | [`30aded62`](https://github.com/vllm-project/vllm/commit/30aded62d46dfcf52c815925a8acec5a8bebddc6) | [Manifest 是提交点，删除不是提交点]({{ '/articles/vllm-snapshot-manifest-tombstone-crash-safe-reclamation/' | relative_url }}) |
+| 2026-10-23 64 | `GC claim → owner generation takeover → idempotent delete replay → fenced audit checkpoint` | [`432b1003`](https://github.com/vllm-project/vllm/commit/432b1003f8ea7c871750f27bc82815a7ad0252d5) | [两个 GC Owner 都认为自己接管了怎么办]({{ '/articles/vllm-snapshot-gc-claim-lease-generation-audit-checkpoint/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -431,6 +432,7 @@
 - `SnapshotManifest`、`write_manifest_atomic/read_manifest`、`_write_json_atomic`
 - `LocalSnapshotTools.publish`、`write_ready_atomic`
 - `GCTombstone/GCCheckpoint/immutable object set`（第 63 章建议协议，尚未合入）
+- `GCClaim/owner_generation/AuditCheckpoint/capacity receipt`（第 64 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -675,6 +677,11 @@
 235. `fsync(temp) → os.replace → fsync(artifact dir) → fsync(parent dir)` 保证 manifest 的完整可见与命名持久化，但当前没有 flush 全部 captured payload，因此不提供 unclean power-loss durability。
 236. crash-safe reclamation 必须先 durable tombstone、后幂等 delete；删除 cursor 只用于加速，不能取代 manifest 可达性与 immutable object set。
 237. tombstone 只授权删除其精确列出的 immutable keys；reader 若能绕过 manifest 直接寻址 payload，manifest 便不再是唯一可达性根，协议失效。
+238. GC claim expiry 只撤销旧 owner 的 canonical commit authority，不证明其线程、网络 delete 或存储副作用已经停止。
+239. 对 frozen、generation-scoped、不可复用的 tombstone key，重复 delete 与 missing 可以安全幂等；这允许旧/新 owner 并发执行物理清理，但不授权旧 generation 发布 checkpoint。
+240. GC progress cursor 只优化扫描；最终 empty-census verdict 必须覆盖 tombstone 完整对象集合，不能信任单 owner 的本地进度。
+241. `GCCheckpoint`、capacity release 与 tombstone compaction 必须以 current owner generation、tombstone digest 和 expected manifest revision 条件提交；相同 capacity receipt 只能应用一次。
+242. 若对象 key 可复用、跨 snapshot 共享或 list 非强一致，则 immutable-set 推理失效，必须增加 object-version conditional delete、refcount/reader fence 或物理隔离。
 
 ## 前置依赖与版本注意
 
@@ -769,7 +776,7 @@
 - 缺少结构化 `ShutdownReport`，无法区分 `drained`、`failed`、`blocked_by_dependency` 与 `abandoned_by_deadline`。
 - P2P tier 已有 3 秒内部 drain，但各 owner 尚未共享父级绝对 deadline；嵌套 per-owner timeout 可能把总关闭时间叠加放大。
 - 缺少 cleanup DAG 与资源依赖声明；平铺的 catch-all best effort 会隐藏泄漏，也可能错误关闭仍被失败子层引用的 backing resource。
-- initialized snapshot 尚无 payload 全量 flush/power-loss guarantee；revalidation 侧仍缺真实 manifest/tombstone schema、reader lease、object-store CAS、GC owner fencing、immutable key、tombstone compaction 与 fsync/delete 每边界 fault injection。
+- initialized snapshot 尚无 payload 全量 flush/power-loss guarantee；revalidation 侧仍缺真实 manifest/tombstone/`GCClaim/GCCheckpoint` schema、可信 lease clock、reader lease、object-store CAS/version adapter、shared-object refcount、exactly-once capacity ledger、tombstone compaction，以及 concurrent creator、late owner、duplicate delete、same-key reuse 与 crash-at-every-boundary fault injection。
 
 ## 第 23 章课程账本增量
 
@@ -1630,3 +1637,29 @@
 - 已闭合：执行完成、路由生效、物理删除三类提交点已经拆开；前两者分别由 stage receipt 与 promotion CAS 证明，删除权由 no-reader/no-writer proof 加 durable tombstone 证明。
 - 当前最大盲区：真实 revalidation controller/store 尚未合入；多 owner GC、跨 object store CAS、payload power-loss durability 与 tombstone compaction 仍缺实现和 deterministic fault harness。
 - 后续路线调整：下一章先闭合 GC owner takeover/fencing，再研究 audit tail compaction 与长期证据成本。
+
+
+## 第 64 章课程账本增量
+
+- 日期：2026-10-23
+- 章节：**两个 GC Owner 都认为自己接管了怎么办：Claim Lease、Generation Fence 与 Audit Checkpoint**
+- 源码基线：[`432b1003`](https://github.com/vllm-project/vllm/commit/432b1003f8ea7c871750f27bc82815a7ad0252d5)，为研究时默认分支最新提交；该提交修复 MRV2 Triton validation 时机，与 snapshot 主路径无直接改动。从第 63 章基线前进 91 个提交，本文涉及的 controller/manifest/runtime/test blob 均未变化。initialized snapshot 仍由 [PR #51360](https://github.com/vllm-project/vllm/pull/51360) 提供。
+- 课程位置：`durable tombstone → GC claim generation → idempotent delete replay → full-set empty census → fenced audit checkpoint/capacity release`
+- 新覆盖文件与符号：
+  - `vllm/entrypoints/cli/snapshot.py`：`SnapshotSubcommand.cmd/run_create`、`validate_create_args`
+  - `vllm/snapshot/controller.py`：`create_snapshot` 的 target directory winner、publish/rollback 边界
+  - `vllm/snapshot/manifest.py`：`SnapshotManifest`、`_write_json_atomic`、`write_manifest_atomic` 的 `O_EXCL/replace/fsync` single-assignment
+  - `vllm/snapshot/runtime.py`：`LocalSnapshotTools.publish` 的 parent-dir durable boundary
+  - `tests/entrypoints/launchers/test_launch_cli.py`：failed-dump rollback、strict manifest 与 private-path security
+- 新确认不变量：
+  1. 当前目录 `mkdir` 与 manifest single-assignment 只解决一次 create 的 winner，不提供 GC lease、takeover 或 resumable progress。
+  2. claim expiry 只撤销旧 owner 的提交 authority，不证明旧 delete I/O 已停止。
+  3. tombstone 对象若是 frozen、generation-scoped、immutable 且不可复用，多个 owner 重复 delete/missing 可以安全幂等；执行不必全局串行。
+  4. late checkpoint、empty-census verdict、capacity release 与 compaction 必须按 current `owner_generation + tombstone_digest + expected_manifest_revision` 条件提交。
+  5. cursor 只优化；最终完成必须重新验证 tombstone 完整集合。capacity receipt 以 `(snapshot_id,tombstone_digest)` 幂等，crash-after-CAS/before-ack 不得重复返还。
+  6. key 可复用/共享或 list 非强一致时，必须增加 versioned conditional delete、refcount/reader fence 或物理隔离。
+- 具体演算：TP=2、K16，每 rank `bf16[16,4096]` 为 128 KiB，加 4 KiB receipt，总 tombstone 260 KiB。A/g7 删除 rank0 后停顿；B/g8 接管。A/B 重复删除 immutable rank1 key 安全，但 A/g7 的 cursor/capacity checkpoint 被 CAS 拒绝。B 重扫完整集合为空后，唯一提交 revision44 与 260 KiB release receipt。
+- 直接测试/实验事实：failed-dump test 证明单 owner rollback；manifest validation 和 private-path security 覆盖 fail-closed schema/symlink/permission。PR #51360 报告 82 个 snapshot tests 与 H200 lifecycle acceptance。当前没有 concurrent creator、GC claim、takeover、tombstone、duplicate/mid-delete、late checkpoint、capacity exactly-once 或 key-reuse test；本章未重跑 GPU/CRIU。
+- 建议协议（非当前实现）：`GCClaim(snapshot_id,tombstone_digest,owner_generation,deadline,expected_manifest_revision)`、frozen object set、idempotent delete、full-set empty census、generation-fenced `AuditCheckpoint` 与 exactly-once capacity receipt。
+- 新知识债：真实 claim/checkpoint schema/store、可信 lease clock、object version adapter、shared payload refcount、完整 census、capacity ledger，以及 late-owner/list-lag/crash-at-every-boundary deterministic Golden。
+- 下一章：**Audit Tail 不能无限增长——Checkpoint Absorption、Tombstone Compaction 与 Reader-safe Cutoff。**
