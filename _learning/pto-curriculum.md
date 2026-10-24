@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-23。
+最后更新：2026-10-24。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 74 已区分三层身份：Artifact 的 versioned resource requirement、Worker/domain 的 provider profile、dispatch 的 generation-bound binding。当前 `enable_sdma` 对“仅 SDMA 可由 caller 拒绝”的 Worker API 足够，却不足以表达持久化 Artifact 的 engine kind、ABI major、scope 与 required operations；这些语义字段应进入 canonical `ArtifactSpec` digest，地址、handle 与 generation 则只能留在 runtime binding。下一步研究旧 Artifact 的 schema versioning、canonical digest 与 fail-closed migration。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 75 以 PyPTO 已有 artifact schema 2、compiled metadata schema 3 与受限 legacy program 恢复为真实先例，确认版本迁移必须按信息充分性分类：能唯一解释的旧语义可纯函数恢复，缺少 ABI/scope/operation 的 `enable_sdma` Artifact 必须 clean miss/recompile，不能靠默认值补全。canonical digest 负责 cache identity 隔离，provider satisfaction 仍是独立 runtime 判定。下一步研究旧 cache slot 的 reader lease、build promotion fence 与 generation-safe GC。
 
 ## 已完成章节
 
@@ -98,6 +98,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-21 | Resource Lease 的 Prefetch Handle/Lowering 边界 | local handle → Artifact requirement → runtime hidden binding → PTOAS/EmitC → completion | [课程 72]({% post_url 2026-10-21-pypto-resource-lease-prefetch-handle-lowering %}) |
 | 2026-10-22 | SDMA Hidden Binding 与 Generation Fence | Artifact requirement → Worker capability → provider → GlobalContext → hidden pointer → dispatch | [课程 73]({% post_url 2026-10-22-pypto-sdma-hidden-binding-generation-fence %}) |
 | 2026-10-23 | Capability Schema、Artifact Fingerprint 与 Provider Matrix | prefetch intent → ResourceRequirements → ArtifactSpec digest → provider satisfies → hidden binding | [课程 74]({% post_url 2026-10-23-pypto-capability-schema-artifact-fingerprint-provider-matrix %}) |
+| 2026-10-24 | Artifact Schema Versioning 与 Legacy Migration | schema classify → unique migration/recompile → canonical digest → provider bind | [课程 75]({% post_url 2026-10-24-pypto-artifact-schema-versioning-canonical-digest-legacy-migration %}) |
 
 ## ISA 知识地图
 
@@ -188,15 +189,16 @@ permalink: /learning/pto-curriculum/
 | Catch-up / debt closure / release | canonical revision prefix 只证明 durable append/snapshot/reader 连续性；乱序 capacity action 另以 generation-bound pending set 收敛。`U/P/C` 分别由 manifest、reader fence、capacity receipt+fresh census 闭合；low watermark 从 RTO/space/service-rate 推导，pressure-epoch CAS 分级恢复 admission | 当前源码仅提供完整 completion record-set 与 workspace ownership；Host controller/schema/store/fault Golden 待实现 |
 | Admission token / capacity reservation | fresh census 是证据快照而非容量所有权；admission 必须以 pressure epoch + census revision + resource vector 原子预留。token 单次消费，ALLOCATING 失联进入 quarantine；release 需 completion/reset、backend finalize 与 fresh census。`Workspace.bytes` 只描述发布 workspace，不能替代完整 allocation plan | TOCTOU-free 协议已闭合；allocation-plan API、durable ledger、all-rank token、quarantine 与 fault Golden 待实现 |
 | Resource intent / lease lowering | PyPTO `PrefetchAsyncContext/AsyncEvent/AsyncSession` 是 invocation-local opaque SSA handle；Artifact requirement、Worker/domain provider 与 dispatch binding 分层。当前 `enable_sdma` 对仅 SDMA 可拒绝的 Worker API 足够，但不编码 engine ABI/scope/required ops；推荐 canonical `ResourceRequirements` 进入 `ArtifactSpec` digest，loader 对齐 compiled metadata，runtime 以 provider profile 做满足关系，地址/handle/generation 不进入 cache key | schema/fingerprint/provider matrix 已闭合设计边界；canonical codec、legacy migration、provider generation 与 fault Golden 待实现 |
+| Artifact schema / legacy migration | 当前 artifact schema 进入 `ArtifactKey` digest并以新 slot clean miss；single-chip compiled metadata 只对可唯一解释的 schema 1/2 program-only 语义兼容，kernel capability fail closed。legacy `enable_sdma` 不足以推出 ABI/scope/operations，必须重编译 | 真实迁移先例与最小协议已讲透；ResourceRequirements codec、migration registry、slot GC 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
-| simpler | [fa6528f4](https://github.com/hw-native-sys/simpler/commit/fa6528f4e45c42242e2162c2ba0192d09cbd3b88) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 `dma_workspace_supported_mask/provision`、SDMA/URMA slot、only-declinable-SDMA bool policy、A2/A3 48-stream provider、SIM inert 16 KiB provider、A5 device-wide mask=0 与 comm-domain scope 边界 | 跨仓深挖 6 |
+| simpler | [0de9f72d](https://github.com/hw-native-sys/simpler/commit/0de9f72d9f73e3b379b90a55313cbff69fc8fdac) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 SDMA/URMA slot、one-bit/one-handle release 限制、numeric provider ABI 对 schema migration 的约束，以及 A2/A3/A5 scope 边界 | 跨仓深挖 7 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [94b2d342](https://github.com/hw-native-sys/pypto/commit/94b2d3424d7cc8d5666e42590c78c568498eb36d) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 `ArtifactSpec`/spec digest、`ExecutionCapabilities` 边界、manifest↔compiled metadata load check、capability cache-slot/tamper tests，以及 `enable_sdma` 与未来 `ResourceRequirements` 的分层 | 跨仓深挖 6 |
+| pypto | [9f3ca535](https://github.com/hw-native-sys/pypto/commit/9f3ca53526bc31ccf7b7ec42064f4449f9db1acf) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 artifact schema/key digest 隔离、compiled metadata schema 1/2/3 受限恢复、legacy program-only 兼容、kernel fail-closed 与 ResourceRequirements migration 边界 | 跨仓深挖 7 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -419,6 +421,10 @@ permalink: /learning/pto-curriculum/
 - recovery-only 的 low watermark 必须由 replay RTO、durable free space、snapshot peak、emergency reserve、检测窗口和 `λ_next` 共同推导；固定百分比不是安全契约。
 - mode release 前必须证明下一档 projected evidence rate 小于 compactor effective service rate；当前 debt 清零不保证恢复流量后仍稳定。
 - `RECOVERY_ONLY→THROTTLED→NORMAL` 的每次转换必须绑定 pressure epoch、observed revision、debt digest 与 fresh census，并以 CAS fencing stale controller/admission token。
+- schema version 是解释规则，不是时间戳；未知 major、额外字段、duplicate key 与类型伪装必须 fail closed，不能降级成默认值。
+- canonical digest 只证明语义记录的确定性身份；它不能替代 manifest↔compiled metadata equality，也不能替代 runtime `provider.satisfies(requirement)`。
+- legacy migration 只有在旧记录能唯一决定新语义时才可原位解释；缺失 engine ABI、scope 或 required operations 时必须 clean miss/recompile，不能从 `enable_sdma` 猜出完整 contract。
+- immutable Artifact 不得原地补写新 schema；兼容恢复或重编译必须产生当前 schema 的新身份/slot，旧 slot 的回收另受 reader/build-promotion fence 约束。
 
 ## 待验证推断
 
@@ -505,7 +511,7 @@ permalink: /learning/pto-curriculum/
 - pl.spmd 到 task payload、resource shape 与物理 core 的映射。
 - PTOAS bytecode/device binary、版本 ABI 与跨仓 CI。
 - Shared `MemoryAccessIntent/AllocationCertificate/MemoryAccessVerdict` 尚未落地；课程 41–49 已从 ABI certificate、owner closure 推进到 runtime registry、recoverable lease、backend recovery、admission 与 pressure-control boundary。后续仍欠真实 `AsyncLeaseToken/RangeRef/BackendOperationKey/RecoveryVerdict/AdmissionVerdict` schema、WAL frame/CRC/checkpoint、SDMA/URMA/RDMA query adapter、trusted reset witness、ticket/revision queue、device-wide `MemoryCensus`、scheduler-state charge、watermark state machine、interval conflict index、predicate-sensitive owner set、rewrite preservation、EmitC/VPTO parity、cross-backend golden，以及真实 late-write/OOM/A5 guard-page/canary/poison/性能矩阵。
-- PyPTO/simpler/PTOAS resource lease 链已明确 versioned `ResourceRequirements`、Artifact fingerprint 与 provider satisfaction 的设计边界，但主干仍只有 `enable_sdma` boolean 与 Worker-scoped hidden pointer。仍缺 canonical codec、manifest/compiled metadata resource mismatch、legacy migration、provider generation、rank/scope/operation validation、stale hidden-arg/same-VA/fatal-reset/graph replay/concurrent dispatch fault Golden，以及 A5 device-wide 与 comm-domain adapter。
+- PyPTO/simpler/PTOAS resource lease 链已明确 versioned `ResourceRequirements`、Artifact fingerprint、provider satisfaction 与 fail-closed legacy migration 边界，但主干仍只有 `enable_sdma` boolean 与 Worker-scoped hidden pointer。仍缺 strict canonical codec、migration registry、manifest/compiled metadata resource mismatch、provider ABI negotiation/generation、rank/scope/operation validation、legacy inventory、old-slot reader/build-promotion GC、stale hidden-arg/same-VA/fatal-reset/graph replay/concurrent dispatch fault Golden，以及 A5 device-wide 与 comm-domain adapter。
 - TPipe recovery 主线已推进到 transition audit、cross-backend correlation、typed causal graph、orphan GC 与跨 allocation ABA 防护；仍欠真实 `PipeCheckpoint/CompactionLease/QuarantineRoot/RecoveryDebtRecord/DebtCensus/AdmissionVerdict/RecoveryState/RevisionCursor/StableReason/TransitionAudit/CorrelationId/EvidenceEnvelope/CausalLink/EpochTombstone/ReuseFenceCertificate` schema、canonical/evidence-root hash、frame/segment sealing、fsync/manifest-CAS、linearizable store/watch、atomic reserve/handoff、native signal ordinal/adapter、reader lease、retention/redaction、native query/reset fence、same-VA late-write/crash matrix，以及 A2/A3/A5/graph generation 的 terminal witness。
 - durable compaction/backpressure 仍欠 `CatchUpWatermark/DebtClosureProof/PendingCapacity/ModeTransition` schema、snapshot/reader/capacity receipt store、`λ/μ_c` 分位数与 burst estimator、pressure-epoch CAS、fresh census adapter，以及 stale controller、reader resurrection、partial record-set、wrong-epoch apply、ENOSPC 和 crash-at-transition fault matrix。
 - `patch_vec_barriers.py` 缺少 matcher 级 negative tests：必须覆盖无 wait 的 GU、RAW/WAR/WAW、非 `vN` 变量、换行调用、alias/view 和 parser error；parser 应改为 tri-state 并在 unknown 时保留同步。
@@ -517,7 +523,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：把 Artifact 的 `enable_sdma` boolean 演进为 versioned capability/requirement schema，定义 provider backend、workspace ABI、rank、capture policy、cache fingerprint 与 compatibility matrix，并补 stale-pointer/same-VA/fatal-reset negative tests。
+1. 主线：继续 Artifact lifecycle，定义 old slot 的 reader lease、in-flight build/promotion fence、generation-safe tombstone 与 cache GC；随后把 `enable_sdma` 演进为 strict `ResourceRequirements` codec/migration registry，并补 stale-pointer/same-VA/fatal-reset negative tests。
 2. 定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
 3. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 4. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
@@ -1383,3 +1389,18 @@ permalink: /learning/pto-curriculum/
 - 建议设计（非当前实现）：新增 versioned `ResourceRequirements` 并纳入 `ArtifactSpec` digest；compiled metadata携带同一 record；loader先做相等校验，runtime再做 `provider.satisfies(requirement)`；迁移期保留派生的 `enable_sdma` bool adapter。
 - 新知识债：canonical serialization/default normalization、legacy bool 保守映射与强制重编译、provider profile registry、SIM operation semantics、A5 scope adapter、ABI v1→v2 invalidation、multi-provider ownership与tamper/fault matrix。
 - 下一章：**旧 Artifact 如何安全升级——Capability Schema Versioning、Canonical Digest 与 Legacy Migration。**
+
+## 第 75 章课程账本增量
+
+- 日期：2026-10-24
+- 章节：**旧 Artifact 不能靠猜升级：Schema Versioning、Canonical Digest 与 Fail-closed Migration**
+- 源码基线：PyPTO [`9f3ca535`](https://github.com/hw-native-sys/pypto/commit/9f3ca53526bc31ccf7b7ec42064f4449f9db1acf)，simpler [`0de9f72d`](https://github.com/hw-native-sys/simpler/commit/0de9f72d9f73e3b379b90a55313cbff69fc8fdac)。最新提交分别为 parser validation refactor 与 framework eager queue，未增加 ResourceRequirements schema。
+- 直接相关历史：PyPTO [PR #2760](https://github.com/hw-native-sys/pypto/pull/2760) 将 artifact manifest 升至 schema 2，并让旧 persistent slot clean miss；[PR #3077](https://github.com/hw-native-sys/pypto/pull/3077) 建立 shared CompiledArtifact 与 schema 3 metadata，同时保留受限 program-only legacy。
+- 课程位置：`prefetch intent → Artifact identity → schema classifier → migrate/recompile → canonical digest → metadata equality → provider binding`。
+- 新覆盖文件与符号：PyPTO `_artifact_contract.py`、`_artifact_manifest.py`、`artifact_cache.py`、`_artifact_metadata.py`、`_artifact_runtime.py`、`pto_backend.py`；simpler `dma_workspace.h`、`comm.h`。
+- 新确认不变量：schema bump 必须进入身份并选择新 slot；canonical digest 不代表 compatibility；旧记录只有在唯一语义可证明时才迁移；manifest/metadata 校验必须早于 runtime code load 与 provider side effect。
+- 具体演算：`FP32[1,4096]` prefetch 为 16,384 B，`FP32[1,128]` Tile 为 512 B。建议 schema-1 requirement canonical JSON 为 108 B、digest `fcac8cae…ec11e7`；ABI/schema 2 digest 变为 `a48173ef…49d588`。legacy `enable_sdma=True` 缺 ABI/scope/operation，结果为 recompile。
+- 测试事实：现有 UT 覆盖 capability 分槽/排序规范化、manifest tamper invalid、未知 compiled schema recompile，以及 schema-1 metadata program-only 恢复；尚无 ResourceRequirements codec、legacy SDMA classifier、ABI/scope migration、multi-provider 与 crash-at-migration tests。本章未重跑 NPU。
+- 建议设计（非当前实现）：`M(old) -> exactly_one_new | RECOMPILE | REJECT`；禁止原地改写 immutable Artifact，runtime binding 字段不进入 cache digest。
+- 新知识债：strict resource codec、migration registry、provider ABI negotiation、legacy inventory、old-slot reader/build-promotion GC 与跨版本 fault matrix。
+- 下一章：**旧 Cache Slot 何时可删——Artifact Reader Lease、Build Promotion Fence 与 Generation-safe GC。**
