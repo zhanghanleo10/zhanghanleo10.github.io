@@ -136,9 +136,9 @@ B 构造 `Checkpoint48`，其 `absorbed_through=48`，包含 tombstone digest、
 
 但 reader R0 已在 revision 44 打开旧视图，`min_required_revision=44`。此时可见 checkpoint 不等于可删除 audit43–48。安全 cutoff 是：
 
-[
-C_{safe}=min(C_{absorbed}, R_{min}-1, W_{closed})
-]
+$$
+C_{safe}=\min(C_{absorbed}, R_{min}-1, W_{closed})
+$$
 
 若 `C_absorbed=48`、`R_min=44`、writer generation 8 已证明 `W_closed=48`，则 `C_safe=43`：最多只能处理 43 以前的 segment，不能删除 R0 仍需的 44–48。R0 结束或被具有真实 revoke 证据的 lease fence 排除后，`R_min=49`，才得到 `C_safe=48`。
 
