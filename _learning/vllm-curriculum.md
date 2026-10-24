@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 64 章以当前 `vllm/snapshot` 的目录 winner、manifest single-assignment 与原子发布为代码锚点，把多 GC owner 的“执行所有权”和“提交所有权”分开：claim expiry 只撤销旧 owner 的 checkpoint/capacity/compaction authority，不证明旧 I/O 已停止；冻结、generation-scoped 的 tombstone key 可被多个 worker 幂等删除，但 empty-census verdict、容量返还与压缩必须绑定最新 owner generation 条件提交。下一章研究 audit tail 与 tombstone 的 reader-safe compaction。
+- 当前主线：第 65 章以当前 `vllm/snapshot` 的 manifest single-assignment 与原子发布为代码锚点，把 checkpoint absorption 与 physical deletion 分开：immutable checkpoint 只让新 reader 从 absorbed prefix 之后重放，旧 audit segment 仍受最慢 reader 与 writer-closed frontier 保护；safe cutoff 为 `min(absorbed_through, min_reader_revision - 1, writer_closed_through)`。terminal tombstone 可以压缩 detail，但必须保留 digest、capacity receipt identity 与 retired revision。下一章研究 checkpoint schema migration、hash chain 与 last-known-good recovery point。
 
 ## 已完成章节
 
@@ -77,6 +77,7 @@
 | 2026-10-21 62 | `promotion CAS → logical retirement → no-reader/no-writer proof → tombstone/reclaim` | [`532a7d19`](https://github.com/vllm-project/vllm/commit/532a7d19d2ae70b1fd9188d82620d26f028564fb) | [旧 Attempt 的证据何时可删]({{ '/articles/vllm-revalidation-receipt-retention-no-reader-fence/' | relative_url }}) |
 | 2026-10-22 63 | `atomic manifest publish → durable tombstone → idempotent delete → GC checkpoint` | [`30aded62`](https://github.com/vllm-project/vllm/commit/30aded62d46dfcf52c815925a8acec5a8bebddc6) | [Manifest 是提交点，删除不是提交点]({{ '/articles/vllm-snapshot-manifest-tombstone-crash-safe-reclamation/' | relative_url }}) |
 | 2026-10-23 64 | `GC claim → owner generation takeover → idempotent delete replay → fenced audit checkpoint` | [`432b1003`](https://github.com/vllm-project/vllm/commit/432b1003f8ea7c871750f27bc82815a7ad0252d5) | [两个 GC Owner 都认为自己接管了怎么办]({{ '/articles/vllm-snapshot-gc-claim-lease-generation-audit-checkpoint/' | relative_url }}) |
+| 2026-10-24 65 | `audit prefix → immutable checkpoint → reader/writer frontier → reader-safe segment GC` | [`7dc44a00`](https://github.com/vllm-project/vllm/commit/7dc44a00161ace6f8ba7be2cc008f926e5a35fe2) | [Audit Tail 不能无限增长]({{ '/articles/vllm-snapshot-audit-tail-checkpoint-absorption-reader-safe-cutoff/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -433,6 +434,7 @@
 - `LocalSnapshotTools.publish`、`write_ready_atomic`
 - `GCTombstone/GCCheckpoint/immutable object set`（第 63 章建议协议，尚未合入）
 - `GCClaim/owner_generation/AuditCheckpoint/capacity receipt`（第 64 章建议协议，尚未合入）
+- `AuditCheckpoint/ReaderLease/absorbed_through/reader frontier/writer_closed_through`（第 65 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -682,6 +684,11 @@
 240. GC progress cursor 只优化扫描；最终 empty-census verdict 必须覆盖 tombstone 完整对象集合，不能信任单 owner 的本地进度。
 241. `GCCheckpoint`、capacity release 与 tombstone compaction 必须以 current owner generation、tombstone digest 和 expected manifest revision 条件提交；相同 capacity receipt 只能应用一次。
 242. 若对象 key 可复用、跨 snapshot 共享或 list 非强一致，则 immutable-set 推理失效，必须增加 object-version conditional delete、refcount/reader fence 或物理隔离。
+243. checkpoint absorption 只改变新 reader 的重放起点，不自动证明旧 audit segment 已无读者；逻辑压缩与物理删除必须分开。
+244. reader-safe cutoff 必须同时受 checkpoint 吸收边界、最慢 reader 所需 revision 和 writer-closed frontier 约束：`C_safe = min(C_absorbed, R_min - 1, W_closed)`。
+245. 当前 `SnapshotManifest` 是 artifact 的 single-assignment truth；audit checkpoint、reader lease 与 `CURRENT` 指针应置于独立 control store，不能原地改写 `manifest.json`。
+246. 新 checkpoint 必须先完整写入、校验与 fsync，再以 CAS 发布 `CURRENT`；发布前崩溃只留下可回收 orphan，发布后删旧 segment 前崩溃只造成重复存储。
+247. terminal tombstone 的逐事件 detail 可在 reader/writer fence 通过后压缩，但必须保留 `snapshot_id`、`tombstone_digest`、`capacity_receipt_id` 与 `retired_revision`，以拒绝迟到 release 和同 key 重用。
 
 ## 前置依赖与版本注意
 
@@ -776,7 +783,7 @@
 - 缺少结构化 `ShutdownReport`，无法区分 `drained`、`failed`、`blocked_by_dependency` 与 `abandoned_by_deadline`。
 - P2P tier 已有 3 秒内部 drain，但各 owner 尚未共享父级绝对 deadline；嵌套 per-owner timeout 可能把总关闭时间叠加放大。
 - 缺少 cleanup DAG 与资源依赖声明；平铺的 catch-all best effort 会隐藏泄漏，也可能错误关闭仍被失败子层引用的 backing resource。
-- initialized snapshot 尚无 payload 全量 flush/power-loss guarantee；revalidation 侧仍缺真实 manifest/tombstone/`GCClaim/GCCheckpoint` schema、可信 lease clock、reader lease、object-store CAS/version adapter、shared-object refcount、exactly-once capacity ledger、tombstone compaction，以及 concurrent creator、late owner、duplicate delete、same-key reuse 与 crash-at-every-boundary fault injection。
+- initialized snapshot 尚无 payload 全量 flush/power-loss guarantee；revalidation 侧仍缺真实 manifest/tombstone/audit/checkpoint schema、immutable segment manifest、`CURRENT` CAS 与 hash chain、可信 lease clock、reader lease/revoke、writer-closed watermark、object-store CAS/version adapter、shared-object refcount、exactly-once capacity ledger、tombstone retention horizon、last-known-good checkpoint 选择，以及 concurrent creator、late owner、duplicate delete、same-key reuse、reader stall 与 crash-at-every-boundary fault injection。
 
 ## 第 23 章课程账本增量
 
@@ -1663,3 +1670,17 @@
 - 建议协议（非当前实现）：`GCClaim(snapshot_id,tombstone_digest,owner_generation,deadline,expected_manifest_revision)`、frozen object set、idempotent delete、full-set empty census、generation-fenced `AuditCheckpoint` 与 exactly-once capacity receipt。
 - 新知识债：真实 claim/checkpoint schema/store、可信 lease clock、object version adapter、shared payload refcount、完整 census、capacity ledger，以及 late-owner/list-lag/crash-at-every-boundary deterministic Golden。
 - 下一章：**Audit Tail 不能无限增长——Checkpoint Absorption、Tombstone Compaction 与 Reader-safe Cutoff。**
+
+## 第 65 章课程账本增量
+
+- 章节：Audit Tail 不能无限增长：Checkpoint Absorption、Tombstone Compaction 与 Reader-safe Cutoff。
+- 源码基线：[`7dc44a00`](https://github.com/vllm-project/vllm/commit/7dc44a00161ace6f8ba7be2cc008f926e5a35fe2)。相对第 64 章基线前进 88 个提交，但 `vllm/snapshot` 相关文件无变更；当前 head 的 LoRA/MoE 修复与本章主题无关。
+- 课程位置：`tombstone freeze → generation-fenced delete → audit append → immutable checkpoint → reader/writer frontier → segment GC`。
+- 已覆盖文件：`vllm/snapshot/manifest.py`、`controller.py`、`runtime.py`、`server.py`、`docs/features/initialized_snapshots.md`、`tests/entrypoints/launchers/test_launch_cli.py`。
+- 当前实现边界：`SnapshotManifest` 与 `manifest.json` 已提供 canonical JSON、file fsync、atomic replace 与 parent fsync；公开源码尚无 audit log、reader lease、checkpoint、segment GC 或 tombstone compaction 实现。
+- 新确认不变量：checkpoint absorption 只优化新 reader 重放；physical deletion 还要等待 `R_min` 与 `W_closed`。安全删除边界为 `min(C_absorbed, R_min - 1, W_closed)`。
+- 生命周期例：revision 43–48 完成 260 KiB tombstone 的双 owner takeover、幂等删除、empty census 与 exactly-once capacity receipt；reader 固定在 revision 44 时只能删至 43，退出或被有证据地 revoke 后才能删至 48。
+- 测试事实：现有测试覆盖 failed dump 回滚、identity mismatch 的 restore 前拒绝、oracle mismatch cleanup 和 strict manifest validation；尚未覆盖 checkpoint publish crash、stalled reader、reader revoke、segment deletion 与 retired identity 拒绝。
+- 建议协议：artifact manifest 保持 immutable；独立 control store 保存 immutable checkpoint、`CURRENT` 指针、reader lease、writer-closed watermark 与 retired identity。此协议是课程设计，不是当前 vLLM API。
+- 新增知识债：checkpoint schema migration、hash chain、last-known-good selection、lease clock/revoke authority、segment 索引与跨 object-store 的 CAS/durability 语义。
+- 下一章：Checkpoint 也会过期——Schema Migration、Hash Chain 与 Last-known-good Recovery Point。
