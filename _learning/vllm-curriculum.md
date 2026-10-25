@@ -1684,3 +1684,28 @@
 - 建议协议：artifact manifest 保持 immutable；独立 control store 保存 immutable checkpoint、`CURRENT` 指针、reader lease、writer-closed watermark 与 retired identity。此协议是课程设计，不是当前 vLLM API。
 - 新增知识债：checkpoint schema migration、hash chain、last-known-good selection、lease clock/revoke authority、segment 索引与跨 object-store 的 CAS/durability 语义。
 - 下一章：Checkpoint 也会过期——Schema Migration、Hash Chain 与 Last-known-good Recovery Point。
+
+## 第 66 章课程账本增量
+
+- 日期：2026-10-25
+- 章节：**Checkpoint 也会过期：Schema Migration、Hash Chain 与 Last-known-good Recovery Point**
+- 源码基线：[`4e591657`](https://github.com/vllm-project/vllm/commit/4e591657157a021cab997f911d67f50c0d18a71e)，为研究时默认分支最新提交；相对第 65 章基线前进 25 个提交，`vllm/snapshot`、initialized-snapshot 文档和直接测试均未变化。最新 structured-output backend 弃用与本文主路径无直接关系；initialized snapshot 仍由 [PR #51360](https://github.com/vllm-project/vllm/pull/51360) 提供。
+- 课程位置：`immutable checkpoint → schema/digest/chain/generation validation → LKG selection → retained-tail replay → migrated checkpoint publish`。
+- 新覆盖文件与符号：
+  - `vllm/snapshot/manifest.py`：`SnapshotManifest.schema_version: Literal[1]`、strict/frozen model、`_write_json_atomic`、`write_manifest_atomic/read_manifest`
+  - `vllm/snapshot/controller.py`：`create_snapshot/restore_snapshot` 的 publish、restore 前 validation 与 oracle cleanup
+  - `vllm/snapshot/runtime.py`：`make_manifest`、`LocalSnapshotTools.publish`
+  - `docs/features/initialized_snapshots.md`：manifest fsync 与 captured payload durability 的明确边界
+  - `tests/entrypoints/launchers/test_launch_cli.py`：failed dump、identity/oracle mismatch、strict schema 与 private-path security
+- 新确认不变量：
+  1. 当前 `Literal[1]` 是 V1 reader 的 fail-closed compatibility gate，不是 schema migrator。
+  2. LKG 必须同时通过 recognized/migratable schema、payload digest、hash-chain continuity、current writer generation、state/tombstone/receipt commitment；最大 revision 或 hash-valid 单独都不充分。
+  3. hash 证明 bytes，chain 证明历史链接，generation/CAS 证明提交 authority；旧 owner 可生成 hash-valid 但失权的 fork。
+  4. 新 schema 的必填字段若不能从旧 checkpoint 唯一恢复，禁止填默认值；必须从 retained audit tail 纯函数 replay 后发布新 immutable checkpoint。
+  5. `CURRENT` 只是寻址提示；若只保存当前 digest 且对象损坏，无法发现 predecessor，因此需 predecessor pointer 或 bounded `CURRENT/PREVIOUS` ring。
+  6. successor 验证与 fallback window 闭合前，必须保留 predecessor 及其重放所需 segment；否则回退会因 tail gap 失去可证明性。
+- 具体演算：TP=2、K16，每 rank `bf16[16,4096]` 为 128 KiB，两 rank加 4 KiB receipt 共 260 KiB。V2 新增 `receipt_set_digest`，V1 的聚合字节数不能唯一生成该集合，故以 revision43–48 audit replay 构造 `C48v2`。当 `CURRENT → C52v2` 但对象 digest 失败，回退到 `C48v2`，重放 49–52 后发布新 checkpoint；若这些 segment 已删则必须停止恢复。
+- 直接测试事实：failed dump 回滚 target；identity mismatch 在 restore mutation 前拒绝；oracle mismatch cleanup 且不 complete；manifest 参数化拒绝 unknown field、布尔 schema、非法 boundary/PID/CUDA holder/oracle；private-path 拒绝 symlink 与不安全权限。当前没有 migrator、corrupt/missing CURRENT、stale fork、chain gap、fallback、receipt replay 或 segment-retention test；本章未重跑 GPU/CRIU。
+- 建议协议（非当前实现）：content-addressed immutable checkpoint、`previous_checkpoint_digest`、generation-fenced `CURRENT` CAS、bounded fallback ring、pure migration/replay 与 `receipt_set_digest`。
+- 新知识债：真实 checkpoint/store API、canonical encoding 跨语言约束、migrator registry、fallback depth/retention budget、object-store CAS/read-after-write、generation authority、receipt 重算成本与 crash-at-every-boundary harness。
+- 下一章：**Recovery Replay 如何与迟到 writer 汇合——Redo/Undo Boundary、Compensation 与 Side-effect Reconciliation。**
