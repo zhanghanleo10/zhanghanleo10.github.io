@@ -1404,3 +1404,30 @@ permalink: /learning/pto-curriculum/
 - 建议设计（非当前实现）：`M(old) -> exactly_one_new | RECOMPILE | REJECT`；禁止原地改写 immutable Artifact，runtime binding 字段不进入 cache digest。
 - 新知识债：strict resource codec、migration registry、provider ABI negotiation、legacy inventory、old-slot reader/build-promotion GC 与跨版本 fault matrix。
 - 下一章：**旧 Cache Slot 何时可删——Artifact Reader Lease、Build Promotion Fence 与 Generation-safe GC。**
+
+## 第 76 章课程账本增量
+
+- 日期：2026-10-25
+- 章节：**旧 Cache Slot 何时可删：Artifact Reader Lease、Build Promotion Fence 与 Generation-safe GC**
+- 源码基线：PyPTO [`cc17e872`](https://github.com/hw-native-sys/pypto/commit/cc17e872c82a414cc26ae98620379bf9cb939f40)，simpler [`d78561cc`](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6)，均为研究时默认分支最新提交；相对第 75 章分别前进 4、6 个提交，未增加 Artifact GC。直接相关下游变更是 simpler [PR #2697](https://github.com/hw-native-sys/simpler/pull/2697) / merge commit [`7401ef5b`](https://github.com/hw-native-sys/simpler/commit/7401ef5b9b458d2f17d7e97bf3ada8ba2b6c6840)。
+- 课程位置：`Artifact schema migration → old slot retire → reader/build fence → generation-safe quarantine → idempotent GC`。
+- 新覆盖文件与符号：
+  - PyPTO `python/pypto/jit/artifact_cache.py`：`ArtifactHandle`、`ArtifactBuild`、`_BuildFlights`、`ArtifactStore.lookup/get_or_build/_publish`、persistent per-key `flock` 与 `RENAME_NOREPLACE`
+  - PyPTO `python/pypto/runtime/_artifact_runtime.py`：`ArtifactRuntime._validate/load`、`bind_artifact`、generated→ready promotion 与 source-path retention
+  - PyPTO `docs/en/dev/09-artifact-store.md`：concurrent deletion unsupported、readonly reader、published path lifetime
+  - PyPTO `tests/ut/jit/test_artifact_cache.py`：publish/hit、stage copy、readonly、orphan/private fallback、multi-process writer tests
+  - simpler `python/simpler/worker.py`、`tests/ut/py/test_worker/test_l2_close_drain.py`：accepted run set、native fence、`_cleanup_published`、close-before-workspace-teardown
+- 当前实现边界：PyPTO 明确不支持 concurrent cache deletion；`ArtifactHandle` 不带 lease/generation，readonly hit 不拿 key lock，当前无 GC/retire/tombstone/quarantine API。simpler 的 close-drain 只证明 Worker/device 生命周期，不拥有 PyPTO cache 删除权。
+- 新确认不变量：
+  1. schema/key/spec 变化只令旧 slot logical obsolete，不产生物理删除权。
+  2. persistent key lock 串行化同 key builder/stage/spec，但 readonly reader 无锁，因此 GC 只拿 lock 仍存在 lookup→bind/load TOCTOU。
+  3. `ArtifactRuntime` 第一次 load 才可能重读 manifest/metadata；promotion 后 compiled object 仍保留 source path，ready 存在不能推出 generated 无 reader。
+  4. safe delete 必须合取 `Retired(s,g) ∧ Readers(s,g)=∅ ∧ BuildersFrom(s,g)=∅ ∧ SuccessorValidated ∧ CurrentGeneration(s)=g`。
+  5. generation fence 负责阻止未来 lease/build；reader lease与builder drain负责结束过去已获准访问，两者不可互换。
+  6. Worker run done 不等于 cleanup published；只有 close/drain、unknown-completion ownership处理和 PyPTO consumer release共同完成 runtime lease release。
+  7. reader drain 后以 generation-scoped quarantine rename 提交逻辑删除，再异步 rmtree；rename 本身不是 reader fence。
+- 具体演算：`FP32[1,4096]` prefetch 范围 16,384 B。P1 在 revision40 持 `S/g7` lease但未 load；P2 以 g7 promotion ready；g8 successor 已验证。retire CAS 先挡新 reader/build，等待 P2 publish和P1 Worker close/drain后，再在 key lock下复查同代并 rename到 `.trash/<digest>.g7`。
+- 直接测试事实：artifact-cache UT 证明 immutable publish、不同 inode promotion、readonly 无写/无锁、orphan不命中、publication失败保留 private build、3进程仅1 publish/2 hit和死进程释放 lock。simpler PR #2697 报告20 cases/78 golden calls，并覆盖 unwaited/dropped handle、close/wait并发、submission race与retry。当前没有 reader lease、promotion-vs-GC、old builder late publish、reader crash、quarantine replay、same-path ABA测试；本章未重跑 NPU。
+- 建议协议（非当前实现）：durable generation registry、process/ArtifactRuntime reader lease、existing persistent key lock、BuildIntent、successor validation、quarantine rename、tombstone与idempotent sweeper。
+- 新知识债：显式 `ArtifactRuntime.close`、Worker→lease release hook、pidfd/process epoch、generation-aware lookup/publication、quota/census、NFS/object-store adapter、same-path ABA与全边界故障注入。
+- 下一章：**Cache 满了先删谁——Rebuild Cost、Warm-set Protection 与 Dependency-aware Eviction。**
