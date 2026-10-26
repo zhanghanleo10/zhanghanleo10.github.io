@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 65 章以当前 `vllm/snapshot` 的 manifest single-assignment 与原子发布为代码锚点，把 checkpoint absorption 与 physical deletion 分开：immutable checkpoint 只让新 reader 从 absorbed prefix 之后重放，旧 audit segment 仍受最慢 reader 与 writer-closed frontier 保护；safe cutoff 为 `min(absorbed_through, min_reader_revision - 1, writer_closed_through)`。terminal tombstone 可以压缩 detail，但必须保留 digest、capacity receipt identity 与 retired revision。下一章研究 checkpoint schema migration、hash chain 与 last-known-good recovery point。
+- 当前主线：第 67 章回到已合入的 KV Offload 代码，以 preemption 时 `num_computed_tokens` 与 `next_stored_chunk_idx` 同步归零为 redo boundary，以 content-addressed FS block 的 atomic publish/EEXIST-success 为 late-writer 汇合点。新确认 cursor 只是增量优化，immutable 数据 effect 可用 at-least-once redo 收敛，但 completion、actual bytes、event 与 backpressure 仍需独立 receipt 和 reconciliation。下一章研究 Transfer Receipt、Actual Bytes 与 Backpressure Reconciliation。
 
 ## 已完成章节
 
@@ -78,6 +78,8 @@
 | 2026-10-22 63 | `atomic manifest publish → durable tombstone → idempotent delete → GC checkpoint` | [`30aded62`](https://github.com/vllm-project/vllm/commit/30aded62d46dfcf52c815925a8acec5a8bebddc6) | [Manifest 是提交点，删除不是提交点]({{ '/articles/vllm-snapshot-manifest-tombstone-crash-safe-reclamation/' | relative_url }}) |
 | 2026-10-23 64 | `GC claim → owner generation takeover → idempotent delete replay → fenced audit checkpoint` | [`432b1003`](https://github.com/vllm-project/vllm/commit/432b1003f8ea7c871750f27bc82815a7ad0252d5) | [两个 GC Owner 都认为自己接管了怎么办]({{ '/articles/vllm-snapshot-gc-claim-lease-generation-audit-checkpoint/' | relative_url }}) |
 | 2026-10-24 65 | `audit prefix → immutable checkpoint → reader/writer frontier → reader-safe segment GC` | [`7dc44a00`](https://github.com/vllm-project/vllm/commit/7dc44a00161ace6f8ba7be2cc008f926e5a35fe2) | [Audit Tail 不能无限增长]({{ '/articles/vllm-snapshot-audit-tail-checkpoint-absorption-reader-safe-cutoff/' | relative_url }}) |
+| 2026-10-25 66 | `schema/digest/chain/generation validation → LKG selection → retained-tail replay` | [`4e591657`](https://github.com/vllm-project/vllm/commit/4e591657157a021cab997f911d67f50c0d18a71e) | [Checkpoint 也会过期]({{ '/articles/vllm-checkpoint-schema-migration-hash-chain-last-known-good/' | relative_url }}) |
+| 2026-10-26 67 | `preemption cursor reset → at-least-once redo → content-addressed publish → side-effect reconciliation` | [`a7407ab4`](https://github.com/vllm-project/vllm/commit/a7407ab44557802ca32a0ba2c2707362d7d21563) | [Replay 不是回滚]({{ '/articles/vllm-kv-offload-replay-redo-late-writer-reconciliation/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1709,3 +1711,33 @@
 - 建议协议（非当前实现）：content-addressed immutable checkpoint、`previous_checkpoint_digest`、generation-fenced `CURRENT` CAS、bounded fallback ring、pure migration/replay 与 `receipt_set_digest`。
 - 新知识债：真实 checkpoint/store API、canonical encoding 跨语言约束、migrator registry、fallback depth/retention budget、object-store CAS/read-after-write、generation authority、receipt 重算成本与 crash-at-every-boundary harness。
 - 下一章：**Recovery Replay 如何与迟到 writer 汇合——Redo/Undo Boundary、Compensation 与 Side-effect Reconciliation。**
+
+
+## 第 67 章课程账本增量
+
+- 日期：2026-10-26
+- 章节：**Replay 不是回滚：KV Offload 的 Redo Boundary、迟到 Writer 与 Side-effect Reconciliation**
+- 源码基线：[`a7407ab4`](https://github.com/vllm-project/vllm/commit/a7407ab44557802ca32a0ba2c2707362d7d21563)，为研究时默认分支最新提交；相对第 66 章基线前进 34 个提交。最新 head 的 pipeline-parallel benchmark 与本章无关，但期间合入的 KV Offload 修复直接构成本章证据。
+- 课程位置：`preemption → request replay → store candidate re-enumeration → content-addressed publish → async completion/accounting`。
+- 新覆盖文件与符号：
+  - `vllm/v1/core/sched/scheduler.py`：`Scheduler._preempt_request`
+  - `vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py`：`RequestGroupState.next_stored_chunk_idx`、`OffloadingConnectorScheduler.get_num_new_matched_tokens/_build_store_jobs`
+  - `vllm/distributed/kv_transfer/kv_connector/v1/offloading/worker.py` 与 `offloading_connector.py`：store queue、transfer submit/completion
+  - `vllm/v1/kv_offload/tiering/manager.py`：`TieringOffloadingManager.complete_store`
+  - `vllm/v1/kv_offload/tiering/fs/manager.py`、`fs/io.py`、`csrc/fs_io.cpp`：path mapping、exclusive temp、atomic publish 与 final-path `EEXIST`
+  - `tests/v1/kv_connector/unit/offloading_connector/test_scheduler.py`、`tests/v1/kv_offload/tiering/test_fs_tier.py`、`test_async_lookup.py`
+- 直接相关合入：
+  - [PR #63010](https://github.com/vllm-project/vllm/pull/63010) / [`6f514338`](https://github.com/vllm-project/vllm/commit/6f51433838b858a9cd0478b2ffee4d2c610a1712)：请求从 token 0 重启时同步重置 store cursor。
+  - [PR #61390](https://github.com/vllm-project/vllm/pull/61390) / [`1757f672`](https://github.com/vllm-project/vllm/commit/1757f6720c3c1cc130a834b41f264ac22a782289)：另一 writer 已发布 content-addressed FS block 时把 publish race 视为成功且保留 winner。
+  - [PR #63126](https://github.com/vllm-project/vllm/pull/63126) / [`503e4e16`](https://github.com/vllm-project/vllm/commit/503e4e16ad8d4c4b7b1290c9f2792af0ca622c47)：捕获 async lookup iterator 中途错误，失败 group 降级为 miss，健康 batch 继续。
+- 新确认不变量：
+  1. preemption 把计算 attempt 归零时，store enumeration cursor 必须一起归零；cursor 只能优化同一未中断 attempt。
+  2. replay 从 request tokens、block hash、group index 等可重建输入重新枚举；是否需要实际写入由 manager/sink 去重。
+  3. immutable content-addressed final object 允许 at-least-once redo；迟到 loser 只补偿自己的 temp，不能删除共享 winner。
+  4. final-path publish race 的 `EEXIST` 只有在 key→bytes 与 namespace/config 唯一映射时才能视为成功；其他 I/O error 不可吞掉。
+  5. 数据 effect 幂等不推出 completion/accounting exactly-once；`transfer_bytes`、event、backpressure 需要独立 receipt。
+- 具体演算：`block_size=4`、`blocks_per_chunk=3`，24-token 请求先存 GPU blocks 0–5，decode 后存 6–8；preempt 后 cursor 从 3 归零。CPU hit 路径 reload 0–8 后存 9–11；miss 路径重算并重新 offer 0–8，再由 content-addressed sink 去重，最后存 9–11。
+- 测试事实：PR #63010 覆盖 async scheduling × CPU hit/miss 并报告 609 passed、2 skipped；FS race test 证明 winner bytes 不被 loser 覆盖；PR #63126 报告 async lookup 文件 22 passed。本章未重跑 GPU 套件。当前未覆盖 crash-after-publish/before-ack、late completion、duplicate event、actual bytes、generation fence、temp orphan、corruption 与 power-loss durability。
+- 当前实现边界：公开代码没有 durable redo/undo log、attempt generation、compensation log 或跨重启 receipt store；store failure 路径仍不是完整 recovery protocol。开放 [PR #63524](https://github.com/vllm-project/vllm/pull/63524) 提议只报告实际写入块数，尚未合入。
+- 新知识债：durable transfer receipt、actual-byte accounting、completion dedup、backpressure reconciliation、crash-safe temp GC、publish durability/corruption verification、跨 engine generation fencing 与 crash-at-every-boundary Golden。
+- 下一章：**数据 effect 幂等了，计账为什么还会错——Transfer Receipt、Actual Bytes 与 Backpressure Reconciliation。**
