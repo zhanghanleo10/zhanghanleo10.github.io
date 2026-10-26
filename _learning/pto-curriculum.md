@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-24。
+最后更新：2026-10-26。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 75 以 PyPTO 已有 artifact schema 2、compiled metadata schema 3 与受限 legacy program 恢复为真实先例，确认版本迁移必须按信息充分性分类：能唯一解释的旧语义可纯函数恢复，缺少 ABI/scope/operation 的 `enable_sdma` Artifact 必须 clean miss/recompile，不能靠默认值补全。canonical digest 负责 cache identity 隔离，provider satisfaction 仍是独立 runtime 判定。下一步研究旧 cache slot 的 reader lease、build promotion fence 与 generation-safe GC。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 77 在课程 76 的 generation-safe GC 基础上，把 eviction 拆成 safety eligibility 与 economic ranking：reader/build fence 决定能否删，READY/GENERATED 的 survivor-dependent rebuild cost、per-slot warmness 与 reclaimable bytes 决定先删谁。当前 PyPTO 明确没有 online eviction、max_bytes 或 cleanup API；下一步研究多进程 Admission Reservation、Quota Ledger 与 Thundering-herd Control。
 
 ## 已完成章节
 
@@ -99,6 +99,8 @@ permalink: /learning/pto-curriculum/
 | 2026-10-22 | SDMA Hidden Binding 与 Generation Fence | Artifact requirement → Worker capability → provider → GlobalContext → hidden pointer → dispatch | [课程 73]({% post_url 2026-10-22-pypto-sdma-hidden-binding-generation-fence %}) |
 | 2026-10-23 | Capability Schema、Artifact Fingerprint 与 Provider Matrix | prefetch intent → ResourceRequirements → ArtifactSpec digest → provider satisfies → hidden binding | [课程 74]({% post_url 2026-10-23-pypto-capability-schema-artifact-fingerprint-provider-matrix %}) |
 | 2026-10-24 | Artifact Schema Versioning 与 Legacy Migration | schema classify → unique migration/recompile → canonical digest → provider bind | [课程 75]({% post_url 2026-10-24-pypto-artifact-schema-versioning-canonical-digest-legacy-migration %}) |
+| 2026-10-25 | Artifact Reader Lease、Build Promotion Fence 与 Generation-safe GC | old slot retire → reader/build fence → quarantine → idempotent GC | [课程 76]({% post_url 2026-10-25-pypto-artifact-reader-lease-build-promotion-generation-safe-gc %}) |
+| 2026-10-26 | Rebuild Cost、Warm-set 与 Dependency-aware Eviction | eligible set → stage-aware cost → warm-set protection → victim selection | [课程 77]({% post_url 2026-10-26-pypto-artifact-cache-rebuild-cost-warmset-dependency-eviction %}) |
 
 ## ISA 知识地图
 
@@ -190,15 +192,16 @@ permalink: /learning/pto-curriculum/
 | Admission token / capacity reservation | fresh census 是证据快照而非容量所有权；admission 必须以 pressure epoch + census revision + resource vector 原子预留。token 单次消费，ALLOCATING 失联进入 quarantine；release 需 completion/reset、backend finalize 与 fresh census。`Workspace.bytes` 只描述发布 workspace，不能替代完整 allocation plan | TOCTOU-free 协议已闭合；allocation-plan API、durable ledger、all-rank token、quarantine 与 fault Golden 待实现 |
 | Resource intent / lease lowering | PyPTO `PrefetchAsyncContext/AsyncEvent/AsyncSession` 是 invocation-local opaque SSA handle；Artifact requirement、Worker/domain provider 与 dispatch binding 分层。当前 `enable_sdma` 对仅 SDMA 可拒绝的 Worker API 足够，但不编码 engine ABI/scope/required ops；推荐 canonical `ResourceRequirements` 进入 `ArtifactSpec` digest，loader 对齐 compiled metadata，runtime 以 provider profile 做满足关系，地址/handle/generation 不进入 cache key | schema/fingerprint/provider matrix 已闭合设计边界；canonical codec、legacy migration、provider generation 与 fault Golden 待实现 |
 | Artifact schema / legacy migration | 当前 artifact schema 进入 `ArtifactKey` digest并以新 slot clean miss；single-chip compiled metadata 只对可唯一解释的 schema 1/2 program-only 语义兼容，kernel capability fail closed。legacy `enable_sdma` 不足以推出 ABI/scope/operations，必须重编译 | 真实迁移先例与最小协议已讲透；ResourceRequirements codec、migration registry、slot GC 待实现 |
+| Artifact lifecycle / eviction | 当前 GENERATED/READY 是独立 immutable stage；READY 可在 GENERATED 丢失后 readonly restore。safe delete 先满足 generation + reader/build fence，再按 survivor-dependent rebuild cost / bytes 选择 victim；现有 `CacheStats` 仅 process-local aggregate | GC 与 eviction 边界已闭合设计；online quota、per-slot telemetry、dependency index、reservation 与 herd control 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
-| simpler | [0de9f72d](https://github.com/hw-native-sys/simpler/commit/0de9f72d9f73e3b379b90a55313cbff69fc8fdac) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 SDMA/URMA slot、one-bit/one-handle release 限制、numeric provider ABI 对 schema migration 的约束，以及 A2/A3/A5 scope 边界 | 跨仓深挖 7 |
+| simpler | [d78561cc](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 Worker accepted-run drain、native completion fence 与 close-before-workspace-teardown，作为 ArtifactRuntime lease release 的下游证据 | 跨仓深挖 8 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [9f3ca535](https://github.com/hw-native-sys/pypto/commit/9f3ca53526bc31ccf7b7ec42064f4449f9db1acf) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 artifact schema/key digest 隔离、compiled metadata schema 1/2/3 受限恢复、legacy program-only 兼容、kernel fail-closed 与 ResourceRequirements migration 边界 | 跨仓深挖 7 |
+| pypto | [c5d03257](https://github.com/hw-native-sys/pypto/commit/c5d032575aac5f20a77dd3ddb8e54dde94704daa) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、reader/build fence、READY/GENERATED 独立恢复、process-local CacheStats 与 rebuild-cost eviction 设计边界 | 跨仓深挖 9 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -1431,3 +1434,33 @@ permalink: /learning/pto-curriculum/
 - 建议协议（非当前实现）：durable generation registry、process/ArtifactRuntime reader lease、existing persistent key lock、BuildIntent、successor validation、quarantine rename、tombstone与idempotent sweeper。
 - 新知识债：显式 `ArtifactRuntime.close`、Worker→lease release hook、pidfd/process epoch、generation-aware lookup/publication、quota/census、NFS/object-store adapter、same-path ABA与全边界故障注入。
 - 下一章：**Cache 满了先删谁——Rebuild Cost、Warm-set Protection 与 Dependency-aware Eviction。**
+
+
+## 第 77 章课程账本增量
+
+- 日期：2026-10-26
+- 章节：**Cache 满了先删谁：PyPTO Artifact 的 Rebuild Cost、Warm-set 与 Dependency-aware Eviction**
+- 源码基线：PyPTO [`c5d03257`](https://github.com/hw-native-sys/pypto/commit/c5d032575aac5f20a77dd3ddb8e54dde94704daa)，为研究时默认分支最新提交。相对第 76 章基线前进 4 个提交，FP4、dynamic extent、immutable sync resource catalog 与 codegen 拆分未改变 Artifact Store。
+- 所选仓库：仅 PyPTO。该主题的 identity、stage dependency、statistics、runtime promotion 与 deletion non-goal 均在一个仓闭合，无需引入第二仓。
+- 直接相关历史：RFC [#2653](https://github.com/hw-native-sys/pypto/issues/2653) 明确初始 surface 无 online eviction/`max_bytes`/cleanup；[PR #2692](https://github.com/hw-native-sys/pypto/pull/2692) 建立 immutable store，[PR #2723](https://github.com/hw-native-sys/pypto/pull/2723) 接入 persistent JIT/warmup，[PR #2988](https://github.com/hw-native-sys/pypto/pull/2988) 加速 fresh-process READY reuse。
+- 课程位置：`generation-safe GC eligible set → per-stage telemetry → marginal rebuild cost → warm-set protection → dependency-aware victim selection`。
+- 新覆盖文件与符号：
+  - `python/pypto/_cache_config.py`：`CacheStats`、`cache_stats`、`build_ns/lookup_ns` 的 process-local aggregate 边界
+  - `python/pypto/jit/_persistent.py`：`JITArtifactStore.lookup_ready`、`resolve_persistent` 的 object→READY→GENERATED→build 命中阶梯
+  - `python/pypto/jit/_artifact_manifest.py`：`ArtifactKey/ArtifactSpec`、manifest bytes 与缺失的 per-slot telemetry/provenance
+  - `python/pypto/jit/artifact_cache.py`：`ArtifactStore.lookup/get_or_build/_publish` 与 no-concurrent-deletion contract
+  - `python/pypto/runtime/_artifact_runtime.py`：GENERATED→READY promotion 与 live path ownership
+  - `tests/ut/jit/test_artifact_cache.py`、`tests/ut/runtime/test_prebuilt_artifact.py`：独立 stage、readonly READY、stats 与多进程 build 证据
+- 当前实现边界：文档明确没有 online GC、global per-slot statistics、automatic stage preference；cleanup 必须停所有 consumer。不存在 `max_entries/max_bytes`、eviction、dependency index、quota ledger 或 cleanup CLI。
+- 新确认不变量：
+  1. eviction eligibility 与 economic ranking 分层；score 无权绕过 generation、reader lease 或 build fence。
+  2. READY 与 GENERATED 是独立 immutable stage；READY 可在 GENERATED 缺失/损坏后 restore，删除 READY 而保留 GENERATED 只增加 promotion cost，删除两者才回到完整 generation。
+  3. victim 价值必须按 survivors 计算边际重建成本，不能只看目录 bytes、mtime/atime 或全局平均 build time。
+  4. immutable manifest 只保存稳定 identity/payload inventory；可变 heat/cost 应在外部 telemetry/index，readonly consumer 不写 artifact root。
+  5. telemetry 可近似/丢失并只影响效率；generation/lease/build intent 必须精确并决定删除 authority。
+- 具体演算：300 MiB quota 下，示例候选 A-R 120 MiB/20 hits、A-G 30 MiB、B-R 90 MiB/1 hit、retired C-G 40 MiB、live-reader D-R 80 MiB。D-R 先按 safety 排除；C-G 因旧 environment 无未来复用价值先删，再删冷 B-R。READY 独立性意味着只删 A-G 不影响当前 A-R restore，但降低未来恢复冗余。
+- 测试事实：generated→ready 独立 copy；READY 在 GENERATED 删除/损坏后 readonly hit且 compiler 未调用；relocated READY 不依赖 original sources；orphan READY warmup 不增加 miss/build；三进程同 key 只发布一次。PR #2692/#2723/#2988 的 pass 数与 READY 131.13 ms host preparation 均为 PR 报告，本章未重跑 NPU。
+- 每七篇知识图谱回顾：第 71–77 章串起 `fresh census/reservation → resource intent → hidden binding generation → capability schema → migration → lease/fenced GC → cost-aware eviction`。identity 决定能否复用，lease/fence 决定能否删除，cost policy 决定是否值得保留。
+- 建议设计（非当前实现）：durable slot generation/lease registry、外部 per-slot telemetry、promotion provenance、warm/probationary segments、survivor-dependent cost model、generation-scoped quarantine 与 idempotent sweeper。
+- 新知识债：quota reservation、cross-process telemetry、stage-aware estimator、emergency private fallback、build-storm guard、eviction Golden、capacity ledger 与 crash-at-every-boundary tests。
+- 下一章：**多个进程都开始腾空间怎么办——Admission Reservation、Quota Ledger 与 Thundering-herd Control。**
