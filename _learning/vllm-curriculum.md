@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 67 章回到已合入的 KV Offload 代码，以 preemption 时 `num_computed_tokens` 与 `next_stored_chunk_idx` 同步归零为 redo boundary，以 content-addressed FS block 的 atomic publish/EEXIST-success 为 late-writer 汇合点。新确认 cursor 只是增量优化，immutable 数据 effect 可用 at-least-once redo 收敛，但 completion、actual bytes、event 与 backpressure 仍需独立 receipt 和 reconciliation。下一章研究 Transfer Receipt、Actual Bytes 与 Backpressure Reconciliation。
+- 当前主线：第 68 章沿 KV Offload 的真实 FS cascade 路径拆开 logical satisfaction、physical written bytes 与 GPU↔CPU moved bytes。当前 `main` 仍以 job block count 形成 `transfer_bytes`，会让 duplicate/no-op store 产生虚假快速 EMA 样本；开放 PR #63524 提议由 Python/C++ writer 返回 `num_written`，但尚未合入，Prometheus `WRITE_BYTES` 也仍保留 logical 语义。下一章研究 duplicate completion、attempt/reset fence 与 exactly-once backpressure apply。
 
 ## 已完成章节
 
@@ -80,6 +80,7 @@
 | 2026-10-24 65 | `audit prefix → immutable checkpoint → reader/writer frontier → reader-safe segment GC` | [`7dc44a00`](https://github.com/vllm-project/vllm/commit/7dc44a00161ace6f8ba7be2cc008f926e5a35fe2) | [Audit Tail 不能无限增长]({{ '/articles/vllm-snapshot-audit-tail-checkpoint-absorption-reader-safe-cutoff/' | relative_url }}) |
 | 2026-10-25 66 | `schema/digest/chain/generation validation → LKG selection → retained-tail replay` | [`4e591657`](https://github.com/vllm-project/vllm/commit/4e591657157a021cab997f911d67f50c0d18a71e) | [Checkpoint 也会过期]({{ '/articles/vllm-checkpoint-schema-migration-hash-chain-last-known-good/' | relative_url }}) |
 | 2026-10-26 67 | `preemption cursor reset → at-least-once redo → content-addressed publish → side-effect reconciliation` | [`a7407ab4`](https://github.com/vllm-project/vllm/commit/a7407ab44557802ca32a0ba2c2707362d7d21563) | [Replay 不是回滚]({{ '/articles/vllm-kv-offload-replay-redo-late-writer-reconciliation/' | relative_url }}) |
+| 2026-10-27 68 | `FS store job → actual written bytes → s/MiB EMA → backpressure policy` | [`ed1a7307`](https://github.com/vllm-project/vllm/commit/ed1a7307950ab5e6593d25123579ed7ca998b350) | [数据幂等了，计账为什么还会错]({{ '/articles/vllm-kv-offload-transfer-receipt-actual-bytes-backpressure/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1741,3 +1742,31 @@
 - 当前实现边界：公开代码没有 durable redo/undo log、attempt generation、compensation log 或跨重启 receipt store；store failure 路径仍不是完整 recovery protocol。开放 [PR #63524](https://github.com/vllm-project/vllm/pull/63524) 提议只报告实际写入块数，尚未合入。
 - 新知识债：durable transfer receipt、actual-byte accounting、completion dedup、backpressure reconciliation、crash-safe temp GC、publish durability/corruption verification、跨 engine generation fencing 与 crash-at-every-boundary Golden。
 - 下一章：**数据 effect 幂等了，计账为什么还会错——Transfer Receipt、Actual Bytes 与 Backpressure Reconciliation。**
+
+
+## 第 68 章课程账本增量
+
+- 日期：2026-10-27
+- 章节：**数据幂等了，计账为什么还会错：KV Offload 的 Actual Bytes 与 Backpressure Reconciliation**
+- 源码基线：[`ed1a7307`](https://github.com/vllm-project/vllm/commit/ed1a7307950ab5e6593d25123579ed7ca998b350)，为研究时默认分支最新提交；最新 ROCm MXFP8 修复与本文链路无直接关系。开放 [PR #63524](https://github.com/vllm-project/vllm/pull/63524) 截至研究时仍未合入，文中严格作为计划/PR 测试事实。
+- 课程位置：`public generation path → GPU→CPU store completion → CPU→FS cascade → JobResult.transfer_bytes → EMA backpressure → store admission`。
+- 新覆盖文件与符号：
+  - `vllm/distributed/kv_transfer/kv_connector/v1/offloading/{worker,scheduler}.py`：GPU→CPU `TransferResult.transfer_size`、worker completion count 与 `complete_store` 边界
+  - `vllm/v1/kv_offload/tiering/base.py`：`TransferJob`、`JobResult`
+  - `vllm/v1/kv_offload/tiering/manager.py`：`_process_finished_jobs`、`_update_backpressure`、primary pin release
+  - `vllm/v1/kv_offload/tiering/fs/{manager,io}.py` 与 `csrc/fs_io.cpp`：store submit、存在性 no-op、publish race、job completion bytes
+  - `vllm/v1/kv_offload/tiering/backpressure.py`：`BackpressureDetector.update`、`EMABackpressureDetector.on_store_completed`
+  - `vllm/v1/kv_offload/tiering/metrics.py`：logical `WRITE_BYTES` 统计边界
+  - `tests/v1/kv_offload/tiering/{test_fs_tier,test_backpressure}.py` 与 PR #63524 新测试
+- 新确认不变量：
+  1. store `success=True` 证明 requested keys 已满足，不证明每个 key 被本 job 物理写入。
+  2. logical requested/satisfied bytes、physical FS written bytes 与 GPU↔CPU moved bytes 是三种不同 effect，必须分账。
+  3. EMA 使用 `elapsed / physical MiB`；以 logical bytes 作分母会低估 s/MiB，使慢 tier 看起来更健康。
+  4. 零物理 bytes 的成功 job 仍必须释放 primary pin并可产生 logical event，但不得形成带宽/延迟样本。
+  5. actual count 必须由最终 publish writer 返回；提交前 existence filter 无法覆盖 filter 后的并发 winner。
+  6. `num_written` 是当前 backpressure 的最小充分 receipt；跨 crash exactly-once apply 仍需 job/attempt generation、dedup 与 durable receipt。
+- 具体演算：3 个 128 KiB block 中 2 个已存在，logical satisfied=384 KiB、physical written=128 KiB。6 ms job 用 logical 分母得到 0.016 s/MiB，用 actual 分母得到 0.048 s/MiB；三者全已存在时应成功并释放 pin，但不更新 EMA。数值为教学演算，不是仓库 benchmark。
+- 测试事实：已合入 FS race test 证明 loser 成功且 winner bytes 不被覆盖；EMA test 以 16-byte fake block/回拨 submit time 验证 warmup 与 alpha 更新。PR #63524 新增 2→1→0 block bytes、filter 后并发 publish 与 zero-byte-ignore 测试，并由作者报告 tiering suite 588 passed、1 skipped；本章未重跑 GPU/FS 套件。
+- 当前实现边界：`main` 仍报告 logical full bytes；PR #63524 未合入；Prometheus `WRITE_BYTES` 即便按 PR 仍为 logical bytes；没有 partial-failure written prefix、durable receipt、duplicate completion dedup 或 cross-crash reconciliation。
+- 新知识债：receipt identity/generation、failure-prefix bytes、publish-after-ack-loss 对账、logical/physical metric 命名、completion exactly-once apply 与 crash-at-every-boundary Golden。
+- 下一章：**一个 completion 到底只能算几次——Duplicate Completion、Attempt Fence 与 Exactly-once Backpressure Apply。**
