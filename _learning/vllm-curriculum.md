@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 68 章沿 KV Offload 的真实 FS cascade 路径拆开 logical satisfaction、physical written bytes 与 GPU↔CPU moved bytes。当前 `main` 仍以 job block count 形成 `transfer_bytes`，会让 duplicate/no-op store 产生虚假快速 EMA 样本；开放 PR #63524 提议由 Python/C++ writer 返回 `num_written`，但尚未合入，Prometheus `WRITE_BYTES` 也仍保留 logical 语义。下一章研究 duplicate completion、attempt/reset fence 与 exactly-once backpressure apply。
+- 当前主线：第 69 章沿 KV Offload 的两级 completion 链确认 worker quorum、scheduler reset fence 与 secondary `_jobs.pop` 的责任边界。当前实现能在既定进程内契约下阻止正常路径 double apply，并对超额/未知 completion fail-fast；但 `pop → metrics → pin release → EMA` 不是原子事务，缺少 partial-apply fault injection 与跨 manager epoch receipt。下一章进行第 70 章知识图谱回顾。
 
 ## 已完成章节
 
@@ -81,6 +81,7 @@
 | 2026-10-25 66 | `schema/digest/chain/generation validation → LKG selection → retained-tail replay` | [`4e591657`](https://github.com/vllm-project/vllm/commit/4e591657157a021cab997f911d67f50c0d18a71e) | [Checkpoint 也会过期]({{ '/articles/vllm-checkpoint-schema-migration-hash-chain-last-known-good/' | relative_url }}) |
 | 2026-10-26 67 | `preemption cursor reset → at-least-once redo → content-addressed publish → side-effect reconciliation` | [`a7407ab4`](https://github.com/vllm-project/vllm/commit/a7407ab44557802ca32a0ba2c2707362d7d21563) | [Replay 不是回滚]({{ '/articles/vllm-kv-offload-replay-redo-late-writer-reconciliation/' | relative_url }}) |
 | 2026-10-27 68 | `FS store job → actual written bytes → s/MiB EMA → backpressure policy` | [`ed1a7307`](https://github.com/vllm-project/vllm/commit/ed1a7307950ab5e6593d25123579ed7ca998b350) | [数据幂等了，计账为什么还会错]({{ '/articles/vllm-kv-offload-transfer-receipt-actual-bytes-backpressure/' | relative_url }}) |
+| 2026-10-28 69 | `worker quorum → reset fence → secondary JobResult → _jobs.pop → pin/metrics/EMA apply` | [`ebaa8124`](https://github.com/vllm-project/vllm/commit/ebaa8124755b10b956dc0b69082d9a94c12285d6) | [一个 completion 到底只能算几次]({{ '/articles/vllm-kv-offload-completion-exactly-once-apply/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -439,6 +440,15 @@
 - `GCClaim/owner_generation/AuditCheckpoint/capacity receipt`（第 64 章建议协议，尚未合入）
 - `AuditCheckpoint/ReaderLease/absorbed_through/reader frontier/writer_closed_through`（第 65 章建议协议，尚未合入）
 
+- `OffloadingWorkerMetadata.completed_jobs/mark_completed/aggregate`
+- `OffloadingConnectorWorker.get_finished`（worker completion 生产与 transfer stats）
+- `OffloadingConnectorScheduler._update_connector_output`（`pending_count` quorum）
+- `OffloadingConnectorScheduler._reset_cache`（`_stale_job_threshold/_reset_fence` generation boundary）
+- `TieringOffloadingManager._next_job_id/_register_job/_pop_job/_process_finished_jobs`
+- `TieringOffloadingManager.lock/poll_tiers/reset_cache`
+- `FileSystemTierManager.get_finished_jobs`、`DualQueueThreadPool.get_finished`
+- `ACTIVE/APPLYING/APPLIED` 与 `(manager_epoch,tier_idx,job_id,attempt)`（第 69 章建议协议，尚未合入）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -693,6 +703,13 @@
 246. 新 checkpoint 必须先完整写入、校验与 fsync，再以 CAS 发布 `CURRENT`；发布前崩溃只留下可回收 orphan，发布后删旧 segment 前崩溃只造成重复存储。
 247. terminal tombstone 的逐事件 detail 可在 reader/writer fence 通过后压缩，但必须保留 `snapshot_id`、`tombstone_digest`、`capacity_receipt_id` 与 `retired_revision`，以拒绝迟到 release 和同 key 重用。
 
+248. GPU→CPU worker completion 与 CPU→secondary `JobResult` 是两套 identity/aggregation plane：前者以 worker quorum 归零，后者以 manager job ID 一次消费。
+249. reset 前 job 的迟到 worker completion 不能再提交 store/load effect，但必须递减 `_reset_fence`，作为旧 DMA/worker 工作已排空的 flush witness。
+250. 在 producer 至多报告一次且 apply 不抛异常的进程内契约下，secondary `_jobs.pop` 会让第二次 completion 在任何第二次 metrics、pin release 或 EMA effect 前 fail-fast。
+251. manager lock 只保证 scheduler 与 tier-poll thread 串行 apply；它不提供 pop 后异常的 rollback、redo 或进程重启恢复。
+252. durable `(epoch,tier,job,attempt)` receipt 的触发条件是 completion 能在 manager replacement 后 redeliver；当前本地进程内队列与控制 effect 一起消失，不能仅因“exactly-once”名义引入持久化热路径。
+253. `completed_ids` 只能过滤完整 apply 后的重复，不能修复 `pop → metrics → pin release → EMA` 中途失败造成的 partial apply。
+
 ## 前置依赖与版本注意
 
 - 本课程以每章记录的 `main` commit 为准，不把 v0.22.1 专题中的实现自动视为当前事实。
@@ -787,6 +804,9 @@
 - P2P tier 已有 3 秒内部 drain，但各 owner 尚未共享父级绝对 deadline；嵌套 per-owner timeout 可能把总关闭时间叠加放大。
 - 缺少 cleanup DAG 与资源依赖声明；平铺的 catch-all best effort 会隐藏泄漏，也可能错误关闭仍被失败子层引用的 backing resource。
 - initialized snapshot 尚无 payload 全量 flush/power-loss guarantee；revalidation 侧仍缺真实 manifest/tombstone/audit/checkpoint schema、immutable segment manifest、`CURRENT` CAS 与 hash chain、可信 lease clock、reader lease/revoke、writer-closed watermark、object-store CAS/version adapter、shared-object refcount、exactly-once capacity ledger、tombstone retention horizon、last-known-good checkpoint 选择，以及 concurrent creator、late owner、duplicate delete、same-key reuse、reader stall 与 crash-at-every-boundary fault injection。
+
+- KV Offload 缺少 secondary duplicate/unknown completion 负向测试，以及在 `_jobs.pop` 后 metrics、pin release、EMA 各边界注入异常的 partial-apply recovery oracle。
+- 若未来 OBJ/P2P completion 可跨 reconnect 或 manager replacement redeliver，缺少显式 manager epoch/attempt identity、可回收 applied receipt 与 cross-crash reconciliation；当前不应无证据地把 durable ledger放进本地热路径。
 
 ## 第 23 章课程账本增量
 
@@ -1770,3 +1790,31 @@
 - 当前实现边界：`main` 仍报告 logical full bytes；PR #63524 未合入；Prometheus `WRITE_BYTES` 即便按 PR 仍为 logical bytes；没有 partial-failure written prefix、durable receipt、duplicate completion dedup 或 cross-crash reconciliation。
 - 新知识债：receipt identity/generation、failure-prefix bytes、publish-after-ack-loss 对账、logical/physical metric 命名、completion exactly-once apply 与 crash-at-every-boundary Golden。
 - 下一章：**一个 completion 到底只能算几次——Duplicate Completion、Attempt Fence 与 Exactly-once Backpressure Apply。**
+
+## 第 69 章课程账本增量
+
+- 日期：2026-10-28
+- 章节：**一个 completion 到底只能算几次：KV Offload 的 Attempt Fence 与 Exactly-once Apply**
+- 源码基线：[`ebaa8124`](https://github.com/vllm-project/vllm/commit/ebaa8124755b10b956dc0b69082d9a94c12285d6)，为研究时默认分支最新提交，相对第 68 章基线前进 105 个提交。期间直接相关的 [PR #63889](https://github.com/vllm-project/vllm/pull/63889) 已合入并优化 KVCR completion 开销/失败报告，但未改变 completion fence；[PR #63524](https://github.com/vllm-project/vllm/pull/63524) 仍 open、未合入。
+- 课程位置：`GPU→CPU transfer → OffloadingWorkerMetadata.completed_jobs → scheduler pending_count/reset fence → TieringOffloadingManager.complete_store → secondary JobResult → _jobs.pop → metrics/pin/backpressure apply`。
+- 新覆盖文件与符号：
+  - `offloading/common.py`：`OffloadingWorkerMetadata.mark_completed/aggregate`
+  - `offloading/worker.py`：`get_finished` 与 worker completion producer
+  - `offloading/scheduler.py`：`_update_connector_output`、`pending_count`、`_stale_job_threshold`、`_reset_fence`、`_reset_cache`
+  - `tiering/manager.py`：`_next_job_id/_register_job/_pop_job/_process_finished_jobs`、manager lock、`reset_cache`
+  - `tiering/fs/{manager,thread_pool}.py`：finished queue 的单次入队/出队
+  - `test_scheduler.py`、`test_tiering_offloading.py`：multi-worker quorum、late duplicate/reset fence、cascade refcount 与 reset drain
+- 新确认不变量：
+  1. worker plane 的 completion 是每 worker 一票、跨 worker 求和的 quorum；它不是 secondary job 的 dedup set。
+  2. reset generation boundary 会把旧 completion 从数据 effect 降级为 flush ACK；只有 fence 清零才解除 promotion hold。
+  3. secondary `_jobs.pop` 在正常契约下阻止第二次 apply，并用 assert 暴露 unknown/wrong-tier completion。
+  4. `pop → metrics → pin release/promotion finalize → backpressure` 不是原子事务；pop 后异常会留下不可重放的 partial apply。
+  5. manager lock 与 once-per-step poll gate 解决并发 applier，不解决 crash/restart 原子性。
+  6. durable receipt 只在 completion 能跨 manager replacement redeliver 时成为必要；否则应先补内存状态与故障注入，避免无必要持久化。
+- 具体演算：TP=3 时 scheduler job 17 由 `pending_count 3→2→0` 后只触发一次 cascade；secondary job 42 首次 `JobResult` 先 pop identity，再更新 metrics、释放三个 128 KiB block 的 pins并形成 EMA 样本。重复 42 在第二次 side effect 前 assert。若 reset 发生在 `pending_count=2`，后续两票只清空 `_reset_fence`，不再启动 cascade。
+- 测试事实：已合入测试覆盖 3-worker quorum、reset 前 late duplicate 不得误清其他 fence、两个 secondary cascade completion 后 refcount 归零、reset 先 drain tiers 再清空 jobs。本章未重跑 GPU/FS 套件。
+- 未覆盖风险：同一 secondary `JobResult` 重复、unknown/wrong-tier 的完整负向矩阵；pop 后各 effect 边界异常；跨进程 epoch/attempt redelivery；worker transfer failure recovery。
+- 当前实现边界：当前进程内 producer 以 finished deque/list 的 destructive drain 形成 at-most-once contract；`_jobs.pop` 是易失消费 fence而非 durable commit。没有 redo/undo、`APPLYING/APPLIED` 状态或 durable receipt。
+- 新知识债：partial-apply fault injection、effect 幂等化、secondary duplicate completion test、manager epoch/attempt identity、与 PR #63524 actual-byte receipt 联合验证。
+- 下一章：**第 70 章知识图谱回顾——从 KV Admission 到 Publish、Receipt、Reset Fence 与 Backpressure。**
+
