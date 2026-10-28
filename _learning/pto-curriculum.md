@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-27。
+最后更新：2026-10-28。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 78 证明现有 per-key flight/flock 只串行化同 key 的 identity/publication，不为不同 key 提供共享容量所有权；目录 census 是 observation，只有 builder 前的 atomic reservation、actual-size reconciliation 与 crash-fenced quota ledger 才能保持 `committed+reserved<=quota`。当前 PyPTO 仍无 online quota/eviction；下一步研究 Reservation Fairness、Cancellation 与 Starvation-free Wakeup。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 79 确认当前 `_BuildFlights + flock + immutable publish` 只解决同 key leader、异常广播与 publication，不提供 shared quota queue；建议在跨进程 leader 确认后以 revisioned ticket 实现 bounded bypass、oldest-ticket headroom holdback、cancellation fence 与 no-lost-wakeup。当前 PyPTO 仍无 online quota/eviction；下一步研究 Admission Backpressure、Private Fallback 与 SLO Budget。
 
 ## 已完成章节
 
@@ -102,6 +102,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-25 | Artifact Reader Lease、Build Promotion Fence 与 Generation-safe GC | old slot retire → reader/build fence → quarantine → idempotent GC | [课程 76]({% post_url 2026-10-25-pypto-artifact-reader-lease-build-promotion-generation-safe-gc %}) |
 | 2026-10-26 | Rebuild Cost、Warm-set 与 Dependency-aware Eviction | eligible set → stage-aware cost → warm-set protection → victim selection | [课程 77]({% post_url 2026-10-26-pypto-artifact-cache-rebuild-cost-warmset-dependency-eviction %}) |
 | 2026-10-27 | Artifact Admission Reservation 与 Quota Ledger | per-key leader → atomic reservation → private build → publish/commit → crash reconcile | [课程 78]({% post_url 2026-10-27-pypto-artifact-admission-reservation-quota-ledger %}) |
+| 2026-10-28 | Artifact Reservation Fairness、Cancellation 与 Wakeup | same-key leader → ticket queue → bounded bypass/holdback → cancel fence → revision wakeup | [课程 79]({% post_url 2026-10-28-pypto-artifact-reservation-fairness-cancellation-wakeup %}) |
 
 ## ISA 知识地图
 
@@ -203,7 +204,7 @@ permalink: /learning/pto-curriculum/
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [d78561cc](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 Worker accepted-run drain、native completion fence 与 close-before-workspace-teardown，作为 ArtifactRuntime lease release 的下游证据 | 跨仓深挖 8 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [570c18ec](https://github.com/hw-native-sys/pypto/commit/570c18ec42a53438e083176919f01e16fbdfecc0) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、reader/build fence、READY/GENERATED 独立恢复、rebuild-cost eviction，以及 per-key lock 与 shared quota reservation 的边界 | 跨仓深挖 10 |
+| pypto | [6307a2e2](https://github.com/hw-native-sys/pypto/commit/6307a2e2c9e53d61141ce1bd9c9d29e6b7418482) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、reader/build fence、READY/GENERATED 独立恢复、rebuild-cost eviction、quota reservation，以及 `_BuildFlights`/`flock` 到 ticket fairness/cancellation/revision wakeup 的边界 | 跨仓深挖 11 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -216,6 +217,10 @@ permalink: /learning/pto-curriculum/
 - allocator 只消费当前 owner 以 expected revision 原子应用的 canonical state；adapter、joiner、timeout 或 notify 均无权直接释放资源。
 - fresh census 只提供带时刻的容量证据；只有绑定 pressure epoch、expected census revision 与完整 resource vector 的 conditional reservation 才授予 admission。`Workspace.bytes` 不是 backend 总 charge，token expiry 也不撤销已开始的 allocator 副作用。
 - Artifact per-key flight/flock 只串行化同 identity 的 builder/publication，不等于 shared capacity serialization；不同 key 的构建要由 revisioned quota ledger 原子保持 `committed_bytes + reserved_bytes <= quota_bytes`。reclaiming bytes 未物理删除并经 fresh census 确认前不可复用，crash-after-rename 必须先 reconcile valid final。
+- Artifact reservation fairness 是带前提的 liveness，不是容量 safety：只有 requester仍 eligible、size不超过quota且系统最终产生足够可提交容量时，才承诺最终 grant；排序策略无权突破 quota invariant。
+- pure fit-first 虽然 work-conserving，却可能让大 Artifact 被持续小请求饿死；bounded bypass耗尽后必须为最老 eligible ticket保护后续 release/reclaim headroom。
+- same-key leader必须先于 shared capacity reservation，避免多个进程为同一 key 重复占额；WAITING cancel无容量 effect，GRANTED/BUILDING cancel只有在 owner fence或publish reconcile闭合后才能返还 reservation。
+- revision notification只授权完整 recheck：waiter必须按 `observe revision → subscribe → re-read → unchanged才sleep` 防 lost wakeup，notify本身不是 grant。
 - 编译期 resource requirement 与 runtime lease binding 必须分离：Artifact/cache identity 记录稳定需求，dispatch 以 hidden slot 借用 concrete workspace；地址、token 和 completion identity 不进入 reusable kernel definition。当前实现的具体稳定域是 Worker lifetime，而非 per-kernel/per-device generation；close 后即使地址相同也不能继承旧 binding。
 - opaque handle 的类型相等不等于实例同源：prefetch context/event/session 只能由本地 producer 产生并在同 invocation use-graph 内闭合；跨参数、返回、metadata、alias 或 cross-context wait 必须 fail closed。
 - outlined-kernel definition reuse 只减少代码对象，不得删除 caller 的 Call/Submit，也不授权并发 dispatch 共享 ACTIVE lease；dispatch 数、reservation 与 completion record 必须逐实例保留。
@@ -434,6 +439,9 @@ permalink: /learning/pto-curriculum/
 
 ## 待验证推断
 
+- bounded bypass + oldest-ticket headroom holdback 在单 bytes quota 下比 strict FIFO/fit-first更平衡，但 bypass budget、保护触发点、unused headroom与private fallback代价必须由 Artifact size、build latency、wait age和cache hit分布校准；当前无实现或 benchmark。
+
+
 - A5 `set_intra_block/wait_intra_block` 的实现与规范已经给出 per-subblock/per-pipe 语义，但当前未找到与 `ffts` 同等级的 repeated-credit、late-signal、wrong-sem、partial-lane 与 crash closure 回归；cross-backend adapter 是否能读取足够 native terminal fact 仍须真机与 fault test 验证。
 - sidecar evidence registry 比把 correlation header 嵌入 Tile payload 更少干扰 layout/DMA，但其 span 粒度、hash 成本、retention 与故障恢复开销仍需 benchmark 校准。
 
@@ -500,6 +508,8 @@ permalink: /learning/pto-curriculum/
 - `if/loop` 下 exactly-once free、producer/consumer 跨函数累计余额、early-exit cancellation 与下一 dispatch flag 基线尚无统一 verifier 或 E2E。
 
 ## 尚未解释的知识债
+
+- PyPTO Artifact admission 仍缺 durable ticket/BuildIntent schema、individual waiter cancellation、cancel-after-grant owner fence、revision notification、bounded-bypass/starvation Golden、dead-owner reservation reconcile、multi-resource fairness与logical/physical双预算。
 
 - NZ/5HD 的 C0 盒化五维地址映射及其与二维 Tile 的关系。
 - GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract；下界 clamp 已定位，上界/overflow 未闭合。
@@ -1494,3 +1504,31 @@ permalink: /learning/pto-curriculum/
 - 建议设计（非当前实现）：durable `QuotaLedger`、`AdmissionReservation`、per-key `BuildIntent`、revision notification、stage-aware estimator、top-up、key-fenced reconciler与六publication边界fault injection。
 - 新知识债：ledger schema/durability、process epoch、logical/physical双预算、fairness/cancellation、starvation、remote filesystem语义与Golden。
 - 下一章：**谁先拿到下一份容量——Reservation Fairness、Cancellation 与 Starvation-free Wakeup。**
+
+## 第 79 章课程账本增量
+
+- 日期：2026-10-28
+- 章节：**谁先拿到下一份容量：PyPTO Artifact Reservation 的公平、取消与无饥饿唤醒**
+- 源码基线：PyPTO [`6307a2e2`](https://github.com/hw-native-sys/pypto/commit/6307a2e2c9e53d61141ce1bd9c9d29e6b7418482)，为研究时默认分支最新提交；相对课程 78 前进 5 个提交，[比较结果](https://github.com/hw-native-sys/pypto/compare/570c18ec42a53438e083176919f01e16fbdfecc0...6307a2e2c9e53d61141ce1bd9c9d29e6b7418482)未改动 Artifact Store、persistent JIT 或 cache policy。head PR #3188 与本章无直接关系。
+- 所选仓库：仅 PyPTO。真实 leader、flock、cancellation fan-out、private build与publication链均在一个仓闭合；shared fairness protocol也应插在该 ownership边界，无需引入第二仓。
+- 课程位置：`persistent miss → same-key in-process/cross-process leader → reservation ticket → bounded bypass/headroom holdback → private build → publish/reconcile → revision wakeup`。
+- 新覆盖文件与符号：
+  - `python/pypto/jit/_persistent.py`：`resolve_persistent` 的 object→READY→GENERATED→build真实调用链
+  - `python/pypto/jit/artifact_cache.py`：`_BuildFlights.run`、`ArtifactStore.get_or_build/_get_or_build/_build_private/_publish`
+  - `python/pypto/_fslock.py`：blocking `flock(LOCK_EX)`、process-exit release与缺失的 timeout/fairness contract
+  - `docs/en/dev/09-artifact-store.md`、RFC #2653、PR #2692：当前并发/lifetime contract与online quota/eviction non-goal
+  - `tests/ut/jit/test_artifact_cache.py`：coalesced cancellation、different-key concurrency、3-process dedupe与dead-process lock release
+- 当前实现边界：同进程 follower阻塞在 `Future.result()`，leader `BaseException` 会广播给整个 cohort；跨进程 file lock按 key阻塞。没有 shared quota、ticket sequence、individual cancel token、deadline、bypass debt、wait age或revision notification。
+- 新确认不变量：
+  1. capacity safety与fairness liveness分层；fairness承诺必须显式依赖未来容量进展与requester仍 eligible。
+  2. capacity ticket必须在跨进程 same-key leader确认后创建，否则同一 Artifact的多个进程会重复 reservation。
+  3. strict FIFO可能HoL blocking，fit-first可能饿死大请求；bounded bypass耗尽后以headroom holdback给最老 eligible ticket累积grant条件。
+  4. WAITING取消可直接终止；GRANTED/BUILDING取消只能记录intent，必须等owner fence、builder final或key-fenced publish reconcile后再release/commit。
+  5. revision notification只是hint；waiter醒来必须重读全部capacity、permission、generation与queue state并重新CAS。
+- 具体演算：300 MiB quota、220 MiB committed，A/B/C依次请求100/40/30 MiB。允许B有限绕过；随后为A保护headroom，不再让C消耗释放量。B actual 32 MiB提交、eviction fresh census释放60 MiB后available=108 MiB，A获grant并以96 MiB actual归还4 MiB。A若WAITING取消无capacity effect；已BUILDING取消则保持100 MiB reserved直到终态reconcile。
+- 直接测试事实：4-thread coalesced leader取消/失败会让所有waiter收到同一异常并允许下一次重试；different-key barrier证明builder并发；3 spawned process同 key为1 publish/2 hit，死进程由kernel释放lock。PR #2692作者报告focused 114 passed、完整UT 11,937 passed/10 skipped/1 xfailed；本章未重跑测试/NPU。
+- 建议设计（非当前实现）：durable `ReservationTicket/BuildIntent`、owner process epoch、bounded bypass debt、oldest-ticket protected headroom、individual cancel state、revisioned directed notification与key-fenced reconciler。
+- 新知识债：ticket/ledger durability、cancel-after-grant、lost-wakeup、starvation、dead owner、same-key重复reservation、multi-resource fairness、remote filesystem与fault-at-every-boundary Golden。
+- ISA知识地图：本章没有新增ISA指令/Tile语义，保持既有状态；新增的是Python生成链的Host admission/liveness边界。
+- 下一章：**等不到容量时该阻塞还是私有构建——Admission Backpressure、Private Fallback 与 SLO Budget。**
+
