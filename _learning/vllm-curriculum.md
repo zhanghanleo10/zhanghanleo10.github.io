@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 69 章沿 KV Offload 的两级 completion 链确认 worker quorum、scheduler reset fence 与 secondary `_jobs.pop` 的责任边界。当前实现能在既定进程内契约下阻止正常路径 double apply，并对超额/未知 completion fail-fast；但 `pop → metrics → pin release → EMA` 不是原子事务，缺少 partial-apply fault injection 与跨 manager epoch receipt。下一章进行第 70 章知识图谱回顾。
+- 当前主线：第 70 章沿 KV Offload promotion failure 拆开逻辑 outcome 与物理地址复用：失败 key 可立即变成 MISS 并重算，但旧 chunk 必须留在 deferred quarantine，直到 tier 提供“旧 I/O 不再写入”的 release event。核心 API 与单元测试已合入，真实 P2P producer 尚未接入。下一章研究 event 永不 set 时的 bounded quarantine、session generation 与 capacity recovery。
 
 ## 已完成章节
 
@@ -82,6 +82,7 @@
 | 2026-10-26 67 | `preemption cursor reset → at-least-once redo → content-addressed publish → side-effect reconciliation` | [`a7407ab4`](https://github.com/vllm-project/vllm/commit/a7407ab44557802ca32a0ba2c2707362d7d21563) | [Replay 不是回滚]({{ '/articles/vllm-kv-offload-replay-redo-late-writer-reconciliation/' | relative_url }}) |
 | 2026-10-27 68 | `FS store job → actual written bytes → s/MiB EMA → backpressure policy` | [`ed1a7307`](https://github.com/vllm-project/vllm/commit/ed1a7307950ab5e6593d25123579ed7ca998b350) | [数据幂等了，计账为什么还会错]({{ '/articles/vllm-kv-offload-transfer-receipt-actual-bytes-backpressure/' | relative_url }}) |
 | 2026-10-28 69 | `worker quorum → reset fence → secondary JobResult → _jobs.pop → pin/metrics/EMA apply` | [`ebaa8124`](https://github.com/vllm-project/vllm/commit/ebaa8124755b10b956dc0b69082d9a94c12285d6) | [一个 completion 到底只能算几次]({{ '/articles/vllm-kv-offload-completion-exactly-once-apply/' | relative_url }}) |
+| 2026-10-29 70 | `promotion failure → logical MISS → old-chunk quarantine → release event → fresh-address reuse` | [`36d4ef65`](https://github.com/vllm-project/vllm/commit/36d4ef654a83e227216b0c0b55cf4041d96b1675) | [失败不等于 DMA 已停]({{ '/articles/vllm-kv-offload-promotion-deferred-release-late-dma-fence/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -448,6 +449,11 @@
 - `TieringOffloadingManager.lock/poll_tiers/reset_cache`
 - `FileSystemTierManager.get_finished_jobs`、`DualQueueThreadPool.get_finished`
 - `ACTIVE/APPLYING/APPLIED` 与 `(manager_epoch,tier_idx,job_id,attempt)`（第 69 章建议协议，尚未合入）
+- `JobResult.deferred_release`、`_DeferredRelease`
+- `CPUPrimaryTierOffloadingManager.defer_write_release/release_deferred_write/num_deferred_release_chunks`
+- `TieringOffloadingManager._complete_promotion/_complete_deferred_releases/reset_cache`
+- `TieringMetricsTracker.on_release_deferred/on_deferred_release_done`
+- `test_deferred_release_*`、`test_defer_write_release_asserts_on_non_pending_key`、`test_reset_after_deferred_release_succeeds`
 
 ## 已确认不变量
 
@@ -709,6 +715,11 @@
 251. manager lock 只保证 scheduler 与 tier-poll thread 串行 apply；它不提供 pop 后异常的 rollback、redo 或进程重启恢复。
 252. durable `(epoch,tier,job,attempt)` receipt 的触发条件是 completion 能在 manager replacement 后 redeliver；当前本地进程内队列与控制 effect 一起消失，不能仅因“exactly-once”名义引入持久化热路径。
 253. `completed_ids` 只能过滤完整 apply 后的重复，不能修复 `pop → metrics → pin release → EMA` 中途失败造成的 partial apply。
+254. promotion 的 `success=False` 只提交逻辑失败，不证明异步 writer 已停止；physical chunk reuse 需要独立的 no-more-write witness。
+255. deferred failure 必须从 cache policy 移除 key，同时保留 write-pending 计数并禁止 chunk 进入 free list；否则迟到 WRITE 可能破坏 fresh owner。
+256. release handle 只表达地址何时可复用，不携带第二次 cache outcome；同一 job 的成功/失败仍只消费一次。
+257. event 可由任意线程 set，但 allocator mutation 必须由 manager polling path 在其锁域内执行；secondary tier 不拥有 primary free list。
+258. `reset_cache` 前各 tier 的 `drain_jobs` 必须闭合 deferred release，随后 manager 重新消费并断言 jobs、deferred table 与 metrics idle，才可复用整块 primary memory。
 
 ## 前置依赖与版本注意
 
@@ -807,6 +818,7 @@
 
 - KV Offload 缺少 secondary duplicate/unknown completion 负向测试，以及在 `_jobs.pop` 后 metrics、pin release、EMA 各边界注入异常的 partial-apply recovery oracle。
 - 若未来 OBJ/P2P completion 可跨 reconnect 或 manager replacement redeliver，缺少显式 manager epoch/attempt identity、可回收 applied receipt 与 cross-crash reconciliation；当前不应无证据地把 durable ledger放进本地热路径。
+- deferred release 尚无真实 P2P producer、bounded hold policy、session/process generation、lost-event recovery、shutdown takeover、cascade source retention、capacity admission 联动，以及 register/free 各边界的 fault injection；event 永不 set 会形成永久容量 quarantine。
 
 ## 第 23 章课程账本增量
 
@@ -1818,3 +1830,35 @@
 - 新知识债：partial-apply fault injection、effect 幂等化、secondary duplicate completion test、manager epoch/attempt identity、与 PR #63524 actual-byte receipt 联合验证。
 - 下一章：**第 70 章知识图谱回顾——从 KV Admission 到 Publish、Receipt、Reset Fence 与 Backpressure。**
 
+
+
+## 第 70 章课程账本增量
+
+- 日期：2026-10-29
+- 章节：**失败不等于 DMA 已停：KV Offload Promotion 的 Deferred Release Fence**
+- 源码基线：[`36d4ef65`](https://github.com/vllm-project/vllm/commit/36d4ef654a83e227216b0c0b55cf4041d96b1675)，为研究时默认分支最新提交；相对第 69 章基线前进 74 个提交。最新 head 是 CI cache 修改，与本文无直接关系；直接相关 [PR #63779](https://github.com/vllm-project/vllm/pull/63779) 已由 [`0beab6c2`](https://github.com/vllm-project/vllm/commit/0beab6c251e8046c0c6cf2fef114cd23b58cda74) 合入。
+- 课程位置：`Scheduler lookup → secondary promotion → failed JobResult → logical MISS → deferred physical release → fresh recompute/store`。
+- 新覆盖文件与符号：
+  - `vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py`：`get_num_new_matched_tokens/_lookup`
+  - `vllm/v1/kv_offload/tiering/base.py`：`JobResult.deferred_release`
+  - `vllm/v1/kv_offload/tiering/manager.py`：`defer_write_release/release_deferred_write/_complete_promotion/_complete_deferred_releases/reset_cache`
+  - `vllm/v1/kv_offload/tiering/metrics.py`、`spec.py`：deferred chunk gauge 与 hold histogram
+  - `tests/v1/kv_offload/tiering/test_tiering_offloading.py`：deferred、partial success、fresh chunk、preset event、非法 pending 与 reset drain
+- 新确认不变量：
+  1. failed promotion 的逻辑 outcome 与 old writer 的 memory-safe witness 是两个提交点；前者授权重算，后者才授权地址复用。
+  2. deferred key 从 policy 消失后 lookup 必须 MISS，但旧 chunk 仍保持 write-pending、离开 free list；同 key 恢复必须获得 fresh chunk。
+  3. release event 是单调、release-only 的 handle，不是第二个 `JobResult`；它不能反转已提交的失败 outcome。
+  4. event 可跨线程 set，allocator mutation 只在 manager polling path执行；reset 必须等待 tier drain 并重新验证 deferred state 为空。
+- 具体演算：三个 `bf16[16,4096]` chunk 各 128 KiB。K0 成功，K1/K2 失败并隔离旧 IDs 13/14，共临时占用 256 KiB；K1 重算写 fresh ID 15。release event 到达后才归还 13/14，迟到 writer 因此不会污染 fresh owner。
+- 测试/PR 事实：直接测试覆盖失败立即 MISS 但 chunk 仍 held、fresh re-store、partial success、event 预置、非法 pending 断言与 reset drain。PR 作者报告 tiering suite 594 passed/12 skipped、CPU manager/region 120 passed；本章未重跑 GPU/P2P E2E。
+- 当前实现边界：core API、metrics 与 tests 已合入；默认分支没有真实 in-tree tier 生产 `deferred_release`，P2P AbortAck/断连接入仍是 PR 中的 follow-up 规划。
+- 新知识债：真实 producer、永久 unset event、session/process generation、disconnect/reset witness、bounded quarantine、capacity backpressure、source-side cascade retention 与 crash-at-every-boundary harness。
+- 下一章：**Event 永远不 set 怎么办——Bounded Quarantine、Session Generation 与 Capacity Recovery。**
+
+## 第十次七章知识图谱回顾（第 64–70 章）
+
+- 第 64–66 章拆开 GC owner authority、audit evidence 与 checkpoint recovery：generation 决定谁能提交，hash/chain 决定证据是否完整，reader/writer frontier 决定何时可删。
+- 第 67 章把数据 publish 收敛为 content-addressed at-least-once redo；第 68 章证明 logical satisfied bytes、physical written bytes 与 moved bytes 必须分账。
+- 第 69 章建立 worker quorum、reset fence 与 secondary `_jobs.pop` 的两级 completion identity；第 70 章再拆开 failed outcome 与 address reuse witness。
+- 当前闭合链：`owner authority → immutable evidence → redo-safe data effect → actual accounting → completion apply → no-more-write reuse fence`。
+- 路线调整：下一组章节先解决 deferred quarantine 的 liveness、session generation 与 capacity recovery，再回到 partial-apply 原子性、真实 P2P/OBJ fault matrix 和性能量化。
