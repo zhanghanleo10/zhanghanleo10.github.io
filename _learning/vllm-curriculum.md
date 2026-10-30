@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 70 章沿 KV Offload promotion failure 拆开逻辑 outcome 与物理地址复用：失败 key 可立即变成 MISS 并重算，但旧 chunk 必须留在 deferred quarantine，直到 tier 提供“旧 I/O 不再写入”的 release event。核心 API 与单元测试已合入，真实 P2P producer 尚未接入。下一章研究 event 永不 set 时的 bounded quarantine、session generation 与 capacity recovery。
+- 当前主线：第 71 章追踪真实 P2P `deferred_release` producer：load timeout 在 10/30 秒立即提交失败 outcome，目标 chunk 继续隔离；`AbortAck`、late `TransferDone` 或 session close 才设置 release event。missed ack 会升级为 peer disconnect。下一章研究 `ROUND_SEQ` 之外的 connection generation 与迟到 control message fence。
 
 ## 已完成章节
 
@@ -83,6 +83,7 @@
 | 2026-10-27 68 | `FS store job → actual written bytes → s/MiB EMA → backpressure policy` | [`ed1a7307`](https://github.com/vllm-project/vllm/commit/ed1a7307950ab5e6593d25123579ed7ca998b350) | [数据幂等了，计账为什么还会错]({{ '/articles/vllm-kv-offload-transfer-receipt-actual-bytes-backpressure/' | relative_url }}) |
 | 2026-10-28 69 | `worker quorum → reset fence → secondary JobResult → _jobs.pop → pin/metrics/EMA apply` | [`ebaa8124`](https://github.com/vllm-project/vllm/commit/ebaa8124755b10b956dc0b69082d9a94c12285d6) | [一个 completion 到底只能算几次]({{ '/articles/vllm-kv-offload-completion-exactly-once-apply/' | relative_url }}) |
 | 2026-10-29 70 | `promotion failure → logical MISS → old-chunk quarantine → release event → fresh-address reuse` | [`36d4ef65`](https://github.com/vllm-project/vllm/commit/36d4ef654a83e227216b0c0b55cf4041d96b1675) | [失败不等于 DMA 已停]({{ '/articles/vllm-kv-offload-promotion-deferred-release-late-dma-fence/' | relative_url }}) |
+| 2026-10-30 71 | `P2P load timeout → immediate failure → deferred chunk → AbortAck/session close → release` | [`83bae492`](https://github.com/vllm-project/vllm/commit/83bae4923f65a7508ba600fbfcecb8022577df1b) | [超时不是释放证明]({{ '/articles/vllm-p2p-load-timeout-abortack-session-release/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -454,6 +455,10 @@
 - `TieringOffloadingManager._complete_promotion/_complete_deferred_releases/reset_cache`
 - `TieringMetricsTracker.on_release_deferred/on_deferred_release_done`
 - `test_deferred_release_*`、`test_defer_write_release_asserts_on_non_pending_key`、`test_reset_after_deferred_release_succeeds`
+- `ClientRole._abort_load/collect_results/on_transfer_done/on_abort_ack/close`、`_InboundLoadState.release`
+- `P2PSession._escalate_abort_ack_timeout/_disconnect/close`
+- `P2PSecondaryTierManager.submit_load/_poll_once/_reap_dead_sessions/drain_jobs`
+- `test_timed_out_load_holds_chunks_until_abort_ack`、`test_load_abort_ack_timeout_*`
 
 ## 已确认不变量
 
@@ -720,6 +725,10 @@
 256. release handle 只表达地址何时可复用，不携带第二次 cache outcome；同一 job 的成功/失败仍只消费一次。
 257. event 可由任意线程 set，但 allocator mutation 必须由 manager polling path 在其锁域内执行；secondary tier 不拥有 primary free list。
 258. `reset_cache` 前各 tier 的 `drain_jobs` 必须闭合 deferred release，随后 manager 重新消费并断言 jobs、deferred table 与 metrics idle，才可复用整块 primary memory。
+259. P2P load timeout 只提交逻辑失败；`AbortAck` 或 late `TransferDone` 才是 request-scoped release witness，missed ack 必须升级为 session teardown，不能直接把 timeout 当成地址安全证明。
+260. 已报告失败的 P2P load 仍须由 `ClientRole` 保留，直到 release event set；`LoadResult → JobResult → _DeferredRelease` 只转移 release handle，不转移 primary allocator ownership。
+261. `ROUND_SEQ` 只隔离同一 request 的 fetch round，不构成跨重连的 connection generation；session teardown 清理内存态，但 wire-level late message fencing 尚未完成。
+262. 当前代码以 session close 作为 release boundary，但 PR/Issue 仍未证明 NIXL teardown 对 stalled remote WRITE 的硬件级 no-more-write 保证；代码事实与硬件充分性必须分开。
 
 ## 前置依赖与版本注意
 
@@ -818,7 +827,7 @@
 
 - KV Offload 缺少 secondary duplicate/unknown completion 负向测试，以及在 `_jobs.pop` 后 metrics、pin release、EMA 各边界注入异常的 partial-apply recovery oracle。
 - 若未来 OBJ/P2P completion 可跨 reconnect 或 manager replacement redeliver，缺少显式 manager epoch/attempt identity、可回收 applied receipt 与 cross-crash reconciliation；当前不应无证据地把 durable ledger放进本地热路径。
-- deferred release 尚无真实 P2P producer、bounded hold policy、session/process generation、lost-event recovery、shutdown takeover、cascade source retention、capacity admission 联动，以及 register/free 各边界的 fault injection；event 永不 set 会形成永久容量 quarantine。
+- P2P `deferred_release` producer、missed-ack disconnect 与 source stall fault 已合入；仍缺 NIXL teardown 的真机 no-more-write 证据、显式 connection generation、late control-message test、poll-stall/reset hard deadline、并发 quarantine capacity admission、process-crash recovery 与 register/free 全边界 fault injection。
 
 ## 第 23 章课程账本增量
 
@@ -1862,3 +1871,30 @@
 - 第 69 章建立 worker quorum、reset fence 与 secondary `_jobs.pop` 的两级 completion identity；第 70 章再拆开 failed outcome 与 address reuse witness。
 - 当前闭合链：`owner authority → immutable evidence → redo-safe data effect → actual accounting → completion apply → no-more-write reuse fence`。
 - 路线调整：下一组章节先解决 deferred quarantine 的 liveness、session generation 与 capacity recovery，再回到 partial-apply 原子性、真实 P2P/OBJ fault matrix 和性能量化。
+
+## 第 71 章课程账本增量
+
+- 日期：2026-10-30
+- 章节：**超时不是释放证明：P2P AbortAck 与 Session-close Release**
+- 源码基线：[`83bae492`](https://github.com/vllm-project/vllm/commit/83bae4923f65a7508ba600fbfcecb8022577df1b)，为研究时默认分支最新提交；head 的 mypy CI 修复与本文无直接关系。直接相关 [PR #64256](https://github.com/vllm-project/vllm/pull/64256) / [`16777da3`](https://github.com/vllm-project/vllm/commit/16777da3475084eda04813c98cfef4365d5dcb58) 与 [PR #64251](https://github.com/vllm-project/vllm/pull/64251) / [`491067f4`](https://github.com/vllm-project/vllm/commit/491067f445306bcb974984cce7cdf6c111364465) 均于 2026-10-29 合入。
+- 课程位置：`Scheduler lookup → P2P promotion → load timeout → immediate logical failure → deferred primary chunk → AbortAck/TransferDone/session close → physical release`。
+- 新覆盖文件与符号：
+  - `offloading/scheduler.py`：`get_num_new_matched_tokens`
+  - `tiering/manager.py`：`lookup/_initiate_promotion/_flush_pending_promotions/_complete_promotion/_complete_deferred_releases`
+  - `p2p/manager.py`：`submit_load/_poll_once/_reap_dead_sessions/drain_jobs`
+  - `p2p/session/client.py`：`_InboundLoadState/LoadResult/_abort_load/collect_results/on_transfer_done/on_abort_ack/close`
+  - `p2p/session/session.py`：`_escalate_abort_ack_timeout/_disconnect/close`
+  - `p2p/session/protocol.py`：`FetchMsg/AbortFetchMsg/AbortAckMsg/ROUND_SEQ`
+  - `test_manager.py`、`test_sessions.py` 的 timeout/deferred-release/session-close 直接测试
+- 新确认不变量：
+  1. 10/30 秒 load deadline 只授权立即失败与 local recompute；目标 chunk 仍不可复用。
+  2. `AbortAck`、late `TransferDone` 或实现选定的 session-close boundary 设置同一单调 event，不产生第二个 job outcome。
+  3. 5 秒 missed-ack deadline 触发 peer disconnect，不能直接 `event.set()`；未知状态不能被 timer 洗成安全。
+  4. event 可由 session/poll 路径 set，primary allocator mutation仍只由 tiering manager 在锁域内执行。
+  5. `ROUND_SEQ` 是 request-round identity，不是 connection epoch。
+- 具体演算：两块 16-token KV，教学 shape 为单层 `bf16[2,16,8,128]`、每块 64 KiB。timeout 后旧 chunk 13/14 保持 deferred，fresh 15/16 接收重算；ack/close 后才归还 13/14，峰值临时占用 4 块。
+- 测试事实：真实 `TieringOffloadingManager + CPUPrimaryTier + P2PSession` 测试验证 timeout 后 job 移除、lookup MISS、deferred count=1、free count不变，注入 `AbortAck` 后 count归零/free+1；session tests 验证 missed ack 不产生第二结果、disconnect 后 close 才设置 event。PR 作者报告 CPU suites 408/426 passed；本文未重跑 GPU/NIXL E2E。
+- 当前实现边界：代码已闭合真实 P2P producer 与 session-close liveness path；但 PR #64256 与 Issue #63602 仍把 NIXL teardown 是否 fence stalled remote WRITE 标为开放验证，故不能把 close 当成已被硬件实验证明的充分 witness。
+- 新知识债：显式 connection generation、跨重连 late message、真实 NIXL fault injection、poll-thread stall 与 reset 上界、大规模 quarantine admission、process-crash event recovery，以及 `protocol.py` Abort Flow 文档漂移。
+- 下一章：**重连后怎样拒绝旧消息——P2P Round Sequence、Connection Epoch 与 Late Control Message Fence。**
+
