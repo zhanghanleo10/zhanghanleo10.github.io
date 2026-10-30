@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-10-29。
+最后更新：2026-10-30。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 80 确认当前 `BuildDisposition.PRIVATE` 是 readonly/storage/lock/publication failure 的可用降级结果，不是 capacity queue policy；建议在 same-key leader 后分别原子授权 shared bytes、private retained bytes 与 compile slot，再用 end-to-end deadline 选择 `WAIT_SHARED / FALLBACK_PRIVATE / REJECT_RETRYABLE`。当前 PyPTO 仍无 online quota、deadline admission 或 automatic private cleanup；下一步研究 ArtifactRuntime lease、retained bytes 与 cleanup handoff。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 81 沿真实代码确认 private tree 有两条独立 retention path：fresh JIT build 的 `ArtifactBuild.value/private_directory`，以及 GENERATED→READY promotion fallback 的 `ArtifactRuntime.directory/_chips`；`owner._artifact_objects` 和可选 Worker registration 会继续延长对象/执行生命周期。当前实现没有 online cleanup/eviction API。下一步研究多个 Runtime 共享 private artifact 时的 lease refcount、owner epoch 与 crash-safe reaper。
 
 ## 已完成章节
 
@@ -104,6 +104,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-27 | Artifact Admission Reservation 与 Quota Ledger | per-key leader → atomic reservation → private build → publish/commit → crash reconcile | [课程 78]({% post_url 2026-10-27-pypto-artifact-admission-reservation-quota-ledger %}) |
 | 2026-10-28 | Artifact Reservation Fairness、Cancellation 与 Wakeup | same-key leader → ticket queue → bounded bypass/holdback → cancel fence → revision wakeup | [课程 79]({% post_url 2026-10-28-pypto-artifact-reservation-fairness-cancellation-wakeup %}) |
 | 2026-10-29 | Admission Backpressure、Private Fallback 与 SLO Budget | same-key leader → dual-budget grant → WAIT/PRIVATE/REJECT → retained-byte release | [课程 80]({% post_url 2026-10-29-pypto-artifact-admission-backpressure-private-fallback-slo-budget %}) |
+| 2026-10-30 | ArtifactRuntime Retention 与 Cleanup Handoff | private build → object cache/runtime adopt → Worker retire → lease receipt → delete | [课程 81]({% post_url 2026-10-30-pypto-artifact-runtime-private-retention-cleanup-handoff %}) |
 
 ## ISA 知识地图
 
@@ -195,7 +196,7 @@ permalink: /learning/pto-curriculum/
 | Admission token / capacity reservation | fresh census 是证据快照而非容量所有权；admission 必须以 pressure epoch + census revision + resource vector 原子预留。token 单次消费，ALLOCATING 失联进入 quarantine；release 需 completion/reset、backend finalize 与 fresh census。`Workspace.bytes` 只描述发布 workspace，不能替代完整 allocation plan | TOCTOU-free 协议已闭合；allocation-plan API、durable ledger、all-rank token、quarantine 与 fault Golden 待实现 |
 | Resource intent / lease lowering | PyPTO `PrefetchAsyncContext/AsyncEvent/AsyncSession` 是 invocation-local opaque SSA handle；Artifact requirement、Worker/domain provider 与 dispatch binding 分层。当前 `enable_sdma` 对仅 SDMA 可拒绝的 Worker API 足够，但不编码 engine ABI/scope/required ops；推荐 canonical `ResourceRequirements` 进入 `ArtifactSpec` digest，loader 对齐 compiled metadata，runtime 以 provider profile 做满足关系，地址/handle/generation 不进入 cache key | schema/fingerprint/provider matrix 已闭合设计边界；canonical codec、legacy migration、provider generation 与 fault Golden 待实现 |
 | Artifact schema / legacy migration | 当前 artifact schema 进入 `ArtifactKey` digest并以新 slot clean miss；single-chip compiled metadata 只对可唯一解释的 schema 1/2 program-only 语义兼容，kernel capability fail closed。legacy `enable_sdma` 不足以推出 ABI/scope/operations，必须重编译 | 真实迁移先例与最小协议已讲透；ResourceRequirements codec、migration registry、slot GC 待实现 |
-| Artifact lifecycle / eviction | 当前 GENERATED/READY 是独立 immutable stage；READY 可在 GENERATED 丢失后 readonly restore。safe delete 先满足 generation + reader/build fence，再按 survivor-dependent rebuild cost / bytes 选择 victim；现有 `CacheStats` 仅 process-local aggregate | GC 与 eviction 边界已闭合设计；online implementation、per-slot telemetry 与 dependency index 待实现 |
+| Artifact lifecycle / eviction | 当前 GENERATED/READY 是独立 immutable stage；READY 可在 GENERATED 丢失后 readonly restore。fresh build 与 READY promotion 都可能留下 private tree；`ArtifactBuild` 明确无 automatic cleanup，JIT object cache 与 `ArtifactRuntime._chips` 延长 lifetime。safe delete 先满足 path refs/in-flight/native use 全部归零，再提交 retained-byte receipt；现有 `CacheStats` 仅 process-local aggregate | GC/eviction与cleanup handoff边界已闭合设计；online lease/refcount/close/reaper、per-slot telemetry与fault Golden待实现 |
 | Artifact admission / quota | 当前 `_BuildFlights` 与 persistent per-key `flock` 合并同 key request，但测试明确允许不同 key 并发；共享容量必须以 `committed+reserved<=quota` 为硬不变量，reservation 在 builder 前取得，actual manifest 后 reconcile，crash-after-rename 由 key-fenced recovery 判定 final/释放 | 协议边界已讲透；durable ledger、BuildIntent、size estimator、revision wakeup 与 fault Golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
@@ -205,11 +206,13 @@ permalink: /learning/pto-curriculum/
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [d78561cc](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 Worker accepted-run drain、native completion fence 与 close-before-workspace-teardown，作为 ArtifactRuntime lease release 的下游证据 | 跨仓深挖 8 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [26d17faf](https://github.com/hw-native-sys/pypto/commit/26d17faf45daef39f2f909c84b07a0d57061880f) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、reader/build fence、READY/GENERATED 独立恢复、rebuild-cost eviction、quota reservation/fairness，以及 `BuildDisposition.PRIVATE` 到 dual-budget、deadline-aware WAIT/PRIVATE/REJECT 的边界 | 跨仓深挖 12 |
+| pypto | [8dceaa5f](https://github.com/hw-native-sys/pypto/commit/8dceaa5f4035dc16e3e34961c51de597cfbbd01b) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、reader/build fence、READY/GENERATED 独立恢复、rebuild-cost eviction、quota/admission，以及 `ArtifactBuild → resolve_persistent → ArtifactRuntime.load → CompiledArtifact/Worker` 的 private retention 与 cleanup handoff | 跨仓深挖 13 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
 ## 已确认接口与不变量
+
+- private artifact 的安全删除不是 build/publish 事件，而是 `PathRefs=0 ∧ InFlight=0 ∧ NativeUse=0`；retained-byte ledger 只能在 runtime/Worker terminal receipt 后 exactly-once release，删除失败继续计入 quarantine。
 
 - immutable evidence append 与 canonical state apply 是两个线性化域：前者允许 validated multi-writer/idempotent duplicate，后者连同 reset/free 必须以 `owner_epoch + expected_revision` CAS 单写；late witness 不跨 attempt/generation，也不重开 terminal state。
 - missing trace/event/semaphore witness 只能证明当前 evidence set 不闭合，不能证明 native action 未发生；timeout 是控制事件，不是 negative witness。
@@ -514,7 +517,7 @@ permalink: /learning/pto-curriculum/
 
 ## 尚未解释的知识债
 
-- PyPTO Artifact admission 仍缺 durable ticket/BuildIntent schema、individual waiter deadline/cancellation、cancel-after-grant owner fence、revision notification、bounded-bypass/starvation Golden、shared/private/physical双预算、compile-slot admission、private retained lease/cleanup、queue ETA estimator与retry-storm control。
+- PyPTO Artifact admission/lifecycle 仍缺 durable ticket/BuildIntent schema、individual waiter deadline/cancellation、cancel-after-grant owner fence、revision notification、bounded-bypass/starvation Golden、shared/private/physical双预算、compile-slot admission，以及 `PrivateArtifactLease`、object-cache eviction callback、`ArtifactRuntime.close()`、Worker terminal receipt、shared-owner refcount、crash reaper与failed-rmtree accounting。
 
 - NZ/5HD 的 C0 盒化五维地址映射及其与二维 Tile 的关系。
 - GlobalTensor 动态 shape/stride 的乘法溢出、partition OOB 与统一 verifier contract；下界 clamp 已定位，上界/overflow 未闭合。
@@ -544,7 +547,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：继续 Artifact lifecycle，定义 old slot 的 reader lease、in-flight build/promotion fence、generation-safe tombstone 与 cache GC；随后把 `enable_sdma` 演进为 strict `ResourceRequirements` codec/migration registry，并补 stale-pointer/same-VA/fatal-reset negative tests。
+1. 主线：继续 Artifact lifecycle，定义多个 `CompiledProgram/ArtifactRuntime` 共享 private tree 的 lease refcount、owner process epoch、terminal receipt与crash-safe reaper；随后把 `enable_sdma` 演进为 strict `ResourceRequirements` codec/migration registry，并补 stale-pointer/same-VA/fatal-reset negative tests。
 2. 定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
 3. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 4. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
@@ -1563,4 +1566,29 @@ permalink: /learning/pto-curriculum/
 - ISA知识地图：本章无新增ISA指令或Tile语义；补齐的是Python/JIT到Artifact Store之间的Host backpressure与lifecycle边界。
 - 新知识债：durable dual ledger、estimator、cross-process BuildIntent、private retained lease/cleanup、individual deadline、granted/building cancellation、same-filesystem peak headroom、retry storm与故障注入。
 - 下一章：**Private Build 何时真正结束——ArtifactRuntime Lease、Retained Bytes 与 Cleanup Handoff。**
+## 第 81 章课程账本增量
+
+- 日期：2026-10-30
+- 章节：**Private Artifact 何时能删：ArtifactRuntime Retention、对象缓存与 Cleanup Handoff**
+- 源码基线：PyPTO [`8dceaa5f`](https://github.com/hw-native-sys/pypto/commit/8dceaa5f4035dc16e3e34961c51de597cfbbd01b)，为研究时默认分支最新提交；相对课程 80 前进 5 个提交，[比较结果](https://github.com/hw-native-sys/pypto/compare/26d17faf45daef39f2f909c84b07a0d57061880f...8dceaa5f4035dc16e3e34961c51de597cfbbd01b)未改动 Artifact Store、persistent JIT 或 `ArtifactRuntime`。最新 PR #3201 与本章无直接关系。
+- 所选仓库：仅 PyPTO。private build、stage promotion、object cache、compiled artifact与Worker registration的上游边界均能在一个仓闭合。
+- 课程位置：`JIT miss → ArtifactBuild(value/private_directory) → publish/bind → ArtifactRuntime.load → CompiledArtifact callable → optional Worker registration → terminal receipt → lease release/delete`。
+- 新覆盖文件与符号：
+  - `python/pypto/jit/artifact_cache.py`：`ArtifactBuild`、`_build_private`、`_publish` 的private ownership与staging cleanup边界
+  - `python/pypto/jit/_persistent.py`：`resolve_persistent` 与 `owner._artifact_objects` 对compiled object lifetime的延长
+  - `python/pypto/runtime/_artifact_runtime.py`：`ArtifactRuntime.load` 的GENERATED→READY promotion、private fallback与 `_chips`
+  - `python/pypto/ir/compiled_artifact.py`：`CompiledArtifact.load` 的lazy callable ownership
+  - `tests/ut/jit/test_artifact_cache.py`、`tests/ut/runtime/test_prebuilt_artifact.py`、`test_kernel_context.py`：private value retention、private READY reuse、registration-until-close
+- 当前实现边界：`mkdtemp` 产出的private tree不是context-managed temporary；fresh publish与READY publish均不自动删除原private tree；decorator object cache没有eviction callback，`ArtifactRuntime`没有close API；Worker lifecycle与artifact runtime分离。
+- 新确认不变量：
+  1. `PUBLISHED`只证明shared bytes可验证，不证明builder value已停止引用private path；`HIT`才没有builder value/private directory。
+  2. 安全删除至少满足 `PathRefs=0 ∧ InFlight=0 ∧ NativeUse=0`，并由拥有对应事实的runtime owner交出terminal receipt。
+  3. Python object cache eviction只能减少一个root，不能证明native registration退休；finalizer时机不确定，不能承担正确性。
+  4. retained-byte ledger必须在删除成功后扣减；`rmtree`失败或owner crash进入quarantine/reaper，不能先释放quota。
+- 具体演算：测试同型 `FP32[16,16]` Add，单Tensor 1,024 B，逻辑单Tile 1 KiB；示例GENERATED private 4 MiB、READY private 24 MiB，promotion/publication后仍计28 MiB，直到object refs、in-flight与Worker registration全部退休。容量数字为协议演算，不是仓库benchmark。
+- 直接测试事实：publish-then-hit验证fresh PUBLISHED仍保留private-backed value而HIT不保留；storage/readonly failure验证 `ArtifactRuntime.directory` 落到private root且load复用；四runtime并发只build一次；promotion保持live IR/hash；prepared specialization保留registration直到state.close。PR #2723报告12,181 passed/10 skipped/1 xfailed并明确无cleanup/eviction API；本章未重跑NPU。
+- 建议设计（非当前实现）：`PrivateArtifactLease(path,generation,retained_bytes)`、adopt/close handoff、Worker terminal receipt、owner-epoch refcount、quarantine与crash-safe reaper。
+- ISA知识地图：本章无新增ISA指令或Tile语义；补齐Python/JIT到Artifact Store、CompiledArtifact和Worker之间的Host artifact生命周期。
+- 新知识债：lease schema、shared-owner refcount、object-cache eviction callback、runtime close、native terminal contract、fork/crash epoch、ABA-safe tombstone、failed-rmtree accounting与fault-at-every-boundary matrix。
+- 下一章：**多个 Runtime 共享一棵 Private Artifact 怎么办——Lease Refcount、Owner Epoch 与 Crash-safe Reaper。**
 
