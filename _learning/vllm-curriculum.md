@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 71 章追踪真实 P2P `deferred_release` producer：load timeout 在 10/30 秒立即提交失败 outcome，目标 chunk 继续隔离；`AbortAck`、late `TransferDone` 或 session close 才设置 release event。missed ack 会升级为 peer disconnect。下一章研究 `ROUND_SEQ` 之外的 connection generation 与迟到 control message fence。
+- 当前主线：第 72 章沿 `ClientRole.loads[round_seq] → P2PSession._dispatch → ZmqTransport._recv_router` 追踪重连消息身份。当前 `ROUND_SEQ` 只隔离单 session 的 fetch round；ZMQ frame 只带稳定 `peer_id`，main 尚无 connection epoch。下一章研究 process restart 后的 boot nonce、RDMA peer-generation fence 与 deferred-resource census。
 
 ## 已完成章节
 
@@ -84,6 +84,7 @@
 | 2026-10-28 69 | `worker quorum → reset fence → secondary JobResult → _jobs.pop → pin/metrics/EMA apply` | [`ebaa8124`](https://github.com/vllm-project/vllm/commit/ebaa8124755b10b956dc0b69082d9a94c12285d6) | [一个 completion 到底只能算几次]({{ '/articles/vllm-kv-offload-completion-exactly-once-apply/' | relative_url }}) |
 | 2026-10-29 70 | `promotion failure → logical MISS → old-chunk quarantine → release event → fresh-address reuse` | [`36d4ef65`](https://github.com/vllm-project/vllm/commit/36d4ef654a83e227216b0c0b55cf4041d96b1675) | [失败不等于 DMA 已停]({{ '/articles/vllm-kv-offload-promotion-deferred-release-late-dma-fence/' | relative_url }}) |
 | 2026-10-30 71 | `P2P load timeout → immediate failure → deferred chunk → AbortAck/session close → release` | [`83bae492`](https://github.com/vllm-project/vllm/commit/83bae4923f65a7508ba600fbfcecb8022577df1b) | [超时不是释放证明]({{ '/articles/vllm-p2p-load-timeout-abortack-session-release/' | relative_url }}) |
+| 2026-10-31 72 | `round_seq → session reap → ZMQ peer identity → late control message → connection epoch fence` | [`17550580`](https://github.com/vllm-project/vllm/commit/17550580e932f15e772185847382d3ae4211f5ec) | [ROUND_SEQ 不是连接代数]({{ '/articles/vllm-p2p-connection-epoch-late-control-message-fence/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1898,3 +1899,29 @@
 - 新知识债：显式 connection generation、跨重连 late message、真实 NIXL fault injection、poll-thread stall 与 reset 上界、大规模 quarantine admission、process-crash event recovery，以及 `protocol.py` Abort Flow 文档漂移。
 - 下一章：**重连后怎样拒绝旧消息——P2P Round Sequence、Connection Epoch 与 Late Control Message Fence。**
 
+
+
+## 第 72 章课程账本增量
+
+- 日期：2026-10-31
+- 章节：**ROUND_SEQ 不是连接代数：P2P 重连的 Late Control Message Fence**
+- 源码基线：[`17550580`](https://github.com/vllm-project/vllm/commit/17550580e932f15e772185847382d3ae4211f5ec)，为研究时默认分支最新提交；相对第 71 章基线前进 97 个提交，本文涉及的 P2P protocol/client/session/manager、ZMQ transport 与直接测试均未变化。故障目标性质见 [Issue #63602](https://github.com/vllm-project/vllm/issues/63602)。
+- 课程位置：`deferred release → session close → transport reconnect → late-message identity → connection epoch fence`。
+- 新覆盖文件与符号：
+  - `p2p/session/client.py`：`_ClientRequestState.round_seq`、`_InboundLoadState.release`、`request_blocks/on_transfer_done/on_abort_ack/close`
+  - `p2p/session/protocol.py`：`ConnectMsg/ConnectAckMsg/TransferDoneMsg/AbortAckMsg` 的当前 wire identity
+  - `p2p/session/session.py`：`attach_connection/_dispatch/close`
+  - `p2p/manager.py`：`_get_or_create_session/_accept_new_peers/_reap_dead_sessions`
+  - `p2p/control/zmq.py`：`ZmqConnection`、`ZmqTransport.connect/poll/_open_connection/_recv_router`
+  - `test_sessions.py/test_manager.py/test_zmq_transport.py`：round、late terminal、clean reconnect 与 dead-registration 测试
+- 新确认不变量：
+  1. `ROUND_SEQ` 隔离同一 `P2PSession` 的多轮 fetch；新 session 的 client state 重新从 0 开始，故它不是 connection generation。
+  2. 当前 session reap、dead-connection sweep 与等待 TCP disconnect 能收缩重连窗口，但稳定 DEALER identity/`peer_id` 不能让 payload 自证属于哪次连接。
+  3. release authority 必须同时满足 `same_connection_epoch ∧ same_request ∧ same_round ∧ current_owner`；任何一项缺失都不得 set deferred-release event。
+  4. epoch 校验必须早于 role state 的 `pop`/mutation；stale epoch 应 drop+metric，malformed/future epoch 才是协议错误。
+  5. 本地 counter 会在进程重启后复用；安全 epoch 应为随机 session nonce 或 `(boot_uuid, local_counter)`。
+- 具体演算：旧 session E41 的 `AbortAck(req-X, round=0)` 延迟；新 E42 的首轮仍为 round 0，并持有两个 64 KiB fresh chunk。仅以 `(req-X,0)` 匹配可能把旧终态应用到新 load；若消息携带 E41，E42 在 dispatch 前即可拒绝。
+- 测试事实：现有测试验证 round 0 completion、失败 outcome 与 ack-release 分离、同 session late `TransferDone` 幂等、等待旧 TCP disconnect 后建立新 session，以及 sweep dead registration 后首消息不丢。transport test 明确把 poll 中死亡/heartbeat 未发现窗口列为未覆盖；没有跨重连旧 `AbortAck/TransferDone/ConnectAck/LookupResp`、request+round 重用、process restart nonce 或 stale-flood test。
+- 当前实现边界：main 没有 `connection_epoch` wire 字段或 retired-generation fence；本文的 128-bit nonce、ack echo、全 control-message epoch 与复合 identity 是建议协议，不是已合入 API。
+- 新知识债：wire version/兼容升级、boot nonce、所有消息 epoch 覆盖、retired epoch observability、真实 ZMQ heartbeat race、NIXL peer-generation invalidation 与跨进程 restart fault injection。
+- 下一章：**进程重启后谁证明旧 RDMA 已失权——Boot Nonce、Peer-generation Fence 与 Deferred-resource Census。**
