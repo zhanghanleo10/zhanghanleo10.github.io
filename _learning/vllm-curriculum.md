@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 72 章沿 `ClientRole.loads[round_seq] → P2PSession._dispatch → ZmqTransport._recv_router` 追踪重连消息身份。当前 `ROUND_SEQ` 只隔离单 session 的 fetch round；ZMQ frame 只带稳定 `peer_id`，main 尚无 connection epoch。下一章研究 process restart 后的 boot nonce、RDMA peer-generation fence 与 deferred-resource census。
+- 当前主线：第 73 章沿 `NixlTransport._peer_gen → _Inflight.retired/_deferred_remote → manager._retained` 追踪旧 WRITE、registration 与 source pin 的代际所有权。当前 main 已闭合活进程内 registration publish race 与 retired-transfer retention，但 owner crash 会同时丢失 generation/census；下一章研究 consumer destination slot quarantine、late terminal 与 restart-safe ownership。
 
 ## 已完成章节
 
@@ -85,6 +85,7 @@
 | 2026-10-29 70 | `promotion failure → logical MISS → old-chunk quarantine → release event → fresh-address reuse` | [`36d4ef65`](https://github.com/vllm-project/vllm/commit/36d4ef654a83e227216b0c0b55cf4041d96b1675) | [失败不等于 DMA 已停]({{ '/articles/vllm-kv-offload-promotion-deferred-release-late-dma-fence/' | relative_url }}) |
 | 2026-10-30 71 | `P2P load timeout → immediate failure → deferred chunk → AbortAck/session close → release` | [`83bae492`](https://github.com/vllm-project/vllm/commit/83bae4923f65a7508ba600fbfcecb8022577df1b) | [超时不是释放证明]({{ '/articles/vllm-p2p-load-timeout-abortack-session-release/' | relative_url }}) |
 | 2026-10-31 72 | `round_seq → session reap → ZMQ peer identity → late control message → connection epoch fence` | [`17550580`](https://github.com/vllm-project/vllm/commit/17550580e932f15e772185847382d3ae4211f5ec) | [ROUND_SEQ 不是连接代数]({{ '/articles/vllm-p2p-connection-epoch-late-control-message-fence/' | relative_url }}) |
+| 2026-11-01 73 | `_peer_gen → retired transfer census → source pin/registration retention → process-restart fence` | [`3a90cc6f`](https://github.com/vllm-project/vllm/commit/3a90cc6fd0504b52bf47d58e8d70cff4b03f2c19) | [进程重启后谁证明旧 RDMA 已失权]({{ '/articles/vllm-p2p-process-restart-peer-generation-retired-transfer-census/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1925,3 +1926,28 @@
 - 当前实现边界：main 没有 `connection_epoch` wire 字段或 retired-generation fence；本文的 128-bit nonce、ack echo、全 control-message epoch 与复合 identity 是建议协议，不是已合入 API。
 - 新知识债：wire version/兼容升级、boot nonce、所有消息 epoch 覆盖、retired epoch observability、真实 ZMQ heartbeat race、NIXL peer-generation invalidation 与跨进程 restart fault injection。
 - 下一章：**进程重启后谁证明旧 RDMA 已失权——Boot Nonce、Peer-generation Fence 与 Deferred-resource Census。**
+
+
+## 第 73 章课程账本增量
+
+- 日期：2026-11-01
+- 章节：**进程重启后谁证明旧 RDMA 已失权：Peer Generation、Retired Transfer Census 与 Boot Nonce**
+- 源码基线：[`3a90cc6f`](https://github.com/vllm-project/vllm/commit/3a90cc6fd0504b52bf47d58e8d70cff4b03f2c19)，为研究时默认分支最新提交；相对第 72 章基线前进 40 个提交，但 compare 未改动本文涉及的 P2P tiering 文件。
+- 课程位置：`session teardown → registration generation → retired WRITE census → source pin/native handle retention → process-restart reuse fence`。
+- 新覆盖文件与符号：
+  - `p2p/data/base.py`：`DataTransport` 的二维 memoryview、`write_blocks/poll/cancel/force_release_retired` 契约
+  - `p2p/data/nixl.py`：`_peer_gen/_begin_registration/_publish_peer`、`_Inflight.retired`、`_deferred_remote`、`remove_remote_peer/poll_retired`
+  - `p2p/session/server.py`：`ServerRole.close` 的 `cancel(wait)` 与 retained job 返回
+  - `p2p/manager.py`：`_retained/_retain/_poll_retained/_retained_peer/_reap_dead_sessions/drain_jobs`
+  - `test_data_transport.py/test_manager.py/test_sessions.py`：registration supersession、retired transfer、source pin 与同 peer reconnect 的直接测试
+- 新确认不变量：
+  1. `_peer_gen` 只在同一活进程内为异步 registration publish 提供 CAS fence，不是跨 boot epoch。
+  2. `_retained + _Inflight.retired + _deferred_remote` 分别保留 source job、transfer handle 与旧 registration，直到 NIXL terminal。
+  3. `NIXL_ERR_NOT_FOUND` 不能证明 WRITE 已停止；当前代码只把明确 terminal state 或 `NIXL_ERR_REMOTE_DISCONNECT` 当作 release evidence。
+  4. process crash 会丢失所有 in-memory generation/census；安全复用必须取得 backend generation fence receipt，或隔离旧 backing。
+  5. 30 秒 retained cap 与 3 秒 shutdown drain 是 availability policy；超时后的 force/immediate release 不是 safety proof。
+- 具体演算：source region 为 `memoryview[1024, 64 KiB]`，job 41 的 blocks 3/7 写向 peer blocks 11/12；tid 9 在 session close 时为 `PROC`，因此 pin、handle、old dlist/agent 都继续保留。若 40 ms 后 `DONE`，当前实现安全释放；若 owner 在此时 `SIGKILL`，新进程没有旧 tid census，也没有已合入的 teardown receipt。
+- 测试事实：unit/mock NIXL 测试已覆盖迟到 registration worker 被 generation 丢弃、`PROC/PEND` 保留、`NOT_FOUND` 非 terminal、shared job 等最后一个 retained tid、同 peer 重连阻塞与 30 秒 force-release；尚无真实 RDMA WRITE 跨 owner crash/restart、same-VA reuse 或 backend fence receipt E2E。
+- 当前实现边界：[PR #64250](https://github.com/vllm-project/vllm/pull/64250) 已合入 source-side retention；[Issue #63602](https://github.com/vllm-project/vllm/issues/63602) 仍要求 terminal 或 verified generation fence。[PR #61667](https://github.com/vllm-project/vllm/pull/61667) 的 consumer quarantine 与 [PR #64819](https://github.com/vllm-project/vllm/pull/64819) 的 registration-failure disconnect 截至研究时均不是 main 的 restart-safe boot fence。
+- 新知识债：显式 wire boot id、backend generation teardown contract、跨重启 census/region quarantine、same-VA 与 wedged-WRITE fault injection、节点 reset receipt、forced-release 风险观测，以及 consumer destination slot 的 restart-safe ownership。
+- 下一章：**写入目标端的块何时能重用——Consumer Slot Quarantine、Late Terminal 与 Restart-safe Destination Ownership。**
