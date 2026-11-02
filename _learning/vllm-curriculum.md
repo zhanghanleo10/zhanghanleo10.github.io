@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 73 章沿 `NixlTransport._peer_gen → _Inflight.retired/_deferred_remote → manager._retained` 追踪旧 WRITE、registration 与 source pin 的代际所有权。当前 main 已闭合活进程内 registration publish race 与 retired-transfer retention，但 owner crash 会同时丢失 generation/census；下一章研究 consumer destination slot quarantine、late terminal 与 restart-safe ownership。
+- 当前主线：第 74 章沿 `prepare_write → ClientRole.release → JobResult.deferred_release → _DeferredRelease → primary free list` 追踪 consumer destination slot。当前 main 已闭合 timeout 后“逻辑失败立即可见、旧 slot 延迟复用”，但 `ClientRole.close()` 仍直接设置 release event；这与 source-side WRITE 可跨 session teardown 继续 retained 的事实不对称。下一章量化 quarantine 的容量预算、admission/backpressure 与可观测恢复。
 
 ## 已完成章节
 
@@ -86,6 +86,7 @@
 | 2026-10-30 71 | `P2P load timeout → immediate failure → deferred chunk → AbortAck/session close → release` | [`83bae492`](https://github.com/vllm-project/vllm/commit/83bae4923f65a7508ba600fbfcecb8022577df1b) | [超时不是释放证明]({{ '/articles/vllm-p2p-load-timeout-abortack-session-release/' | relative_url }}) |
 | 2026-10-31 72 | `round_seq → session reap → ZMQ peer identity → late control message → connection epoch fence` | [`17550580`](https://github.com/vllm-project/vllm/commit/17550580e932f15e772185847382d3ae4211f5ec) | [ROUND_SEQ 不是连接代数]({{ '/articles/vllm-p2p-connection-epoch-late-control-message-fence/' | relative_url }}) |
 | 2026-11-01 73 | `_peer_gen → retired transfer census → source pin/registration retention → process-restart fence` | [`3a90cc6f`](https://github.com/vllm-project/vllm/commit/3a90cc6fd0504b52bf47d58e8d70cff4b03f2c19) | [进程重启后谁证明旧 RDMA 已失权]({{ '/articles/vllm-p2p-process-restart-peer-generation-retired-transfer-census/' | relative_url }}) |
+| 2026-11-02 74 | `promotion target → deferred release → late terminal → session-close asymmetry → restart-safe ownership` | [`ea836290`](https://github.com/vllm-project/vllm/commit/ea836290a7166f7d5b8efb1ae6ef1e2b2faa8b56) | [Session Close 不是复用凭证]({{ '/articles/vllm-p2p-session-close-consumer-slot-quarantine/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -1951,3 +1952,31 @@
 - 当前实现边界：[PR #64250](https://github.com/vllm-project/vllm/pull/64250) 已合入 source-side retention；[Issue #63602](https://github.com/vllm-project/vllm/issues/63602) 仍要求 terminal 或 verified generation fence。[PR #61667](https://github.com/vllm-project/vllm/pull/61667) 的 consumer quarantine 与 [PR #64819](https://github.com/vllm-project/vllm/pull/64819) 的 registration-failure disconnect 截至研究时均不是 main 的 restart-safe boot fence。
 - 新知识债：显式 wire boot id、backend generation teardown contract、跨重启 census/region quarantine、same-VA 与 wedged-WRITE fault injection、节点 reset receipt、forced-release 风险观测，以及 consumer destination slot 的 restart-safe ownership。
 - 下一章：**写入目标端的块何时能重用——Consumer Slot Quarantine、Late Terminal 与 Restart-safe Destination Ownership。**
+
+
+## 第 74 章课程账本增量
+
+- 日期：2026-11-02
+- 章节：**Session Close 不是复用凭证：Consumer Slot Quarantine 的对称缺口**
+- 源码基线：[`ea836290`](https://github.com/vllm-project/vllm/commit/ea836290a7166f7d5b8efb1ae6ef1e2b2faa8b56)，为研究时默认分支最新提交；相对第 73 章基线前进 [11 个提交](https://github.com/vllm-project/vllm/compare/3a90cc6fd0504b52bf47d58e8d70cff4b03f2c19...ea836290a7166f7d5b8efb1ae6ef1e2b2faa8b56)，P2P client/session/manager 未变化。
+- 课程位置：`remote promotion → primary destination slot → load timeout → logical MISS + physical quarantine → late terminal/session close → address reuse authority`。
+- 新覆盖文件与符号：
+  - `vllm/v1/kv_offload/base.py`：`BlockIDsLoadStoreSpec` 的 `np.int32` chunk ids
+  - `cpu/shared_offload_region.py`：`create_kv_memoryview` 的 `[num_chunks, row_stride_bytes]` CPU byte region
+  - `tiering/base.py`：`JobResult.deferred_release`
+  - `tiering/manager.py`：`CPUPrimaryTierOffloadingManager.defer_write_release/release_deferred_write`、`_DeferredRelease`、`_complete_promotion/_complete_deferred_releases`
+  - `p2p/session/client.py`：`_InboundLoadState.release`、`_abort_load/on_transfer_done/on_abort_ack/collect_results/close`
+  - `p2p/manager.py`：`submit_load/get_finished_jobs/_poll_once/_reap_dead_sessions/drain_jobs`
+  - `test_manager.py/test_sessions.py/test_tiering_offloading.py`：timeout hold、ack release、fresh-id restore 与 close release
+- 新确认不变量：
+  1. failed promotion 的 logical outcome 与 destination address reuse 是两个提交点；前者授权 fallback，后者要求 no-more-write witness。
+  2. quarantine 必须同时做到 key 从 policy 消失、old chunk 不入 free list；同 key 恢复只能分配 fresh chunk。
+  3. matching `AbortAck/TransferDone` 只释放旧 slot，不产生第二个 job outcome，也不能把已 fallback 的失败改回成功。
+  4. allocator mutation只在 manager lock/polling path；network/session 只能单调 set release event。
+  5. source-side retained WRITE 可跨 session teardown 生存，因此 consumer `ClientRole.close() → event.set()` 不是自足的 physical terminal proof。
+  6. process restart 会丢失 event、`_DeferredRelease` 与 allocator quarantine；安全复用需要 boot identity 加 verified backend generation fence，或隔离旧 backing。
+- 具体演算：consumer region 为 `memoryview[32, 65536]`。K0/K1 使用 old ids 13/14；PD timeout 后两 key 立即 MISS，但 128 KiB old slots 继续 held。local recompute 使用 fresh ids 15/16，旧+新共占 256 KiB；ack 到达才归还 13/14。若 missed ack 后仅因 close 归还，而 source 仍保留 `PROC` WRITE，则 reuse authority 与 writer census 矛盾。
+- 测试事实：真实 manager/session 单测覆盖 timeout 后 job pop、MISS、deferred count=1、free count不变，注入 ack 后 free+1；tiering test 覆盖 fresh-id restore；session test明确把 missed ack 后的 event release 放在 `close()`。这些证明当前 policy，不证明 close 的 RDMA safety。
+- PR/Issue 边界：[PR #63779](https://github.com/vllm-project/vllm/pull/63779) 与 [PR #64256](https://github.com/vllm-project/vllm/pull/64256) 已合入单 outcome + release event；[PR #61667](https://github.com/vllm-project/vllm/pull/61667) 的 close 后持续 quarantine/`memory_safe` 方向截至研究时仍 open；[Issue #61532](https://github.com/vllm-project/vllm/issues/61532) 提供了 UCX/TCP late-write evidence，但不是 RDMA/serving E2E。
+- 新知识债：close 后持久 quarantine、never-sent Fetch handoff identity、buffered terminal drain、boot id/backend fence receipt、crash 后 census/region recovery、capacity admission、reset/shutdown rejection 与真实 RDMA same-address fault injection。
+- 下一章：**隔离块把缓存吃满时怎么办——Quarantine Capacity Budget、Admission Backpressure 与可观测恢复。**
