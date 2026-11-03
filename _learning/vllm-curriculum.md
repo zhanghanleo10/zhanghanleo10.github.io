@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 74 章沿 `prepare_write → ClientRole.release → JobResult.deferred_release → _DeferredRelease → primary free list` 追踪 consumer destination slot。当前 main 已闭合 timeout 后“逻辑失败立即可见、旧 slot 延迟复用”，但 `ClientRole.close()` 仍直接设置 release event；这与 source-side WRITE 可跨 session teardown 继续 retained 的事实不对称。下一章量化 quarantine 的容量预算、admission/backpressure 与可观测恢复。
+- 当前主线：第 75 章沿 `deferred_release → primary capacity census → prepare_write(None) → lookup MISS → local recompute` 追踪 quarantine 的容量后果。当前 main 通过“deferred 继续占 write-pending 且不入 free list”实现 fail-closed admission，但没有结构化的 quarantine 原因、显式 headroom/watermark 或跨 crash census。下一章检查 reset/drain/shutdown 是否能给出覆盖旧 writer 的恢复证明。
 
 ## 已完成章节
 
@@ -87,6 +87,7 @@
 | 2026-10-31 72 | `round_seq → session reap → ZMQ peer identity → late control message → connection epoch fence` | [`17550580`](https://github.com/vllm-project/vllm/commit/17550580e932f15e772185847382d3ae4211f5ec) | [ROUND_SEQ 不是连接代数]({{ '/articles/vllm-p2p-connection-epoch-late-control-message-fence/' | relative_url }}) |
 | 2026-11-01 73 | `_peer_gen → retired transfer census → source pin/registration retention → process-restart fence` | [`3a90cc6f`](https://github.com/vllm-project/vllm/commit/3a90cc6fd0504b52bf47d58e8d70cff4b03f2c19) | [进程重启后谁证明旧 RDMA 已失权]({{ '/articles/vllm-p2p-process-restart-peer-generation-retired-transfer-census/' | relative_url }}) |
 | 2026-11-02 74 | `promotion target → deferred release → late terminal → session-close asymmetry → restart-safe ownership` | [`ea836290`](https://github.com/vllm-project/vllm/commit/ea836290a7166f7d5b8efb1ae6ef1e2b2faa8b56) | [Session Close 不是复用凭证]({{ '/articles/vllm-p2p-session-close-consumer-slot-quarantine/' | relative_url }}) |
+| 2026-11-03 75 | `deferred chunk → capacity census → prepare_write(None) → MISS/recompute → observable release` | [`8cf12773`](https://github.com/vllm-project/vllm/commit/8cf1277362aef963a71cf6860c28387acf6ecb90) | [Quarantine Capacity 与 MISS Backpressure]({{ '/articles/vllm-quarantine-capacity-admission-backpressure/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -463,6 +464,12 @@
 - `P2PSecondaryTierManager.submit_load/_poll_once/_reap_dead_sessions/drain_jobs`
 - `test_timed_out_load_holds_chunks_until_abort_ack`、`test_load_abort_ack_timeout_*`
 
+- `CPUOffloadingManager._get_num_free_chunks/_allocate_chunks/prepare_store`
+- `CPUPrimaryTierOffloadingManager._deferred_release_chunk_ids/defer_write_release/release_deferred_write`
+- `TieringOffloadingManager.lookup/_initiate_promotion/_complete_deferred_releases`
+- `TieringMetricsTracker.on_promotion_allocation_failure/on_release_deferred/on_deferred_release_done/_observe_active_transfer_stats`
+- `test_timed_out_load_holds_chunks_until_abort_ack`、`test_cpu_manager` 的 pinned/full 分配路径、`test_tiering_metrics_tracker_records_promotion_allocation_failures`、`test_inference_reuses_a_finished_kv_request_id`
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -733,6 +740,13 @@
 261. `ROUND_SEQ` 只隔离同一 request 的 fetch round，不构成跨重连的 connection generation；session teardown 清理内存态，但 wire-level late message fencing 尚未完成。
 262. 当前代码以 session close 作为 release boundary，但 PR/Issue 仍未证明 NIXL teardown 对 stalled remote WRITE 的硬件级 no-more-write 保证；代码事实与硬件充分性必须分开。
 
+263. primary chunk pool 的稳定态守恒为 `N_total = N_unallocated + N_free_list + N_policy_resident + N_deferred`；deferred 已从 policy 删除但仍是物理占用。
+264. `N_write_pending = N_normal_pending + N_deferred`；timeout 后提前递减 pending 或把 deferred 放回 free list，都会把未知 writer 的地址错误授权给新 owner。
+265. `prepare_store/prepare_write` 只从未分配、free-list 和 policy 能完整驱逐的 idle chunk 取得容量；protected/pinned/deferred 任一导致候选不足时，整次分配原子返回 `None`。
+266. secondary 命中但 primary promotion 分配失败时，当前 main 记录 allocation-failure 并返回 `MISS`，而非无限 `RETRY`；安全代价被转换成本地重算和潜在 GPU 压力。
+267. tiering `PRIMARY_WRITE_USAGE_PERC` 表示 active promotion，CPU cache write usage继续包含 deferred；诊断 quarantine 必须联合 deferred gauge、hold histogram、CPU write usage 与 allocation-failure counter。
+268. quarantine budget 或水位只能限制新的 promotion admission，不能把时间或容量阈值升级为旧 writer 的 no-more-write witness；释放仍需 terminal/fence evidence。
+
 ## 前置依赖与版本注意
 
 - 本课程以每章记录的 `main` commit 为准，不把 v0.22.1 专题中的实现自动视为当前事实。
@@ -830,7 +844,7 @@
 
 - KV Offload 缺少 secondary duplicate/unknown completion 负向测试，以及在 `_jobs.pop` 后 metrics、pin release、EMA 各边界注入异常的 partial-apply recovery oracle。
 - 若未来 OBJ/P2P completion 可跨 reconnect 或 manager replacement redeliver，缺少显式 manager epoch/attempt identity、可回收 applied receipt 与 cross-crash reconciliation；当前不应无证据地把 durable ledger放进本地热路径。
-- P2P `deferred_release` producer、missed-ack disconnect 与 source stall fault 已合入；仍缺 NIXL teardown 的真机 no-more-write 证据、显式 connection generation、late control-message test、poll-stall/reset hard deadline、并发 quarantine capacity admission、process-crash recovery 与 register/free 全边界 fault injection。
+- P2P `deferred_release` producer、missed-ack disconnect 与 source stall fault 已合入；仍缺 NIXL teardown 的真机 no-more-write 证据、显式 connection generation、late control-message test、poll-stall/reset hard deadline、结构化 `full_due_to_quarantine` admission reason、workload-driven headroom/watermark、quarantine 耗尽→recompute→release 恢复 E2E、process-crash census 与 register/free 全边界 fault injection。
 
 ## 第 23 章课程账本增量
 
@@ -1980,3 +1994,27 @@
 - PR/Issue 边界：[PR #63779](https://github.com/vllm-project/vllm/pull/63779) 与 [PR #64256](https://github.com/vllm-project/vllm/pull/64256) 已合入单 outcome + release event；[PR #61667](https://github.com/vllm-project/vllm/pull/61667) 的 close 后持续 quarantine/`memory_safe` 方向截至研究时仍 open；[Issue #61532](https://github.com/vllm-project/vllm/issues/61532) 提供了 UCX/TCP late-write evidence，但不是 RDMA/serving E2E。
 - 新知识债：close 后持久 quarantine、never-sent Fetch handoff identity、buffered terminal drain、boot id/backend fence receipt、crash 后 census/region recovery、capacity admission、reset/shutdown rejection 与真实 RDMA same-address fault injection。
 - 下一章：**隔离块把缓存吃满时怎么办——Quarantine Capacity Budget、Admission Backpressure 与可观测恢复。**
+
+
+## 第 75 章课程账本增量
+
+- 日期：2026-11-03
+- 章节：**隔离块把缓存吃满时怎么办：Quarantine Capacity 与 MISS Backpressure**
+- 源码基线：[`8cf12773`](https://github.com/vllm-project/vllm/commit/8cf1277362aef963a71cf6860c28387acf6ecb90)，为研究时默认分支最新提交；相对第 74 章基线前进 [93 个提交](https://github.com/vllm-project/vllm/compare/ea836290a7166f7d5b8efb1ae6ef1e2b2faa8b56...8cf1277362aef963a71cf6860c28387acf6ecb90)。相关实现未变，直接测试增加 P2P lifecycle E2E。
+- 课程位置：`consumer quarantine → primary capacity census → promotion admission failure → MISS/recompute → release recovery`。
+- 新覆盖文件与符号：
+  - `cpu/manager.py`：`_get_num_free_chunks/_allocate_chunks/prepare_store`、`_num_evictable_cache_chunks/_num_write_pending_chunks/_free_list`
+  - `tiering/manager.py`：`defer_write_release/release_deferred_write/lookup/_initiate_promotion/_complete_deferred_releases`
+  - `tiering/base.py/metrics.py`：deferred count/hold、active primary write 与 promotion allocation-failure metrics
+  - `test_manager.py/test_metrics.py/test_p2p_lifecycle_e2e.py`：timeout hold、allocator full、metric 与 request-id reuse 证据
+- 新确认不变量：
+  1. deferred chunk 已从 policy 删除但仍在 physical pool；它既不可 lookup/evict，也不可加入 free list。
+  2. deferred 继续计入 `_num_write_pending_chunks`，所以 CPU cache write usage不会因逻辑失败而提前下降。
+  3. allocator 只接受 unallocated、free 或完整可驱逐 idle chunk；候选不足时 batch 原子返回 `None`。
+  4. secondary `HIT` 若无法取得 primary destination，当前 main 增加 allocation-failure counter 并返回 `MISS`，以重算换取 liveness。
+  5. admission budget只能拒绝新 promotion；任何 watermark/deadline 都不能授权复用未知 writer 的旧地址。
+- 具体演算：8 个 64 KiB chunk，共 512 KiB；3 个 ready pinned、2 个 normal pending、2 个 deferred、1 个 free。G promotion 消耗最后 free，H promotion 因 free=0/evictable=0 返回 `None` 并降级为 `MISS`；ack 后 poll 才让 deferred--/free+1。
+- 测试事实：4-chunk P2P 单测验证 timeout 后 deferred=1 且 free 不增，`AbortAck` 后 deferred=0/free+1；CPU manager tests 验证 pinned/full 时分配失败；metrics test验证 allocation-failure counter；新增 SmolLM2 lifecycle E2E验证取消后的迟到失败不毒化复用 request id。尚无“大量 deferred 耗尽 primary → remote HIT 降级 MISS → local recompute → release 恢复”的联合测试。
+- 当前实现边界：main 没有显式 quarantine reserve、高低水位或结构化失败原因；[PR #61667](https://github.com/vllm-project/vllm/pull/61667) 的 close 后持续 quarantine 与 1 GiB NIXL/UCX stall 为开放 PR/作者实验，不是 main 保证。
+- 新知识债：quarantine-specific admission reason、headroom 标定、active/deferred/CPU usage dashboard、capacity-exhaustion E2E、restart-safe census、backend generation fence receipt 与真实 RDMA same-address canary。
+- 下一章：**Reset 不能消灭旧 WRITE：Drain Contract、Rejected Reset 与 Backing Retention。**
