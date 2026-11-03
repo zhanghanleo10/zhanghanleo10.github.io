@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-02。
+最后更新：2026-11-03。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 84 将长期删除失败拆成 `DELETE_RETRY`、`DEAD_LETTER` 与 `RECONCILED`：backoff/dead-letter 只改变调度与运维责任，未释放的 tombstone 必须继续全额计入 physical budget；新 build 需在 live、quarantine/dead-letter、in-flight reservation 与 recovery headroom 的合计预算上原子准入。当前实现仍无 online cleanup/reaper。下一步研究最后一份容量如何用 reservation token + physical census revision CAS 避免跨进程双花。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 85 已将跨进程双花收束到 `_BuildFlights leader → per-key flock/recheck miss → admission CAS → builder`：per-key 锁不等于 shared capacity serialization；token 必须绑定 ledger revision、各 filesystem census revision 与 private/cache peak resource vector，并在 publish 后转换为 shared + private charge。当前实现仍无 durable ledger/census/token。下一步研究 CAS 已授予但 owner 崩溃时的 build phase journal 与 orphan reconcile。
 
 ## 已完成章节
 
@@ -108,6 +108,7 @@ permalink: /learning/pto-curriculum/
 | 2026-10-31 | 多 Runtime 共享 Private Artifact 的 Lease 与 Reaper | shared ArtifactBuild → member lease → owner epoch → native fence → crash-safe reaper | [课程 82]({% post_url 2026-10-31-pypto-private-artifact-lease-refcount-owner-epoch-reaper %}) |
 | 2026-11-01 | Private Artifact Tombstone、幂等删除与容量对账 | terminal fence → tombstone rename → idempotent delete → charge reconcile | [课程 83]({% post_url 2026-11-01-pypto-private-artifact-tombstone-idempotent-delete-byte-reconcile %}) |
 | 2026-11-02 | Quarantine Backoff、Dead-letter Garbage 与容量准入 | delete failure → backoff → dead-letter charged → physical reconcile → admission revision | [课程 84]({% post_url 2026-11-02-pypto-quarantine-backoff-dead-letter-capacity-admission %}) |
+| 2026-11-03 | Reservation Token、Physical Census Revision 与 Admission CAS | per-key leader → revisioned capacity CAS → private/staging peak → charge handoff → reconcile | [课程 85]({% post_url 2026-11-03-pypto-reservation-token-physical-census-admission-cas %}) |
 
 ## ISA 知识地图
 
@@ -209,7 +210,7 @@ permalink: /learning/pto-curriculum/
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [d78561cc](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 Worker accepted-run drain、native completion fence 与 close-before-workspace-teardown，作为 ArtifactRuntime lease release 的下游证据 | 跨仓深挖 8 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [be23606f](https://github.com/hw-native-sys/pypto/commit/be23606f791fa2251d7fccabdb91c75582268fad) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、quota/admission、private retention/lease/reaper、tombstone/reconcile，以及 quarantine backoff→charged dead-letter→physical-budget admission 边界 | 跨仓深挖 17 |
+| pypto | [950a30ec](https://github.com/hw-native-sys/pypto/commit/950a30ec9a0f81b4f9d42fde778ac2ca9e2c82bc) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter，以及 per-key leader→filesystem resource-vector reservation→census/ledger revision CAS→charge handoff 边界 | 跨仓深挖 18 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -217,6 +218,8 @@ permalink: /learning/pto-curriculum/
 
 - private artifact 的安全删除不是 build/publish 事件，而是 `PathRefs=0 ∧ InFlight=0 ∧ NativeUse=0`；terminal 后仍须按当前 reaper generation 先 tombstone、再幂等删除，最后以实例 `charge_id` CAS exactly-once release。rename/partial delete/`ENOENT` 都不能越过 identity 核验，删除完成前继续计入 retained bytes。
 - dead-letter 只表示自动删除预算耗尽，不表示 physical bytes 已释放；`DELETE_RETRY/DEAD_LETTER` 都保持 charge。admission 必须原子满足 `live + quarantine + dead-letter + reserved + recovery headroom <= physical budget`，backoff/jitter 无权替代 generation CAS 或 physical absence 证据。
+- Artifact per-key flight/flock 只去重同一 identity；不同 key 的并发 builder 必须在调用 builder 前以 ledger revision + census revisions CAS 同一 capacity state。fresh `PUBLISHED` 的 reservation 要转换为 shared live + active private charge，不能因出现 shared handle 就释放。
+- cache root 与 private root 可能位于不同 filesystem；admission token 必须携带 `peak_bytes_by_filesystem`，并对每个 filesystem 保持 capacity invariant。`statvfs` 只有在所有 writer 受控或 volume/quota 隔离时才可升级为 hard authority。
 
 - immutable evidence append 与 canonical state apply 是两个线性化域：前者允许 validated multi-writer/idempotent duplicate，后者连同 reset/free 必须以 `owner_epoch + expected_revision` CAS 单写；late witness 不跨 attempt/generation，也不重开 terminal state。
 - missing trace/event/semaphore witness 只能证明当前 evidence set 不闭合，不能证明 native action 未发生；timeout 是控制事件，不是 negative witness。
@@ -551,7 +554,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：继续 Artifact lifecycle，定义多个 `CompiledProgram/ArtifactRuntime` 共享 private tree 的 lease refcount、owner process epoch、terminal receipt与crash-safe reaper；随后把 `enable_sdma` 演进为 strict `ResourceRequirements` codec/migration registry，并补 stale-pointer/same-VA/fatal-reset negative tests。
+1. 主线：继续 Artifact lifecycle，为已获 grant 的 reservation 定义 owner epoch、durable build-phase journal、orphan token/reconcile 与 crash-at-every-phase fault matrix；随后把 `enable_sdma` 演进为 strict `ResourceRequirements` codec/migration registry。
 2. 定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
 3. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 4. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
@@ -1684,3 +1687,30 @@ permalink: /learning/pto-curriculum/
 - 已闭合的逻辑：identity 决定对象是谁；lease/native terminal 决定何时能删；physical absence + charge CAS 决定何时返还；reservation 决定谁能使用返还容量。
 - 仍未落地：当前 PyPTO 没有 durable ledger、online reaper 或 physical census，章节 78–84 的容量/回收协议仍需实现与 fault-at-every-boundary Golden。
 - 后续路线：先以 reservation token + census revision CAS 收束跨进程 TOCTOU，再回接真实 builder、publication 和 waiter wakeup。
+
+## 第 85 章课程账本增量
+
+- 日期：2026-11-03
+- 章节：**最后一份容量会不会被双花：PyPTO Reservation Token、Physical Census Revision 与 Admission CAS**
+- 源码基线：PyPTO [`950a30ec`](https://github.com/hw-native-sys/pypto/commit/950a30ec9a0f81b4f9d42fde778ac2ca9e2c82bc)，为研究时默认分支最新提交；相对课程 84 前进 3 个提交，[比较结果](https://github.com/hw-native-sys/pypto/compare/be23606f791fa2251d7fccabdb91c75582268fad...950a30ec9a0f81b4f9d42fde778ac2ca9e2c82bc)未改动 Artifact Store、persistent JIT、`ArtifactRuntime` 或直接测试。
+- 所选仓库：仅 PyPTO。per-key flight/flock、private/published 双份字节、runtime retention 与测试都可在一个仓闭合，不需要提前进入 serving。
+- 课程位置：`resolve_persistent → _BuildFlights leader → per-key flock/recheck → admission CAS（建议）→ _build_private → _publish → ArtifactBuild/ArtifactRuntime → physical delete/reconcile`。
+- 新覆盖文件与符号：
+  - `python/pypto/jit/artifact_cache.py`：`ArtifactBuild`、`_BuildFlights.run`、`ArtifactStore.get_or_build/_get_or_build/_build_private/_publish`
+  - `python/pypto/jit/_persistent.py`：`_fallback_private_root/resolve_persistent/owner._artifact_objects`
+  - `python/pypto/runtime/_artifact_runtime.py`：`ArtifactRuntime.load/directory/_chips` 的 GENERATED→READY 与 private retention
+  - `docs/en/dev/09-artifact-store.md`、RFC #2653、PR #2723：per-key publication、offline-only cleanup 与 no quota/eviction boundary
+  - `tests/ut/jit/test_artifact_cache.py`：same-key thread/process dedupe、different-key concurrency、fresh PUBLISHED/private retention、publication failure
+- 当前实现边界：PyPTO 没有 capacity ledger、physical census、reservation token、revision watch 或 online reaper；本文 `CapacityState/ReservationToken` 与 CAS 状态机是建议设计。
+- 新确认不变量：
+  1. per-key serialization 只防同 identity 重复构建，不防不同 key 读取同一 stale free-space snapshot。
+  2. reservation 必须在 per-key leader + lock 内 recheck miss 后、builder 前原子授予；leader 前会重复计费，builder 后已经可能写爆。
+  3. token 按 filesystem resource vector 预留 private/compiler 与 cache staging/final 峰值；`private_root` 在 cache root 外不等于同一物理预算。
+  4. `BUILDING` 后 timeout/lease expiry 只记录 cancel intent；PUBLISHED 把 reservation 转为 shared + active-private charge，physical absence + reconcile CAS 后才释放。
+  5. census 只有在受控 writer/隔离 quota 前提下是 hard authority；否则是带 revision 的保守 guardrail。
+- 具体演算：预算 1,024 MiB、headroom 128 MiB、既有 charge 740 MiB，余 156 MiB；两个不同 key 各需 96 MiB。无 CAS 时合计 1,060 MiB；A 以 revision 41/census 17 CAS 后，B 的 stale CAS 失败并 WAIT。A 的 48 MiB private 物理删除并对账后，B 才在新 revision 获得 grant。
+- 直接测试事实：4 thread 同 key只 build 一次；3 spawn process 同 key得到1 PUBLISHED/2 HIT且dead owner释放flock；两个不同 key可在builder barrier内并发；fresh PUBLISHED与publication failure都保留private output。当前没有capacity/CAS/orphan/cross-filesystem测试。
+- ISA知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；补齐 Host Artifact 多 writer capacity linearization 与两个 filesystem 的 peak ownership。
+- 新知识债：durable ledger/census/token、peak estimator、volume/quota isolation、owner epoch、phase journal、orphan reconcile、no-lost-wake、公平性、双进程 deterministic CAS 与 crash-at-every-phase matrix。
+- 下一章：**Reservation 已授予但进程崩了怎么办——Owner Lease、Build Phase Journal 与 Orphan Reconcile。**
+
