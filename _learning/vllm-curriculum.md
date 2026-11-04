@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 75 章沿 `deferred_release → primary capacity census → prepare_write(None) → lookup MISS → local recompute` 追踪 quarantine 的容量后果。当前 main 通过“deferred 继续占 write-pending 且不入 free list”实现 fail-closed admission，但没有结构化的 quarantine 原因、显式 headroom/watermark 或跨 crash census。下一章检查 reset/drain/shutdown 是否能给出覆盖旧 writer 的恢复证明。
+- 当前主线：第 76 章沿 `public reset → secondary drain → primary reset → worker report fence → promotion reopen` 区分两个 writer 域。当前 main 已用 `_reset_fence` 修复 worker late DMA 与 secondary promotion 的同址竞争，但 P2P session close、shutdown immediate cancel、process restart 与 backend generation teardown 仍缺统一的 no-more-write receipt。下一章进入 multi-node region mirror，检查跨节点 worker 直写 head backing 的 generation ownership。
 
 ## 已完成章节
 
@@ -88,6 +88,7 @@
 | 2026-11-01 73 | `_peer_gen → retired transfer census → source pin/registration retention → process-restart fence` | [`3a90cc6f`](https://github.com/vllm-project/vllm/commit/3a90cc6fd0504b52bf47d58e8d70cff4b03f2c19) | [进程重启后谁证明旧 RDMA 已失权]({{ '/articles/vllm-p2p-process-restart-peer-generation-retired-transfer-census/' | relative_url }}) |
 | 2026-11-02 74 | `promotion target → deferred release → late terminal → session-close asymmetry → restart-safe ownership` | [`ea836290`](https://github.com/vllm-project/vllm/commit/ea836290a7166f7d5b8efb1ae6ef1e2b2faa8b56) | [Session Close 不是复用凭证]({{ '/articles/vllm-p2p-session-close-consumer-slot-quarantine/' | relative_url }}) |
 | 2026-11-03 75 | `deferred chunk → capacity census → prepare_write(None) → MISS/recompute → observable release` | [`8cf12773`](https://github.com/vllm-project/vllm/commit/8cf1277362aef963a71cf6860c28387acf6ecb90) | [Quarantine Capacity 与 MISS Backpressure]({{ '/articles/vllm-quarantine-capacity-admission-backpressure/' | relative_url }}) |
+| 2026-11-04 76 | `public reset → secondary drain → primary reset → worker reset fence → promotion reopen` | [`d3fb7166`](https://github.com/vllm-project/vllm/commit/d3fb7166e0ac9db82158129face12ae28209757a) | [Drain Contract 与 Worker Fence]({{ '/articles/vllm-reset-drain-worker-fence-backing-retention/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2018,3 +2019,29 @@
 - 当前实现边界：main 没有显式 quarantine reserve、高低水位或结构化失败原因；[PR #61667](https://github.com/vllm-project/vllm/pull/61667) 的 close 后持续 quarantine 与 1 GiB NIXL/UCX stall 为开放 PR/作者实验，不是 main 保证。
 - 新知识债：quarantine-specific admission reason、headroom 标定、active/deferred/CPU usage dashboard、capacity-exhaustion E2E、restart-safe census、backend generation fence receipt 与真实 RDMA same-address canary。
 - 下一章：**Reset 不能消灭旧 WRITE：Drain Contract、Rejected Reset 与 Backing Retention。**
+
+## 第 76 章课程账本增量
+
+- 日期：2026-11-04
+- 章节：**Reset 返回 True 以后谁还能写？Drain Contract、Worker Fence 与 Backing Retention**
+- 源码基线：[`d3fb7166`](https://github.com/vllm-project/vllm/commit/d3fb7166e0ac9db82158129face12ae28209757a)，为研究时默认分支最新提交；相对第 75 章基线前进 [121 个提交](https://github.com/vllm-project/vllm/compare/8cf1277362aef963a71cf6860c28387acf6ecb90...d3fb7166e0ac9db82158129face12ae28209757a)。其中 [commit `14aefcd4`](https://github.com/vllm-project/vllm/commit/14aefcd4f907ff91cb29b9e80bd9c6a5568944bb) 已合入 reset promotion fence。
+- 课程位置：`public reset → secondary tier drain → primary metadata reset → worker stale-report fence → promotion reopen`。
+- 新覆盖文件与符号：
+  - `vllm/entrypoints/llm.py`、`vllm/v1/engine/llm_engine.py`、`vllm/v1/engine/core.py`、`vllm/v1/core/sched/scheduler.py`：`reset_prefix_cache(reset_connector=True)`
+  - `offloading_connector.py`、`offloading/scheduler.py`：`reset_cache/_reset_cache/_reset_fence/_stale_job_threshold/has_pending_push_work/_update_connector_output`
+  - `tiering/manager.py`：`reset_cache/_promotions_held/on_reset_flushed/shutdown/_shutdown_tiers`
+  - `tiering/p2p/manager.py`：`drain_jobs/_poll_retained/shutdown/_drain_inflight_for_shutdown`
+  - `tiering/p2p/session/client.py`：`ClientRole.close` 的 deferred-release event 行为
+  - `test_scheduler.py/test_tiering_offloading.py/test_manager.py/test_offloading_connector.py`：fence、idle progress、重复 report、retained drain 与公开入口测试
+- 新确认不变量：
+  1. secondary tier I/O 与 executor worker GPU↔CPU copy 是两个 writer 域；`drain_jobs()` 只覆盖前者。
+  2. manager reset 在 secondary drain、finished-result 消费且 `_jobs/_deferred_releases` 为空后才 reset primary metadata。
+  3. reset 可返回 `True` 而 `_reset_fence` 仍非空；此时 `_promotions_held` 令 secondary-only lookup 返回 `MISS`，不是 `RETRY`。
+  4. `_reset_fence[job_id]=pending_count` 是 per-job/per-worker AND fence；错误 job 的重复 report 不能提前解锁。
+  5. `has_pending_push_work()` 在 idle engine 上继续产生空 step，确保 flush 下发、worker reports 回收、最终调用 `on_reset_flushed()`。
+  6. tier shutdown 抛错时 primary mmap 不 cleanup；P2P 3 秒后 immediate cancel 与 retained 30 秒 cap 是 availability policy，代码未给出跨 backend generation 的物理 fence receipt。
+- 具体演算：primary 为 `memoryview[4, 65536]`。旧 `job_id=41` 尚欠两个 worker reports，目标 chunk 2；reset 后 `_reset_fence={41:2}` 且 promotion held。secondary-only key K 先降级 `MISS`；两份精确 report 依次把 fence 降到 1、0，最后才允许 K promotion，避免旧 DMA 覆盖 K。
+- 测试事实：真实 scheduler + tiering/example tier 测试验证 reset 返回后仍保持 engine stepping、精确 `jobs_to_flush`、held lookup 为 MISS、reports 齐全后恢复；重复旧 report 不解锁；连续两次 reset 不丢 flush；P2P manager 测试验证 retained transfer 到第三次 poll terminal 前 drain 不返回。PR 报告的 LLM/GPU 回归验证 idle engine 恢复，但没有真实硬件 same-chunk late-DMA race。
+- 当前实现边界：main 已合入 [PR #62929](https://github.com/vllm-project/vllm/pull/62929) 的 worker fence；[PR #61667](https://github.com/vllm-project/vllm/pull/61667) 的 close 后持续 quarantine 与 rejected reset 截至研究时仍 open；[PR #62933](https://github.com/vllm-project/vllm/pull/62933) 的 multi-node region mirror 也仍 open，不能当作 main 保证。
+- 新知识债：P2P close 后持久 quarantine、结构化 `REJECTED_BUSY`、boot id、持久 writer census、backend teardown receipt、shutdown immediate-cancel 语义、same-address RDMA fault injection 与 backing-generation metrics。
+- 下一章：**跨节点 Worker 直接写 Head Region：Region Mirror 的 Job Fence、Timeout 与 Generation Ownership。**
