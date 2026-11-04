@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-03。
+最后更新：2026-11-04。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 85 已将跨进程双花收束到 `_BuildFlights leader → per-key flock/recheck miss → admission CAS → builder`：per-key 锁不等于 shared capacity serialization；token 必须绑定 ledger revision、各 filesystem census revision 与 private/cache peak resource vector，并在 publish 后转换为 shared + private charge。当前实现仍无 durable ledger/census/token。下一步研究 CAS 已授予但 owner 崩溃时的 build phase journal 与 orphan reconcile。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 86 已将 reservation grant 后的 crash 窗口收束到 `owner lease/epoch → build phase journal → reservation-scoped path → orphan reaper → physical census → charge/release CAS`：`flock` 自动释放只证明新进程可进入 critical section，不证明旧 writer、残留 bytes 或 capacity effect 已闭合。当前实现仍无 durable ledger、reservation token、phase journal、online reaper 或 runtime member lease。下一步研究 journal 自身的 torn record、双槽 manifest 与 deterministic replay。
 
 ## 已完成章节
 
@@ -109,6 +109,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-01 | Private Artifact Tombstone、幂等删除与容量对账 | terminal fence → tombstone rename → idempotent delete → charge reconcile | [课程 83]({% post_url 2026-11-01-pypto-private-artifact-tombstone-idempotent-delete-byte-reconcile %}) |
 | 2026-11-02 | Quarantine Backoff、Dead-letter Garbage 与容量准入 | delete failure → backoff → dead-letter charged → physical reconcile → admission revision | [课程 84]({% post_url 2026-11-02-pypto-quarantine-backoff-dead-letter-capacity-admission %}) |
 | 2026-11-03 | Reservation Token、Physical Census Revision 与 Admission CAS | per-key leader → revisioned capacity CAS → private/staging peak → charge handoff → reconcile | [课程 85]({% post_url 2026-11-03-pypto-reservation-token-physical-census-admission-cas %}) |
+| 2026-11-04 | Reservation Owner Lease、Build Phase Journal 与 Orphan Reconcile | reservation CAS → owner epoch → phase journal → orphan census → charge/release CAS | [课程 86]({% post_url 2026-11-04-pypto-reservation-owner-lease-build-journal-orphan-reconcile %}) |
 
 ## ISA 知识地图
 
@@ -1713,4 +1714,31 @@ permalink: /learning/pto-curriculum/
 - ISA知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；补齐 Host Artifact 多 writer capacity linearization 与两个 filesystem 的 peak ownership。
 - 新知识债：durable ledger/census/token、peak estimator、volume/quota isolation、owner epoch、phase journal、orphan reconcile、no-lost-wake、公平性、双进程 deterministic CAS 与 crash-at-every-phase matrix。
 - 下一章：**Reservation 已授予但进程崩了怎么办——Owner Lease、Build Phase Journal 与 Orphan Reconcile。**
+
+## 第 86 章课程账本增量
+
+- 日期：2026-11-04
+- 章节：**Reservation Owner 崩溃后谁接管：PyPTO Build Phase Journal、Lease Fence 与 Orphan Reconcile**
+- 源码基线：PyPTO [`39474d24`](https://github.com/hw-native-sys/pypto/commit/39474d24d15383d0ba251dbeed8dc15ee49947f6)，为研究时默认分支最新提交；相对课程 85 前进 3 个提交，[比较结果](https://github.com/hw-native-sys/pypto/compare/950a30ec9a0f81b4f9d42fde778ac2ca9e2c82bc...39474d24d15383d0ba251dbeed8dc15ee49947f6)未改动 Artifact Store、persistent JIT、`ArtifactRuntime` 或直接测试。
+- 所选仓库：仅 PyPTO。reservation grant、private build、publication、runtime retention 与 crash recovery 可在一个仓内闭合。
+- 课程位置：`per-key recheck MISS → reservation CAS → BUILDING/PRIVATE_READY/PUBLISHING journal → PUBLISHED/CHARGED → owner-loss reconcile → RELEASED/quarantine`。
+- 新覆盖文件与符号：
+  - `python/pypto/jit/artifact_cache.py`：`ArtifactBuild`、`_BuildFlights.run/reset`、`ArtifactStore._get_or_build/_build_private/_publish`
+  - `python/pypto/jit/_persistent.py`：`_fallback_private_root/resolve_persistent/owner._artifact_objects`
+  - `python/pypto/runtime/_artifact_runtime.py`：`ArtifactRuntime.load/directory/_chips` 的 generated/ready/private retention
+  - `docs/en/dev/09-artifact-store.md`、RFC #2653、PR #2723：offline-only cleanup、published path lifetime 与 no eviction boundary
+  - `tests/ut/jit/test_artifact_cache.py`：dead-process flock handoff、compiler-error waiter wake、orphan staging、rename-after-sync-failure 与 fork flight reset
+- 当前实现边界：PyPTO 没有 durable capacity ledger、reservation token、owner incarnation/epoch、phase journal、process-group terminal receipt、online reaper、physical census 或 runtime member lease；本文状态机是建议协议。
+- 新确认不变量：
+  1. lock release、owner fencing、physical closure 是三个独立事实；前两者都不能推出 no-more-write。
+  2. lease expiry 只触发 reaper claim；`BUILDING/PUBLISHING` reservation 在 writer terminal 与 physical census 前不能释放。
+  3. 每次 phase transition 绑定 `reservation_id + owner/reaper epoch + expected revision`；旧 owner 恢复后不能再修改 ledger。
+  4. private/staging path 绑定不可复用 reservation identity，shared destination 继续 no-replace publish，防 stale writer 跨 generation 覆盖。
+  5. rename 后即使 journal 尚未提交，也以完整 destination manifest/key/spec/digest 为恢复事实，将 reservation exactly-once 转为 shared + retained-private charge。
+  6. physical absence + revision CAS 才能进入 `RELEASED`；unknown writer 转 quarantine 并继续计费。
+- 具体演算：reservation `R77=96 MiB`、private 48 MiB、cache staging/final 48 MiB。GRANTED 前崩溃且 path absent 可直接 release；BUILDING 写 31 MiB 后崩溃先保留全额，再在 writer terminal 后转 31 MiB quarantine、物理删除并对账；rename 后 journal 丢失则从完整 destination manifest 恢复为 shared 48 + retained-private 48 MiB。
+- 直接测试事实：死进程释放 flock 并允许新 builder，但不证明 orphan bytes 清理；compiler exception 清空内存 flight；orphan staging 不命中；rename 后 parent sync 失败保留 private/shared 双份有效输出；fork child 不等待 parent flight。当前没有 durable lease/journal/reaper、stale-owner、double-reaper、crash-at-every-phase 或 NPU process-kill 测试。
+- ISA 知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；补齐 Host Artifact reservation 之后的 crash ownership、phase evidence 与 orphan reconcile。
+- 新知识债：durable record schema、heartbeat/expiry policy、journal fsync 边界、process-group completion adapter、runtime member lease、stale-owner file-write isolation、physical census、reaper fairness、双 reaper 与 fault-at-every-phase Golden。
+- 下一章：**Build Phase Journal 自己损坏怎么办——Torn Record、双槽 Manifest 与 Deterministic Replay。**
 
