@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 76 章沿 `public reset → secondary drain → primary reset → worker report fence → promotion reopen` 区分两个 writer 域。当前 main 已用 `_reset_fence` 修复 worker late DMA 与 secondary promotion 的同址竞争，但 P2P session close、shutdown immediate cancel、process restart 与 backend generation teardown 仍缺统一的 no-more-write receipt。下一章进入 multi-node region mirror，检查跨节点 worker 直写 head backing 的 generation ownership。
+- 当前主线：第 77 章从 main 的 multi-node fail-closed 拒绝出发，检查 open PR #62933 的 `remote GPU → Head CPU Region` writer 域。候选实现用 NIXL terminal state 复用既有 per-worker quorum，并把 timeout 划为 `COMPLETION_UNKNOWN` 后 fail-stop；但 owner crash、registration revoke receipt 与跨进程 mirror generation 仍未闭合。下一章研究 Head Region owner 崩溃后的旧 WRITE 撤销、generation 与 rebuild census。
 
 ## 已完成章节
 
@@ -89,6 +89,7 @@
 | 2026-11-02 74 | `promotion target → deferred release → late terminal → session-close asymmetry → restart-safe ownership` | [`ea836290`](https://github.com/vllm-project/vllm/commit/ea836290a7166f7d5b8efb1ae6ef1e2b2faa8b56) | [Session Close 不是复用凭证]({{ '/articles/vllm-p2p-session-close-consumer-slot-quarantine/' | relative_url }}) |
 | 2026-11-03 75 | `deferred chunk → capacity census → prepare_write(None) → MISS/recompute → observable release` | [`8cf12773`](https://github.com/vllm-project/vllm/commit/8cf1277362aef963a71cf6860c28387acf6ecb90) | [Quarantine Capacity 与 MISS Backpressure]({{ '/articles/vllm-quarantine-capacity-admission-backpressure/' | relative_url }}) |
 | 2026-11-04 76 | `public reset → secondary drain → primary reset → worker reset fence → promotion reopen` | [`d3fb7166`](https://github.com/vllm-project/vllm/commit/d3fb7166e0ac9db82158129face12ae28209757a) | [Drain Contract 与 Worker Fence]({{ '/articles/vllm-reset-drain-worker-fence-backing-retention/' | relative_url }}) |
+| 2026-11-05 77 | `main fail-closed → mirror topology → remote slot WRITE/READ → worker quorum → unknown-completion fail-stop` | [`46f36fa2`](https://github.com/vllm-project/vllm/commit/46f36fa294559d080edc61a09e5b57826218a2bf) | [Region Mirror 的 Job Fence]({{ '/articles/vllm-region-mirror-job-fence-timeout-generation-ownership/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2045,3 +2046,24 @@
 - 当前实现边界：main 已合入 [PR #62929](https://github.com/vllm-project/vllm/pull/62929) 的 worker fence；[PR #61667](https://github.com/vllm-project/vllm/pull/61667) 的 close 后持续 quarantine 与 rejected reset 截至研究时仍 open；[PR #62933](https://github.com/vllm-project/vllm/pull/62933) 的 multi-node region mirror 也仍 open，不能当作 main 保证。
 - 新知识债：P2P close 后持久 quarantine、结构化 `REJECTED_BUSY`、boot id、持久 writer census、backend teardown receipt、shutdown immediate-cancel 语义、same-address RDMA fault injection 与 backing-generation metrics。
 - 下一章：**跨节点 Worker 直接写 Head Region：Region Mirror 的 Job Fence、Timeout 与 Generation Ownership。**
+
+## 第 77 章课程账本增量
+
+- 日期：2026-11-05
+- 章节：**跨节点 Worker 直写 Head Region：Region Mirror 的 Job Fence、Timeout 与 Generation Ownership**
+- 源码基线：[`46f36fa2`](https://github.com/vllm-project/vllm/commit/46f36fa294559d080edc61a09e5b57826218a2bf)，为研究时默认分支最新提交；相对第 76 章基线前进 [110 个提交](https://github.com/vllm-project/vllm/compare/d3fb7166e0ac9db82158129face12ae28209757a...46f36fa294559d080edc61a09e5b57826218a2bf)，但本章直接涉及的 main 文件没有变化。
+- 课程位置：`multi-node fail-closed → mirror topology → Head/remote registration → slot-addressed NIXL WRITE/READ → per-worker quorum → terminal report / unknown-completion fail-stop`。
+- 新覆盖文件与符号：
+  - main：`vllm/v1/kv_offload/tiering/spec.py::_reject_workers_across_nodes`、`OffloadingConnectorWorker.register_kv_caches`、`TieringOffloadingSpec.create_worker`，以及 `tests/v1/kv_offload/test_factory.py::test_tiering_spec_rejects_secondary_tiers_across_nodes`。
+  - open PR #62933：`MirrorTopology`、`SlotLayout`、`RegionMirrorHead`、`RegionMirrorClient`、`RegionMirrorWorker`、`CopyPlanner`、`TensorRows`、`_Copy`、`slot_planners/attach_region_mirror`。
+- 新确认不变量：
+  1. 当前 main 在 secondary tiers 配置下对跨节点 TP/PP/PCP fail-closed；Region Mirror 尚未合入，不能写成 main 能力。
+  2. 一个 Head CPU row 由所有 worker 的不相交 slots 组成；完整性仍由 Scheduler 的 per-worker `pending_count` AND quorum 授权。
+  3. 远端 worker 的 NIXL `DONE/ERR` 是 terminal receipt，可生成 `TransferResult`；timeout 或非 terminal 异常只能进入 `COMPLETION_UNKNOWN` 并 fail-stop。
+  4. unknown WRITE 可能晚到已复用 Head chunk，unknown READ 可能覆盖已复用 GPU block；因此 timeout 不是地址复用 witness。
+  5. 活进程内保留 transfer/registration 可阻止误复用，但 owner 被杀后内存态 `_stuck` 与 handle census 消失，仍需跨进程 mirror generation。
+- 具体演算：两节点 TP=2，4 个 chunk；每 rank slot 64 KiB，row stride 128 KiB，`job_id=41` 的 `pending_count=2`。rank 0 本地写第一票，rank 1 将 GPU block 以 `NIXL WRITE` 写入 `head_base + 3×131072 + 65536` 后给第二票。只有两票齐全，secondary tier 才能读取完整 128 KiB row；timeout 不得先释放 chunk 3。
+- 测试事实：main 测试只证明 TP/PP/PCP 任一跨节点时拒绝，且无 secondary tier 时不查询；PR 测试覆盖 remote-slot write、GPU-block read、slot address、registration remap、terminal report、失败/卡死 transfer、load 优先、约 256 MiB 分段、layout mismatch 与 shutdown。PR 作者报告的 DGX Spark 带宽及 64k/200k 恢复属于实验事实，不是 main CI 契约。
+- 当前实现边界：截至研究时 [PR #62933](https://github.com/vllm-project/vllm/pull/62933) 仍 open、未合入；候选实现排除 DP、external multi-engine world group、canonical/replicated layout、KVCR 与异构 KV geometry，并依赖 NIXL/UCX。
+- 新知识债：PR 合入/API 漂移、真 GPUDirect RDMA 性能、Head 聚合带宽与公平性、Head/remote process kill、registration revoke receipt、boot/mirror generation、stuck transfer 节点 reset、same-address late-WRITE 故障注入、跨重启 physical writer census、DP/异构 geometry。
+- 下一章：**Head Region Owner 崩溃后谁撤销旧 WRITE——Mirror Generation、Remote Registration Revoke 与 Rebuild Census。**
