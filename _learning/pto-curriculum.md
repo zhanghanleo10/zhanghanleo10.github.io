@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-04。
+最后更新：2026-11-05。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 86 已将 reservation grant 后的 crash 窗口收束到 `owner lease/epoch → build phase journal → reservation-scoped path → orphan reaper → physical census → charge/release CAS`：`flock` 自动释放只证明新进程可进入 critical section，不证明旧 writer、残留 bytes 或 capacity effect 已闭合。当前实现仍无 durable ledger、reservation token、phase journal、online reaper 或 runtime member lease。下一步研究 journal 自身的 torn record、双槽 manifest 与 deterministic replay。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 87 以现有 Artifact Store 的 marker-last/no-replace publication 为事实基座，将建议的 Build Phase Journal 收束为 `dual immutable slots → canonical digest/previous_digest → owner/reaper epoch → physical manifest forward evidence → effect_id CAS`：`CURRENT` 仅是 hint，恢复必须独立验证 A/B，选择最高合法 revision；证据不足统一 quarantine。当前实现仍无 durable ledger、reservation token、phase journal、online reaper 或 runtime member lease。下一步研究 recovery queue 的 no-lost-wake、headroom 与 reaper fairness。
 
 ## 已完成章节
 
@@ -110,6 +110,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-02 | Quarantine Backoff、Dead-letter Garbage 与容量准入 | delete failure → backoff → dead-letter charged → physical reconcile → admission revision | [课程 84]({% post_url 2026-11-02-pypto-quarantine-backoff-dead-letter-capacity-admission %}) |
 | 2026-11-03 | Reservation Token、Physical Census Revision 与 Admission CAS | per-key leader → revisioned capacity CAS → private/staging peak → charge handoff → reconcile | [课程 85]({% post_url 2026-11-03-pypto-reservation-token-physical-census-admission-cas %}) |
 | 2026-11-04 | Reservation Owner Lease、Build Phase Journal 与 Orphan Reconcile | reservation CAS → owner epoch → phase journal → orphan census → charge/release CAS | [课程 86]({% post_url 2026-11-04-pypto-reservation-owner-lease-build-journal-orphan-reconcile %}) |
+| 2026-11-05 | Build Phase Journal 双槽恢复 | torn record → A/B validation → deterministic replay → manifest forward evidence → ledger CAS | [课程 87]({% post_url 2026-11-05-pypto-build-journal-dual-slot-torn-record-deterministic-replay %}) |
 
 ## ISA 知识地图
 
@@ -211,7 +212,7 @@ permalink: /learning/pto-curriculum/
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [d78561cc](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 Worker accepted-run drain、native completion fence 与 close-before-workspace-teardown，作为 ArtifactRuntime lease release 的下游证据 | 跨仓深挖 8 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [950a30ec](https://github.com/hw-native-sys/pypto/commit/950a30ec9a0f81b4f9d42fde778ac2ca9e2c82bc) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter，以及 per-key leader→filesystem resource-vector reservation→census/ledger revision CAS→charge handoff 边界 | 跨仓深挖 18 |
+| pypto | [396e1b6b](https://github.com/hw-native-sys/pypto/commit/396e1b6b447bc57802fb1ee573b6daae01b3f280) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter、reservation/reconcile，以及 completion manifest 与建议 dual-slot phase journal 的职责边界、torn-record validation、physical forward evidence、deterministic replay | 跨仓深挖 19 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -1741,4 +1742,30 @@ permalink: /learning/pto-curriculum/
 - ISA 知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；补齐 Host Artifact reservation 之后的 crash ownership、phase evidence 与 orphan reconcile。
 - 新知识债：durable record schema、heartbeat/expiry policy、journal fsync 边界、process-group completion adapter、runtime member lease、stale-owner file-write isolation、physical census、reaper fairness、双 reaper 与 fault-at-every-phase Golden。
 - 下一章：**Build Phase Journal 自己损坏怎么办——Torn Record、双槽 Manifest 与 Deterministic Replay。**
+
+## 第 87 章课程账本增量
+
+- 日期：2026-11-05
+- 章节：**Build Phase Journal 自己损坏怎么办：双槽 Manifest、Torn Record 与 Deterministic Replay**
+- 源码基线：PyPTO [`396e1b6b`](https://github.com/hw-native-sys/pypto/commit/396e1b6b447bc57802fb1ee573b6daae01b3f280)，为研究时默认分支最新提交；相对课程 86 前进 13 个提交，[比较结果](https://github.com/hw-native-sys/pypto/compare/39474d24d15383d0ba251dbeed8dc15ee49947f6...396e1b6b447bc57802fb1ee573b6daae01b3f280)中 PR #3270 改变 private build root 解析，但未加入 durable journal/reaper。
+- 所选仓库：仅 PyPTO。当前 artifact completion marker、publication transaction、private ownership 与恢复缺口可在一个仓内闭合。
+- 课程位置：`ArtifactStore marker-last publication → 建议 dual-slot BuildRecord → torn/stale-pointer validation → physical census → deterministic replay → ledger effect CAS`。
+- 新覆盖文件与符号：
+  - `python/pypto/jit/_artifact_manifest.py`：`make_manifest/_unique_object/read_manifest/encode_manifest`
+  - `python/pypto/jit/artifact_cache.py`：`_complete_staging/_rename_noreplace/lookup/_get_or_build/_publish`
+  - `python/pypto/jit/_persistent.py`：`PYPTO_PROG_BUILD_DIR` 与 private-root 解析变化
+  - `tests/ut/jit/test_artifact_cache.py`：invalid/malformed marker、orphan staging、no-replace、copy corruption、rename 后 parent-sync failure
+  - `docs/en/dev/09-artifact-store.md`、RFC #2653、PR #2723/#3270：immutable publication、offline cleanup 与 private-root 边界
+- 当前实现边界：PyPTO 已实现 canonical artifact manifest 与 marker-last/no-replace publication；没有 reservation BuildRecord、A/B record slots、`CURRENT` pointer、record digest chain、owner/reaper epoch、physical census、online reaper 或 capacity effect CAS。本文双槽状态机是建议协议。
+- 新确认不变量：
+  1. artifact completion marker 与 build phase journal 是两个不同抽象；前者证明 immutable payload，后者证明 ownership、phase 与 ledger effect。
+  2. `CURRENT` 只是 hint；恢复必须独立验证 A/B 的 schema、canonical digest、identity、revision、previous-digest chain、epoch 与合法 transition。
+  3. 较高 revision 只有在链接上一有效 record 时才获胜；同 revision 不同内容、断链或两槽都坏必须 quarantine。
+  4. final slot 只有通过现有 `read_manifest(key,spec)` 才能作为 crash-after-rename 的 forward evidence，把滞后 journal 单调推进到 PUBLISHED。
+  5. ledger charge/release 是独立副作用，必须以稳定 `effect_id` 和 expected revision CAS；重复 replay 不得重复计费或释放。
+  6. mtime、PID 存活、目录枚举顺序与单独 path existence 都不能成为恢复 tie-break。
+- 测试事实：现有 UT 已覆盖 completion marker 的 missing/changed/extra/malformed/duplicate damage、orphan staging/empty final、copy corruption、no-replace 与 rename 后 parent-fsync failure；尚无 phase journal codec、A/B/CURRENT crash matrix、双 reaper 或 ledger replay 测试。
+- ISA 知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；补齐 Host Artifact durability 与 recovery evidence。
+- 新知识债：record schema/canonical encoder、slot replace 的 fsync 协议、fault-at-every-boundary Golden、reaper claim、physical identity verifier、ledger effect API、tombstone/compaction、runtime/native terminal adapter。
+- 下一章：**Journal 恢复后谁唤醒等待者——Recovery Queue、No-lost-wake 与 Reaper Fairness。**
 
