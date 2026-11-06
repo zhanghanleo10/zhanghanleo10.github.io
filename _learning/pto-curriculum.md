@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-05。
+最后更新：2026-11-06。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 87 以现有 Artifact Store 的 marker-last/no-replace publication 为事实基座，将建议的 Build Phase Journal 收束为 `dual immutable slots → canonical digest/previous_digest → owner/reaper epoch → physical manifest forward evidence → effect_id CAS`：`CURRENT` 仅是 hint，恢复必须独立验证 A/B，选择最高合法 revision；证据不足统一 quarantine。当前实现仍无 durable ledger、reservation token、phase journal、online reaper 或 runtime member lease。下一步研究 recovery queue 的 no-lost-wake、headroom 与 reaper fairness。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 88 以现有 `_BuildFlights` Future、persistent `flock` 与 immutable publication 为事实基座，将建议的 recovery path 收束为 `durable revision → observe/subscribe/reload → READY/BLOCKED prerequisite → epoch/revision claim → idempotent effect CAS → notification hint`：唤醒只提示重新读取 canonical state，不能替代状态；blocked orphan 不占 runnable queue head，eligible recovery work 以 oldest-runnable、有限绕过和 recovery headroom 获得条件性进展。当前实现仍无 durable ledger、phase journal、recovery queue、online reaper、revision watch 或 runtime member lease。下一步研究 recovery backlog 的 watermark、incremental scan 与 journal compaction。
 
 ## 已完成章节
 
@@ -111,6 +111,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-03 | Reservation Token、Physical Census Revision 与 Admission CAS | per-key leader → revisioned capacity CAS → private/staging peak → charge handoff → reconcile | [课程 85]({% post_url 2026-11-03-pypto-reservation-token-physical-census-admission-cas %}) |
 | 2026-11-04 | Reservation Owner Lease、Build Phase Journal 与 Orphan Reconcile | reservation CAS → owner epoch → phase journal → orphan census → charge/release CAS | [课程 86]({% post_url 2026-11-04-pypto-reservation-owner-lease-build-journal-orphan-reconcile %}) |
 | 2026-11-05 | Build Phase Journal 双槽恢复 | torn record → A/B validation → deterministic replay → manifest forward evidence → ledger CAS | [课程 87]({% post_url 2026-11-05-pypto-build-journal-dual-slot-torn-record-deterministic-replay %}) |
+| 2026-11-06 | Recovery Queue、No-lost-wake 与 Reaper Fairness | journal replay → READY/BLOCKED prerequisite → epoch claim → effect CAS → revision wakeup | [课程 88]({% post_url 2026-11-06-pypto-recovery-queue-no-lost-wake-reaper-fairness %}) |
 
 ## ISA 知识地图
 
@@ -204,6 +205,7 @@ permalink: /learning/pto-curriculum/
 | Artifact schema / legacy migration | 当前 artifact schema 进入 `ArtifactKey` digest并以新 slot clean miss；single-chip compiled metadata 只对可唯一解释的 schema 1/2 program-only 语义兼容，kernel capability fail closed。legacy `enable_sdma` 不足以推出 ABI/scope/operations，必须重编译 | 真实迁移先例与最小协议已讲透；ResourceRequirements codec、migration registry、slot GC 待实现 |
 | Artifact lifecycle / eviction | 当前 GENERATED/READY 是独立 immutable stage；fresh build/READY promotion 可留下 private tree，`ArtifactBuild` 无 automatic cleanup，object cache/`ArtifactRuntime._chips`/Worker registration 延长 lifetime。safe delete 先满足 lease/flight/native terminal，再按 `instance nonce + reaper_generation` tombstone；删除失败进入 backoff/dead-letter 但仍全额计费，只有 physical absence + `charge_id` CAS 才推进 capacity revision | 当前实现仍无 online cleanup；lease/refcount/reaper、durable charge/dead-letter ledger、physical census、atomic admission 与 fault Golden 待实现 |
 | Artifact admission / quota | 当前 `_BuildFlights` 与 persistent per-key `flock` 合并同 key request，但测试明确允许不同 key 并发；共享容量必须以 `committed+reserved<=quota` 为硬不变量，reservation 在 builder 前取得，actual manifest 后 reconcile，crash-after-rename 由 key-fenced recovery 判定 final/释放 | 协议边界已讲透；durable ledger、BuildIntent、size estimator、revision wakeup 与 fault Golden 待实现 |
+| Artifact recovery queue / wakeup | 当前 `_BuildFlights` Future 只覆盖进程内 cohort，persistent `flock` 只授权跨进程重新检查；跨 crash progress 需要 canonical record + monotonic revision，waiter 以 observe-subscribe-reload 防丢唤醒。建议 `RecoveryTask` 由稳定 identity 去重，以 reaper epoch + expected revision claim；BLOCKED 按 prerequisite 等待，READY 再做 oldest-runnable 与有限绕过 | 当前没有 journal/reaper/revision watch；durable task schema、runtime terminal adapter、recovery headroom、fairness 与 fault Golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
@@ -212,7 +214,7 @@ permalink: /learning/pto-curriculum/
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [d78561cc](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 Worker accepted-run drain、native completion fence 与 close-before-workspace-teardown，作为 ArtifactRuntime lease release 的下游证据 | 跨仓深挖 8 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [396e1b6b](https://github.com/hw-native-sys/pypto/commit/396e1b6b447bc57802fb1ee573b6daae01b3f280) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter、reservation/reconcile，以及 completion manifest 与建议 dual-slot phase journal 的职责边界、torn-record validation、physical forward evidence、deterministic replay | 跨仓深挖 19 |
+| pypto | [6d0ac8b5](https://github.com/hw-native-sys/pypto/commit/6d0ac8b5a1c1407a5b8b425c6b4ec4ffa1aadb52) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter、reservation/reconcile、dual-slot journal，以及 recovery task identity、revision watch、READY/BLOCKED prerequisite、epoch claim 与 reaper fairness | 跨仓深挖 20 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -1768,4 +1770,32 @@ permalink: /learning/pto-curriculum/
 - ISA 知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；补齐 Host Artifact durability 与 recovery evidence。
 - 新知识债：record schema/canonical encoder、slot replace 的 fsync 协议、fault-at-every-boundary Golden、reaper claim、physical identity verifier、ledger effect API、tombstone/compaction、runtime/native terminal adapter。
 - 下一章：**Journal 恢复后谁唤醒等待者——Recovery Queue、No-lost-wake 与 Reaper Fairness。**
+
+## 第 88 章课程账本增量
+
+- 日期：2026-11-06
+- 章节：**Journal 恢复后谁唤醒等待者：PyPTO Recovery Queue、No-lost-wake 与 Reaper Fairness**
+- 源码基线：PyPTO [`6d0ac8b5`](https://github.com/hw-native-sys/pypto/commit/6d0ac8b5a1c1407a5b8b425c6b4ec4ffa1aadb52)，为研究时默认分支最新提交；相对课程 87 前进 [8 个提交](https://github.com/hw-native-sys/pypto/compare/396e1b6b447bc57802fb1ee573b6daae01b3f280...6d0ac8b5a1c1407a5b8b425c6b4ec4ffa1aadb52)。最新 PR [#3294](https://github.com/hw-native-sys/pypto/pull/3294) 是 cast/predicate selection 的 Buffer IR lowering；比较结果未改动 Artifact Store、persistent JIT、`ArtifactRuntime` 或直接测试。
+- 所选仓库：仅 PyPTO。现有 Future coalescing、persistent `flock`、immutable publication、private retention 和直接测试足以界定 durable recovery/wakeup 的缺口，无需提前进入 PTOAS 或 serving。
+- 课程位置：`journal deterministic replay → RecoveryTask READY/BLOCKED → epoch + expected-revision claim → physical/ledger effect CAS → canonical revision commit → notify hint → waiter full reload`。
+- 新覆盖文件与符号：
+  - `python/pypto/jit/artifact_cache.py`：`_BuildFlights.run/reset`、`ArtifactStore.get_or_build/_get_or_build/_publish`
+  - `python/pypto/jit/_fslock.py`：`file_lock` 的 blocking `fcntl.flock`、process-exit release 与无 durable revision 边界
+  - `python/pypto/runtime/_artifact_runtime.py`：`ArtifactRuntime.load/directory/_chips` 的 private READY retention
+  - `docs/en/dev/09-artifact-store.md`：per-key process-wide dedupe、offline-only cleanup 与无 eviction/recovery queue 边界
+  - `tests/ut/jit/test_artifact_cache.py`：thread Future、compiler-error broadcast、fork reset、different-key concurrency、spawn/flock handoff
+- 当前实现边界：PyPTO 只有进程内 `_BuildFlights` Future 与 kernel-managed persistent `flock`；没有 durable phase journal、RecoveryTask、revision watch、online reaper、capacity ledger、recovery headroom 或 runtime member lease。本章的 task schema、wait protocol 与 scheduler 均为建议协议。
+- 新确认不变量：
+  1. Future、condition variable、socket/eventfd/inotify notification 与 `flock` 都是易失协调；它们只提示重新检查，不能替代 canonical state。
+  2. no-lost-wake 的最小协议是 `load(rev r) → subscribe(identity,r) → reload canonical state`；commit 必须先 durable 推进 revision，再 best-effort notify，断线后以 revision/full scan 补偿。
+  3. `RecoveryTask.task_id` 必须由 artifact/reservation identity、source revision 与 target action 稳定派生；reaper result 绑定 claim epoch + expected record revision，旧 generation 不能提交新状态。
+  4. READY 与 BLOCKED 必须先按 prerequisite 分离；仍有 runtime lease、writer terminal 或 cleanup reserve 条件未满足的 task 不占 runnable head。公平性只在持续 eligible、资源最终可用且 reaper 持续运行的条件下成立。
+  5. recovery reserve/headroom 必须与新 admission 隔离；否则容量满时 cleanup 自己也无法启动，形成永久死锁。
+  6. waiter 被唤醒后重新执行完整 lookup/admission/runtime 判定；单个 waiter 取消只移除其 subscription，默认不取消仍服务其他 waiter 或容量回收的共享 task。
+- 具体演算：A/R77 rev18 为 metadata-only `VERIFY_FINAL`，B/R78 rev31 为 96 MiB READY `DELETE_PRIVATE`，C/R79 rev12 为 512 MiB 但 runtime lease active 的 BLOCKED task。reaper epoch 5 将 A 提交 rev19=PUBLISHED 后在 notify 前崩溃；W_A 以 observed rev18 订阅并 reload 看到 rev19，仍立即 HIT。C 不占 runnable head，B 先删除并以稳定 effect id 对账；C 在 lease terminal 后重新进入 READY，且持续 eligible 时受 aging/有限绕过保护。
+- 直接测试事实：4 thread 同 key只 build一次；leader exception/cancel会向4个 Future waiter广播且允许重试；fork child重置父进程 flight；3个spawn process同 key得到1 PUBLISHED/2 HIT；dead process释放同一lock inode。当前没有 commit-before-notify kill、observe/subscribe race、duplicate/out-of-order notify、ABA、double reaper claim、blocked-head、large-task starvation、runtime-lease requeue或delete-before-ledger故障测试。
+- ISA知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；新增 Host Artifact recovery queue/wakeup 条目，补齐 crash recovery 的 progress 与 fairness 边界。
+- 新知识债：durable `RecoveryTask`/claim schema、revision watch transport、reconnect/full-scan index、runtime/native terminal adapter、cleanup reserve、cost estimator、aging参数、task/result compaction、跨文件系统语义、双reaper故障注入与真机NPU process-group retirement。
+- 下一章：**Recovery Queue 越积越多怎么办——Backlog Watermark、Incremental Scan 与 Journal Compaction。**
+
 
