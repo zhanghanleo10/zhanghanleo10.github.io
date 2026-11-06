@@ -86,14 +86,13 @@ rank census = (rank, last_submitted, last_terminal,
 shape/dtype 也有明确边界：Region 是 Host `uint8` byte view，逻辑 shape 为 `[num_chunks, row_stride_bytes]`；remote copy descriptors 是一组 `(address, size, device)`，不携带 KV tensor的 dtype/shape语义。因而恢复层不能从一段长度正确的 bytes反推“这个 chunk完整且属于哪个 key”，必须依赖 job quorum与 namespace metadata。
 
 ```mermaid
-stateDiagram-v2
-    [*] --> ACTIVE
-    ACTIVE --> FENCING: owner crash
-    FENCING --> QUARANTINED: revoke unknown
-    FENCING --> REVOKED: no-old-writer witness
-    REVOKED --> REBUILDING: fresh backing
-    QUARANTINED --> REBUILDING: reset or isolate old pages
-    REBUILDING --> ACTIVE: rank census and data rebuild
+flowchart TD
+    A["ACTIVE generation g"] -->|"owner crash"| F["FENCING"]
+    F -->|"revoke unknown"| Q["QUARANTINED"]
+    F -->|"no-old-writer witness"| R["REVOKED"]
+    Q -->|"reset or isolate old pages"| B["REBUILDING"]
+    R -->|"fresh backing"| B
+    B -->|"rank census and data rebuild"| N["ACTIVE generation g+1"]
 ```
 
 生命周期的硬不变量是：**generation `g+1` 不得开放 chunk，也不得让 allocator 复用旧物理页，直到系统证明 generation `g` 的每个 writer 已经不可能提交或完成 WRITE。** generation tag 可以丢弃迟到 report，却不能让已经下发到 NIC 的 DMA 消失。
