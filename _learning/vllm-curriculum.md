@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 77 章从 main 的 multi-node fail-closed 拒绝出发，检查 open PR #62933 的 `remote GPU → Head CPU Region` writer 域。候选实现用 NIXL terminal state 复用既有 per-worker quorum，并把 timeout 划为 `COMPLETION_UNKNOWN` 后 fail-stop；但 owner crash、registration revoke receipt 与跨进程 mirror generation 仍未闭合。下一章研究 Head Region owner 崩溃后的旧 WRITE 撤销、generation 与 rebuild census。
+- 当前主线：第 78 章把 Region Mirror 从活进程内 fail-stop 推进到 Head owner crash/restart：generation tag 只能拒绝旧控制消息，复用 destination pages 还需要 `no-old-writer` 的 registration revoke/reset witness；新一代 activation 还必须闭合 expected-rank census 与数据重建来源。下一章研究 generation 切换后的 late `TransferResult`、job sequence ABA 与 Scheduler quorum rebuild。
 
 ## 已完成章节
 
@@ -90,6 +90,7 @@
 | 2026-11-03 75 | `deferred chunk → capacity census → prepare_write(None) → MISS/recompute → observable release` | [`8cf12773`](https://github.com/vllm-project/vllm/commit/8cf1277362aef963a71cf6860c28387acf6ecb90) | [Quarantine Capacity 与 MISS Backpressure]({{ '/articles/vllm-quarantine-capacity-admission-backpressure/' | relative_url }}) |
 | 2026-11-04 76 | `public reset → secondary drain → primary reset → worker reset fence → promotion reopen` | [`d3fb7166`](https://github.com/vllm-project/vllm/commit/d3fb7166e0ac9db82158129face12ae28209757a) | [Drain Contract 与 Worker Fence]({{ '/articles/vllm-reset-drain-worker-fence-backing-retention/' | relative_url }}) |
 | 2026-11-05 77 | `main fail-closed → mirror topology → remote slot WRITE/READ → worker quorum → unknown-completion fail-stop` | [`46f36fa2`](https://github.com/vllm-project/vllm/commit/46f36fa294559d080edc61a09e5b57826218a2bf) | [Region Mirror 的 Job Fence]({{ '/articles/vllm-region-mirror-job-fence-timeout-generation-ownership/' | relative_url }}) |
+| 2026-11-06 78 | `head owner crash → generation fence → registration revoke census → fresh backing → rebuild activation` | [`70455184`](https://github.com/vllm-project/vllm/commit/7045518494fdf62472947e38fdbe9367ecbd1b71) | [Mirror Generation 与 Rebuild Census]({{ '/articles/vllm-mirror-generation-registration-revoke-rebuild-census/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2067,3 +2068,25 @@
 - 当前实现边界：截至研究时 [PR #62933](https://github.com/vllm-project/vllm/pull/62933) 仍 open、未合入；候选实现排除 DP、external multi-engine world group、canonical/replicated layout、KVCR 与异构 KV geometry，并依赖 NIXL/UCX。
 - 新知识债：PR 合入/API 漂移、真 GPUDirect RDMA 性能、Head 聚合带宽与公平性、Head/remote process kill、registration revoke receipt、boot/mirror generation、stuck transfer 节点 reset、same-address late-WRITE 故障注入、跨重启 physical writer census、DP/异构 geometry。
 - 下一章：**Head Region Owner 崩溃后谁撤销旧 WRITE——Mirror Generation、Remote Registration Revoke 与 Rebuild Census。**
+
+## 第 78 章课程账本增量
+
+- 日期：2026-11-06
+- 章节：**Head Region Owner 崩溃后谁撤销旧 WRITE：Mirror Generation、Registration Revoke 与 Rebuild Census**
+- 源码基线：[`70455184`](https://github.com/vllm-project/vllm/commit/7045518494fdf62472947e38fdbe9367ecbd1b71)，为研究时默认分支最新提交；相对第 77 章基线前进 [103 个提交](https://github.com/vllm-project/vllm/compare/46f36fa294559d080edc61a09e5b57826218a2bf...7045518494fdf62472947e38fdbe9367ecbd1b71)，本章直接涉及的 main 文件未变化。开放 [PR #62933](https://github.com/vllm-project/vllm/pull/62933) 仍未合入，候选 head 仍为 [`79be207e`](https://github.com/javieratomic/vllm/commit/79be207ed311c8f05e20c63872f7e40df7e3ccc6)。
+- 课程位置：`main fail-closed → Head owner crash → freeze/quarantine → generation claim → no-old-writer witness → fresh backing → expected-rank rebuild census → activation`。
+- 新覆盖文件与符号：
+  - main：`vllm/v1/kv_offload/cpu/shared_offload_region.py::_wait_for_file_size/SharedOffloadRegion.__init__/cleanup`、`vllm/v1/kv_offload/tiering/spec.py::TieringOffloadingSpec.create_worker/_reject_workers_across_nodes`。
+  - open PR #62933：`MirrorTopology`、`RegionMirrorHead.__init__/shutdown`、`RegionMirrorClient.unregister_kv_caches/restore_kv_caches/shutdown`、`RegionMirrorWorker.shutdown`、`attach_region_mirror`。
+- 新确认不变量：
+  1. 当前 main 仍在 CPU region 分配前拒绝 multi-node secondary tiers；Region Mirror 与在线恢复都不是 main 能力。
+  2. `generation` 只能拒绝旧 report/control state，不能撤回已经下发到 NIC 的 WRITE；destination page 复用需要可验证的 registration revoke/reset witness，或永久隔离旧页。
+  3. fresh pathname、fresh agent metadata、fresh process 与不同 virtual address 均不是单独充分条件；充分条件是旧 writer 物理失权或旧 physical destination 永不复用。
+  4. `SharedOffloadRegion` joiner 只验证 file size，不验证 generation/boot/inode；native buffer仍导出时 cleanup主动保留 mapping，直接证明地址复用与 writer生命周期耦合。
+  5. 新 generation 激活前必须收齐 expected-rank census，区分 last submitted/terminal/unknown job，并为每个可见 chunk给出 durable source或重算来源。
+- 具体演算：两节点 TP=2，4 个 chunk；每 rank slot 64 KiB、row stride 128 KiB。generation 7 的 `job_id=41` 对 chunk 3 已有 rank 0 terminal，rank 1 NIXL WRITE unknown；Head owner crash 后，generation 8 不能因同名 512 KiB backing 或新 agent注册成功就复用 chunk 3。必须先冻结/隔离 generation 7，获取 no-old-writer witness，创建不同 region identity，收齐 ranks `{0,1}` census；job 41 未达两票，不能从旧 RAM bytes publish，只能由已 durable secondary entry恢复或重算。
+- 测试事实：main 的 barrier+unlink SIGKILL 测试只证明该构造方式不泄漏 pathname，不含 NIXL writer；PR 的 clean unregister/restore与 stuck transfer 测试证明受控 remap和进程内 fail-stop，不覆盖 Head kill、同 engine ID重启、inode/address复用、旧 WRITE跨 generation迟到或 backend revoke receipt。
+- 建议测试：在 `initialize_xfer/transfer/check/release/deregister` 各边界杀 Head；注入 same-address late WRITE、旧/重复 report、missing-rank census和 revoke error；没有 no-old-writer witness时必须 fail-stop或保留旧页，不能激活新 generation。
+- 新知识债：NIXL/UCX remote crash与 deregistration completion契约、durable generation store/supervisor、两代 region峰值内存、真实 GDR late-DMA注入、DP/异构 PP geometry、PR合入/API漂移。
+- 下一章：**Generation 已切换但旧 Report 迟到怎么办——Job Sequence、Late Completion Fence 与 Scheduler Quorum Rebuild。**
+
