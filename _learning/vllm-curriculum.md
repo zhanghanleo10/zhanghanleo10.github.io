@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 78 章把 Region Mirror 从活进程内 fail-stop 推进到 Head owner crash/restart：generation tag 只能拒绝旧控制消息，复用 destination pages 还需要 `no-old-writer` 的 registration revoke/reset witness；新一代 activation 还必须闭合 expected-rank census 与数据重建来源。下一章研究 generation 切换后的 late `TransferResult`、job sequence ABA 与 Scheduler quorum rebuild。
+- 当前主线：第 79 章从 main 已合入的进程内 `_stale_job_threshold + _reset_fence` 出发，证明它不能直接覆盖 Scheduler crash/restart：整数 `job_id` 会跨 boot 发生 ABA，匿名 completion count 不能按 rank 去重。跨重启的最小控制面身份是 `(generation, job_seq, worker_rank)`，并须绑定 destination identity；下一章研究 durable job ledger、unknown transfer quarantine 与 retired-generation compaction。
 
 ## 已完成章节
 
@@ -91,6 +91,7 @@
 | 2026-11-04 76 | `public reset → secondary drain → primary reset → worker reset fence → promotion reopen` | [`d3fb7166`](https://github.com/vllm-project/vllm/commit/d3fb7166e0ac9db82158129face12ae28209757a) | [Drain Contract 与 Worker Fence]({{ '/articles/vllm-reset-drain-worker-fence-backing-retention/' | relative_url }}) |
 | 2026-11-05 77 | `main fail-closed → mirror topology → remote slot WRITE/READ → worker quorum → unknown-completion fail-stop` | [`46f36fa2`](https://github.com/vllm-project/vllm/commit/46f36fa294559d080edc61a09e5b57826218a2bf) | [Region Mirror 的 Job Fence]({{ '/articles/vllm-region-mirror-job-fence-timeout-generation-ownership/' | relative_url }}) |
 | 2026-11-06 78 | `head owner crash → generation fence → registration revoke census → fresh backing → rebuild activation` | [`70455184`](https://github.com/vllm-project/vllm/commit/7045518494fdf62472947e38fdbe9367ecbd1b71) | [Mirror Generation 与 Rebuild Census]({{ '/articles/vllm-mirror-generation-registration-revoke-rebuild-census/' | relative_url }}) |
+| 2026-11-07 79 | `TransferResult → anonymous count → reset fence → generation/job-seq/rank receipt → quorum rebuild` | [`8176238c`](https://github.com/vllm-project/vllm/commit/8176238c97f982ddc266e8bacb2aca9e11926af7) | [Late Completion Fence 与 Quorum Rebuild]({{ '/articles/vllm-job-sequence-late-completion-fence-scheduler-quorum-rebuild/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2089,4 +2090,27 @@
 - 建议测试：在 `initialize_xfer/transfer/check/release/deregister` 各边界杀 Head；注入 same-address late WRITE、旧/重复 report、missing-rank census和 revoke error；没有 no-old-writer witness时必须 fail-stop或保留旧页，不能激活新 generation。
 - 新知识债：NIXL/UCX remote crash与 deregistration completion契约、durable generation store/supervisor、两代 region峰值内存、真实 GDR late-DMA注入、DP/异构 PP geometry、PR合入/API漂移。
 - 下一章：**Generation 已切换但旧 Report 迟到怎么办——Job Sequence、Late Completion Fence 与 Scheduler Quorum Rebuild。**
+
+## 第 79 章课程账本增量
+
+- 日期：2026-11-07
+- 章节：**Generation 已切换但旧 Report 迟到怎么办：Job Sequence、Late Completion Fence 与 Scheduler Quorum Rebuild**
+- 源码基线：[`8176238c`](https://github.com/vllm-project/vllm/commit/8176238c97f982ddc266e8bacb2aca9e11926af7)，为研究时默认分支最新提交；相对第 78 章基线前进 [103 个提交](https://github.com/vllm-project/vllm/compare/7045518494fdf62472947e38fdbe9367ecbd1b71...8176238c97f982ddc266e8bacb2aca9e11926af7)，本章直接分析的 completion/quorum/reset-fence 文件未发生语义变化。开放 [PR #62933](https://github.com/vllm-project/vllm/pull/62933) 仍未合入，候选实现的 `TransferResult` 仍只有整数 `job_id`。
+- 课程位置：`worker terminal → TransferResult(job_id) → per-worker metadata → anonymous count aggregate → pending_count/reset fence → generation-aware rank quorum rebuild`。
+- 新覆盖文件与符号：
+  - `vllm/v1/kv_offload/base.py::TransferResult/OffloadingWorker.get_finished/wait`。
+  - `offloading/common.py::OffloadingWorkerMetadata.mark_completed/aggregate`、`offloading/worker.py::OffloadingConnectorWorker.get_finished/build_connector_worker_meta`。
+  - `offloading/scheduler.py::TransferJobStatus/SchedulerOffloadConfig.num_workers/_generate_job_id/_update_connector_output/_reset_cache/has_pending_push_work`。
+  - `tiering/manager.py::reset_cache/on_reset_flushed/lookup`，以及直接测试 `test_cache_reset_holds_promotions_until_flushed_jobs_report/test_cache_reset_fence_ignores_reports_of_other_jobs`。
+- 新确认不变量：
+  1. 当前 `_job_counter` 仅在单 Scheduler进程内单调；重启后从 0 开始，不能区分旧/新 generation同号 job。
+  2. `completed_jobs: dict[int,int]` 聚合后只保留票数，不保留 worker rank；它只在固定 worker set、每 rank每 job至多 drain一次的正常路径中等价于 quorum。
+  3. `_stale_job_threshold + _reset_fence` 正确隔离同进程 reset前后的 effect，并在欠票归零前保持 promotion held；它不是 durable restart ledger。
+  4. 跨重启最小逻辑 identity 至少为 `(generation, job_seq, worker_rank)`，同 rank同结果重复必须幂等，冲突结果或未来 generation必须 fail closed。
+  5. report quorum只证明软件终态；destination page复用仍需物理 `no-old-writer` witness。receipt generation与 writer revoke不可互相替代。
+- 具体演算：两节点 TP=2、每 rank slot 64 KiB、row 128 KiB。generation 7/job 41已有 rank 0 terminal、rank 1 WRITE unknown；Scheduler重启到 generation 8 后，旧 rank 1 report不能计入新 `(8,0)`。rank 0 对 `(8,0)` 重放两次仍只算一票，只有 rank 1 的当前代 receipt到达才闭合 `{0,1}`；旧 `(7,41,1)` 只允许关闭 retired fence，且必须绑定旧 destination identity。
+- 测试事实：main 测试覆盖 reset后 idle stepping、promotion held、精确 job fence、其他旧 job迟到重复票、无 in-flight reset、重复 reset与超时 warning；没有覆盖进程重启、job-id ABA、同 rank重复/冲突票、future generation、rank census或物理 writer revoke。PR #62933 的 terminal/stuck transfer测试也未覆盖跨 boot identity。
+- 建议协议/测试：`JobKey=(engine_boot_id|mirror_generation, job_seq)`；receipt携带 `worker_rank/attempt/outcome/destination_identity/terminal_epoch`；job record持久化 expected/completed/failed rank set。故障注入覆盖 submit、单 rank terminal、aggregate、reset-fence转移和 Scheduler crash，oracle要求旧代不改当前 quorum、重复 rank不增票、缺 rank不完成、冲突 fail-stop、无 writer witness不复用 row。
+- 新知识债：durable ledger/WAL schema与批量 fsync、generation authority、rank census RPC、topology变化、unknown transfer quarantine、retired-generation watermark/compaction、NIXL/UCX重启后 terminal/revoke契约及真机 same-address late-WRITE。
+- 下一章：**Job Ledger 不能无限增长——Unknown Transfer Quarantine、Retired Generation Watermark 与 Crash-safe Compaction。**
 
