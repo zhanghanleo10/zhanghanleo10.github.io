@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 79 章从 main 已合入的进程内 `_stale_job_threshold + _reset_fence` 出发，证明它不能直接覆盖 Scheduler crash/restart：整数 `job_id` 会跨 boot 发生 ABA，匿名 completion count 不能按 rank 去重。跨重启的最小控制面身份是 `(generation, job_seq, worker_rank)`，并须绑定 destination identity；下一章研究 durable job ledger、unknown transfer quarantine 与 retired-generation compaction。
+- 当前主线：第 80 章从 main 已合入的进程内 `_stale_job_threshold + _reset_fence` 出发，区分 ledger history 与危险 destination debt：unknown transfer 可以被 immutable snapshot吸收、退出热日志，但在 scoped no-old-writer witness到达前必须保留 destination identity、quarantine capacity charge 与禁止复用责任。安全 compaction cutoff 是 receipt/effect/physical/reader frontiers 的交集；下一章研究 backend reset/revoke certificate怎样关闭 quarantine并释放容量。
 
 ## 已完成章节
 
@@ -92,6 +92,7 @@
 | 2026-11-05 77 | `main fail-closed → mirror topology → remote slot WRITE/READ → worker quorum → unknown-completion fail-stop` | [`46f36fa2`](https://github.com/vllm-project/vllm/commit/46f36fa294559d080edc61a09e5b57826218a2bf) | [Region Mirror 的 Job Fence]({{ '/articles/vllm-region-mirror-job-fence-timeout-generation-ownership/' | relative_url }}) |
 | 2026-11-06 78 | `head owner crash → generation fence → registration revoke census → fresh backing → rebuild activation` | [`70455184`](https://github.com/vllm-project/vllm/commit/7045518494fdf62472947e38fdbe9367ecbd1b71) | [Mirror Generation 与 Rebuild Census]({{ '/articles/vllm-mirror-generation-registration-revoke-rebuild-census/' | relative_url }}) |
 | 2026-11-07 79 | `TransferResult → anonymous count → reset fence → generation/job-seq/rank receipt → quorum rebuild` | [`8176238c`](https://github.com/vllm-project/vllm/commit/8176238c97f982ddc266e8bacb2aca9e11926af7) | [Late Completion Fence 与 Quorum Rebuild]({{ '/articles/vllm-job-sequence-late-completion-fence-scheduler-quorum-rebuild/' | relative_url }}) |
+| 2026-11-08 80 | `durable job ledger → unknown quarantine → vector watermark → snapshot manifest CAS → segment GC` | [`fd8f3f39`](https://github.com/vllm-project/vllm/commit/fd8f3f398e0b720f58a682edf2888549cea71451) | [Job Ledger 的 Crash-safe Compaction]({{ '/articles/vllm-job-ledger-unknown-transfer-quarantine-retired-generation-compaction/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2113,4 +2114,36 @@
 - 建议协议/测试：`JobKey=(engine_boot_id|mirror_generation, job_seq)`；receipt携带 `worker_rank/attempt/outcome/destination_identity/terminal_epoch`；job record持久化 expected/completed/failed rank set。故障注入覆盖 submit、单 rank terminal、aggregate、reset-fence转移和 Scheduler crash，oracle要求旧代不改当前 quorum、重复 rank不增票、缺 rank不完成、冲突 fail-stop、无 writer witness不复用 row。
 - 新知识债：durable ledger/WAL schema与批量 fsync、generation authority、rank census RPC、topology变化、unknown transfer quarantine、retired-generation watermark/compaction、NIXL/UCX重启后 terminal/revoke契约及真机 same-address late-WRITE。
 - 下一章：**Job Ledger 不能无限增长——Unknown Transfer Quarantine、Retired Generation Watermark 与 Crash-safe Compaction。**
+
+## 第 80 章课程账本增量
+
+- 日期：2026-11-08
+- 章节：**Job Ledger 不能无限增长：Unknown Transfer Quarantine、Retired Generation Watermark 与 Crash-safe Compaction**
+- 源码基线：[`fd8f3f39`](https://github.com/vllm-project/vllm/commit/fd8f3f398e0b720f58a682edf2888549cea71451)，为研究时默认分支最新提交；相对第 79 章基线前进 [34 个提交](https://github.com/vllm-project/vllm/compare/8176238c97f982ddc266e8bacb2aca9e11926af7...fd8f3f398e0b720f58a682edf2888549cea71451)。直接涉及的 offloading Scheduler、metadata、tiering manager 与测试均未变化。开放 [PR #62933](https://github.com/vllm-project/vllm/pull/62933) 仍未合入。
+- 课程位置：`public reset → in-memory reset fence → generation-aware durable ledger → unknown quarantine → vector watermark → immutable snapshot/manifest CAS → reader-safe segment GC`。
+- 新覆盖文件与符号：
+  - `vllm/entrypoints/llm.py`、`vllm/v1/engine/llm_engine.py`、`vllm/v1/engine/core.py`、`vllm/v1/core/sched/scheduler.py`：public `reset_prefix_cache(reset_connector=True)` 到 connector reset。
+  - `offloading/scheduler.py`：`TransferJobStatus/_generate_job_id/_reset_cache/_update_connector_output/_RESET_FENCE_WARN_S/has_pending_push_work`。
+  - `offloading/common.py`：`OffloadingWorkerMetadata.mark_completed/aggregate`。
+  - `tiering/manager.py`：`reset_cache/on_reset_flushed/_promotions_held` 与 CPU-primary deferred-release约束。
+  - `test_scheduler.py`：promotion hold、精确旧 job fence、无 in-flight reset、连续 reset 与 60 秒 warning。
+- 新确认不变量：
+  1. compaction只减少历史证据成本，不能创造 `no-old-writer` witness或释放危险 destination。
+  2. unknown job可退出热日志的前提，是完整进入持久 quarantine snapshot：含 generation/job/rank、destination identity、closure predicate和capacity charge。
+  3. 安全 cutoff 是 receipt、effect、physical与reader frontiers的交集；按 region/reset domain分片可减少无关 head-of-line blocking，但不能拆开共享 writer domain。
+  4. immutable snapshot与manifest durable后，以 generation-aware `CURRENT` CAS作为提交点；旧 segment删除是可重试GC，不是提交点。
+  5. `active + quarantined + rebuild + reserved_headroom <= physical_capacity`；若 unknown产生率长期高于关闭率，只能backpressure/fail-stop，不能靠TTL删除。
+- 具体演算：两节点TP=2、每 rank slot 64 KiB、row 128 KiB。generation 7/job 41对row 3只有rank 0 terminal、rank 1 unknown；job 42两rank terminal且effect durable。cutoff 42的snapshot吸收job 42，并将job 41转换为带128 KiB charge的quarantine entry；只有覆盖generation 7/rank 1/旧registration与destination `D7/row3` 的reset/revoke receipt到达后，allocator才可释放row。
+- 测试事实：main测试证明同进程reset后promotion held、精确report归零、其他旧job重复票不误清fence、60秒只warning不自动释放；未覆盖进程重启、durable ledger、snapshot/manifest、unknown quarantine、watermark、capacity联合测试或backend revoke receipt。PR #62933的terminal/stuck transfer测试仍只属候选PR证据。
+- 建议故障矩阵：在receipt append、effect durable、snapshot write/fsync、manifest fsync、`CURRENT` CAS、segment delete各边界崩溃；恢复oracle要求unknown不释放row、重复rank不增票、冲突fail-stop、旧代不改新代、只选digest链完整的最高manifest。另需4-row容量测试和真实NIXL/UCX same-address late-WRITE注入。
+- 当前实现边界：main没有 durable Job Ledger、quarantine registry、retired-generation watermark或compactor；本文协议均为基于当前不变量的建议设计。
+- 新知识债：backend reset/revoke certificate字段与authority、registration scope、quarantine closure rate与admission、snapshot schema迁移、group-commit/fsync成本、真机remote crash与late-DMA。
+- 下一章：**Unknown Transfer 什么时候能离开 Quarantine——Backend Reset Certificate、Registration Revoke 与 Capacity Release。**
+
+## 第十一次七章知识图谱回顾（第 71–77 章，补记）
+
+- 第 71–74 章把 timeout、session close、connection epoch和process restart逐层拆开：控制连接结束不能证明remote writer物理失权，consumer slot必须按destination隔离。
+- 第 75 章把隔离转成capacity census、MISS/backpressure；第 76 章把reset返回与worker fence排空分开；第 77 章把同一不变量扩展到跨节点Region Mirror的per-rank slot和unknown-completion fail-stop。
+- 当前闭合链：`timeout → terminal/release分离 → epoch拒旧 → restart census → slot quarantine → capacity admission → reset fence → cross-node quorum`。
+- 路线调整：第 78–80 章已补上generation rebuild、rank-attributed receipt与crash-safe compaction；下一组先定义backend revoke/reset certificate如何关闭quarantine，再量化恢复吞吐和长期容量债务。
 
