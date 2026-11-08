@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-07。
+最后更新：2026-11-08。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 89 将 recovery queue 从“单任务可恢复”推进到“积压可收敛、日志可有界”：基于 PyPTO 当前同 key、最多 32 个 READY candidates 的有界扫描和 `read_manifest` 完整验证成本，建议以 immutable segment + stable task identity + cursor-after-task 建立可重建的增量索引；watermark 同时观测 scan horizon、READY/BLOCKED debt、oldest age、charged bytes 与 compaction peak；snapshot 保留 unresolved/latest revision，旧 segment 受 reader/claim frontier 保护。当前实现仍无 durable ledger、phase journal、recovery queue、online reaper、revision watch、pressure mode 或 journal compaction。下一步研究 snapshot cutover 后的 reader/claim frontier 与 generation GC。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 90 补齐 snapshot cutover 之后的物理回收门槛：`CURRENT` 只关闭新 reader 进入旧 generation，旧 segment 还必须等待 snapshot、reader、claim 与 effect 四个连续 frontier；ReaderView 只保护证据可读，ClaimLease 另以 stable task identity、claim epoch 与 expected revision fence 迟到 effect；GC 仅删除完全落在 safe prefix 内的 sealed segment。当前实现仍无 durable ledger、phase journal、recovery queue、snapshot generation、reader/claim registry、frontier aggregator 或 online GC。下一步研究 stuck frontier 的 stale-reader diagnosis、claim terminal certificate 与 bounded quarantine。
 
 ## 已完成章节
 
@@ -113,6 +113,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-05 | Build Phase Journal 双槽恢复 | torn record → A/B validation → deterministic replay → manifest forward evidence → ledger CAS | [课程 87]({% post_url 2026-11-05-pypto-build-journal-dual-slot-torn-record-deterministic-replay %}) |
 | 2026-11-06 | Recovery Queue、No-lost-wake 与 Reaper Fairness | journal replay → READY/BLOCKED prerequisite → epoch claim → effect CAS → revision wakeup | [课程 88]({% post_url 2026-11-06-pypto-recovery-queue-no-lost-wake-reaper-fairness %}) |
 | 2026-11-07 | Recovery Backlog、Incremental Scan 与 Journal Compaction | immutable segment → task materialize → cursor checkpoint → pressure mode → snapshot cutover | [课程 89]({% post_url 2026-11-07-pypto-recovery-backlog-watermark-incremental-scan-journal-compaction %}) |
+| 2026-11-08 | Snapshot Reader Frontier、Claim Lease 与 Generation GC | snapshot cutover → old generation retire → reader/claim/effect frontier → whole-segment GC | [课程 90]({% post_url 2026-11-08-pypto-snapshot-reader-frontier-claim-lease-generation-gc %}) |
 
 ## ISA 知识地图
 
@@ -208,6 +209,7 @@ permalink: /learning/pto-curriculum/
 | Artifact admission / quota | 当前 `_BuildFlights` 与 persistent per-key `flock` 合并同 key request，但测试明确允许不同 key 并发；共享容量必须以 `committed+reserved<=quota` 为硬不变量，reservation 在 builder 前取得，actual manifest 后 reconcile，crash-after-rename 由 key-fenced recovery 判定 final/释放 | 协议边界已讲透；durable ledger、BuildIntent、size estimator、revision wakeup 与 fault Golden 待实现 |
 | Artifact recovery queue / wakeup | 当前 `_BuildFlights` Future 只覆盖进程内 cohort，persistent `flock` 只授权跨进程重新检查；跨 crash progress 需要 canonical record + monotonic revision，waiter 以 observe-subscribe-reload 防丢唤醒。建议 `RecoveryTask` 由稳定 identity 去重，以 reaper epoch + expected revision claim；BLOCKED 按 prerequisite 等待，READY 再做 oldest-runnable 与有限绕过 | 当前没有 journal/reaper/revision watch；durable task schema、runtime terminal adapter、recovery headroom、fairness 与 fault Golden 待实现 |
 | Artifact recovery backlog / compaction | 当前 `_lookup_ready_candidates` 只扫描同一 key 的 64-hex READY 目录，超过 32 个 fail closed，并对候选做完整 manifest 验证；它不是 durable/global recovery index。建议 queue 作为 canonical BuildRecord 的可重建派生索引，task durable 后才推进 segment cursor；watermark 分离 discovery/executable/durability debt，snapshot 必须保留 BLOCKED/quarantine/latest revision，旧 segment 等 reader/claim frontier 后再删 | 当前没有 segment journal、cursor、pressure mode、snapshot manifest 或 generation GC；codec、阈值校准、sharded audit、frontier 与 crash matrix 待实现 |
+| Artifact snapshot generation GC | `CURRENT` cutover 只关闭新 reader 进入旧 generation；删除证书要求 snapshot cutoff、reader-safe、claim-safe 与 effect-safe 四个无 gap frontier 的最小值覆盖 sealed segment end。ReaderView 保护可读性，ClaimLease 以 task/epoch/source/expected revision fence effect；TTL 不是删除证据 | 当前无 snapshot generation/reader/claim registry/online GC；schema、terminal detector、claim migration、NFS adapter 与 crash Golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
@@ -216,7 +218,7 @@ permalink: /learning/pto-curriculum/
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [d78561cc](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 Worker accepted-run drain、native completion fence 与 close-before-workspace-teardown，作为 ArtifactRuntime lease release 的下游证据 | 跨仓深挖 8 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [15cee98e](https://github.com/hw-native-sys/pypto/commit/15cee98ec9d065283f1310174a4bc5a47b925e0e) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter、reservation/reconcile、dual-slot journal、recovery queue/wakeup，以及 READY candidate 有界扫描、增量 cursor、backlog watermark 与 snapshot compaction 边界 | 跨仓深挖 21 |
+| pypto | [1f25c43d](https://github.com/hw-native-sys/pypto/commit/1f25c43de09fe935574ffd815843dca26ccd13e9) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter、reservation/reconcile、dual-slot journal、recovery queue/backlog，以及 snapshot ReaderView/ClaimLease 双 frontier 与 whole-segment generation GC 边界 | 跨仓深挖 22 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -1828,4 +1830,30 @@ permalink: /learning/pto-curriculum/
 - 新知识债：segment/task/cursor schema、canonical codec、snapshot manifest、pressure metrics/threshold calibration、runtime terminal adapter、sharded full audit、multi-scanner/reaper fencing、reader/claim frontier、ENOSPC与跨filesystem/NFS fault Golden。
 - 下一章：**Compaction 完成后旧 Segment 何时能删——Reader Frontier、Claim Lease 与 Snapshot Generation GC。**
 
+## 第 90 章课程账本增量
 
+- 日期：2026-11-08
+- 章节：**Compaction 后旧 Segment 何时能删：PyPTO Reader Frontier、Claim Lease 与 Snapshot Generation GC**
+- 源码基线：PyPTO [`1f25c43d`](https://github.com/hw-native-sys/pypto/commit/1f25c43de09fe935574ffd815843dca26ccd13e9)，为研究时默认分支最新提交；相对课程 89 前进 [1 个提交](https://github.com/hw-native-sys/pypto/compare/15cee98ec9d065283f1310174a4bc5a47b925e0e...1f25c43de09fe935574ffd815843dca26ccd13e9)，仅新增 external kernel contract v1，未改动 Artifact Store、persistent JIT、`ArtifactRuntime`、文档或直接测试。
+- 所选仓库：仅 PyPTO。immutable publication、live-path retention、manifest verifier、runtime promotion 与 offline-only cleanup 边界已足以推导 snapshot generation GC，无需引入第二仓。
+- 课程位置：`BuildRecord segments → snapshot/manifest durable → CURRENT CAS → old generation RETIRING → ReaderView/ClaimLease frontier → whole-segment tombstone/delete → charge reconcile`。
+- 新覆盖文件与符号：
+  - `python/pypto/jit/decorator.py`、`_persistent.py`：`JITFunction → resolve_persistent` 的真实入口与缺失 generation pin 边界
+  - `python/pypto/jit/artifact_cache.py`：`ArtifactBuild/ArtifactStore.get_or_build/_build_private/_publish` 的 immutable publication、private retention 与 concurrent deletion non-goal
+  - `python/pypto/jit/_artifact_manifest.py`：`read_manifest` 的完整 inventory/hash/canonical compare 与 16 MiB 上限
+  - `python/pypto/runtime/_artifact_runtime.py`：`ArtifactRuntime.load/directory/_chips` 的 GENERATED→READY/private path ownership
+  - `docs/en/dev/09-artifact-store.md`、RFC #2653、PR #2723：offline cleanup、reader path lifetime 与 no online GC 边界
+  - `test_artifact_cache.py/test_prebuilt_artifact.py`：private retention、orphan/failure、thread/process dedupe 与 READY candidate 上限前置证据
+- 当前实现边界：PyPTO 没有 BuildRecord segment、snapshot generation、ReaderView registry、ClaimLease、frontier aggregator、online segment GC 或 durable charge reconcile；本文为建议协议。
+- 新确认不变量：
+  1. `CURRENT` cutover 只关闭新 reader 进入旧 generation，不是旧 segment 删除证书。
+  2. `safe_delete_through=min(snapshot_cutoff, reader_safe_through, claim_safe_through, effect_safe_through)`，且各项必须是无 gap 的连续前缀。
+  3. reader pin 保护证据可读、不授予 effect；claim lease 绑定 `task_id/claim_epoch/source generation+revision/expected revision/effect_id` 并 pin source evidence。
+  4. heartbeat/TTL 只是故障检测；没有 incarnation terminal 或 no-more-I/O 证明时，过期 reader 进入 quarantine，不能强删。
+  5. GC 只删 `segment.end_revision<=safe_delete_through` 的完整 sealed segment；cutoff 在段中间时必须搬运 tail 或调整边界。
+  6. stale claimant 即使读到旧证据，也必须被 claim epoch + expected revision CAS 拒绝提交迟到 effect。
+- 具体演算：S12 覆盖 revision 100–107、G8 cutoff=107；R1 仍读 103–105，epoch-5 claim C1 使用 source rev104且effect未落盘，故 safe frontier 仅102，S12不可删。R1 release 后仍被claim/effect卡在103；C1以稳定effect id提交rev108并release后frontier到107，才允许整段删除。
+- 直接测试事实：现有UT验证fresh PUBLISHED保留private value/path、invalid/orphan/failure不误命中、same/different-key并发、dead-process flock handoff和READY candidates>32 fail closed；当前没有CURRENT注册竞态、stale reader/claim、cutoff-in-segment、partial-delete或generation rebuild测试。
+- ISA知识地图：无新增ISA指令、Tile、layout或memory-location语义；新增Host Artifact snapshot generation GC条目，补齐cutover之后的reader/claim ownership与整段回收边界。
+- 新知识债：durable reader/claim schema、incarnation terminal detector、claim migration、frontier aggregation、segment/cutoff policy、CURRENT/manifest codec、NFS/filesystem adapter、partial-delete accounting与fault-at-every-boundary Golden。
+- 下一章：**Frontier 卡住怎么办——Stale Reader Diagnosis、Claim Terminal Certificate 与 Bounded Quarantine。**
