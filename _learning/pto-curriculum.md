@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-08。
+最后更新：2026-11-09。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 90 补齐 snapshot cutover 之后的物理回收门槛：`CURRENT` 只关闭新 reader 进入旧 generation，旧 segment 还必须等待 snapshot、reader、claim 与 effect 四个连续 frontier；ReaderView 只保护证据可读，ClaimLease 另以 stable task identity、claim epoch 与 expected revision fence 迟到 effect；GC 仅删除完全落在 safe prefix 内的 sealed segment。当前实现仍无 durable ledger、phase journal、recovery queue、snapshot generation、reader/claim registry、frontier aggregator 或 online GC。下一步研究 stuck frontier 的 stale-reader diagnosis、claim terminal certificate 与 bounded quarantine。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 91 补齐 generation GC 的 stuck-frontier 恢复边界：heartbeat/PID/`flock` 释放只触发诊断，不能单独成为删除证书；terminal certificate 必须绑定不可复用 actor incarnation、generation/revision 覆盖范围与可信 witness，reader no-more-read 和 claim no-more-effect 分开证明；证据不足时先把最小 source evidence durable 迁入持续计费的 bounded quarantine，再以 claim epoch 与 snapshot CAS fence 迟到 effect。当前实现仍无 durable ledger、reader/claim registry、terminal certificate、quarantine segment、frontier aggregator 或 online GC。下一步研究 terminal certificate 的跨进程/跨 rank 聚合、process-group terminal 与 claim migration CAS。
 
 ## 已完成章节
 
@@ -114,6 +114,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-06 | Recovery Queue、No-lost-wake 与 Reaper Fairness | journal replay → READY/BLOCKED prerequisite → epoch claim → effect CAS → revision wakeup | [课程 88]({% post_url 2026-11-06-pypto-recovery-queue-no-lost-wake-reaper-fairness %}) |
 | 2026-11-07 | Recovery Backlog、Incremental Scan 与 Journal Compaction | immutable segment → task materialize → cursor checkpoint → pressure mode → snapshot cutover | [课程 89]({% post_url 2026-11-07-pypto-recovery-backlog-watermark-incremental-scan-journal-compaction %}) |
 | 2026-11-08 | Snapshot Reader Frontier、Claim Lease 与 Generation GC | snapshot cutover → old generation retire → reader/claim/effect frontier → whole-segment GC | [课程 90]({% post_url 2026-11-08-pypto-snapshot-reader-frontier-claim-lease-generation-gc %}) |
+| 2026-11-09 | Stale Reader Diagnosis、Claim Terminal Certificate 与 Bounded Quarantine | timeout diagnose → incarnation certificate → quarantine evidence migration → admission-fenced GC | [课程 91]({% post_url 2026-11-09-pypto-stale-reader-terminal-certificate-bounded-quarantine %}) |
 
 ## ISA 知识地图
 
@@ -210,6 +211,7 @@ permalink: /learning/pto-curriculum/
 | Artifact recovery queue / wakeup | 当前 `_BuildFlights` Future 只覆盖进程内 cohort，persistent `flock` 只授权跨进程重新检查；跨 crash progress 需要 canonical record + monotonic revision，waiter 以 observe-subscribe-reload 防丢唤醒。建议 `RecoveryTask` 由稳定 identity 去重，以 reaper epoch + expected revision claim；BLOCKED 按 prerequisite 等待，READY 再做 oldest-runnable 与有限绕过 | 当前没有 journal/reaper/revision watch；durable task schema、runtime terminal adapter、recovery headroom、fairness 与 fault Golden 待实现 |
 | Artifact recovery backlog / compaction | 当前 `_lookup_ready_candidates` 只扫描同一 key 的 64-hex READY 目录，超过 32 个 fail closed，并对候选做完整 manifest 验证；它不是 durable/global recovery index。建议 queue 作为 canonical BuildRecord 的可重建派生索引，task durable 后才推进 segment cursor；watermark 分离 discovery/executable/durability debt，snapshot 必须保留 BLOCKED/quarantine/latest revision，旧 segment 等 reader/claim frontier 后再删 | 当前没有 segment journal、cursor、pressure mode、snapshot manifest 或 generation GC；codec、阈值校准、sharded audit、frontier 与 crash matrix 待实现 |
 | Artifact snapshot generation GC | `CURRENT` cutover 只关闭新 reader 进入旧 generation；删除证书要求 snapshot cutoff、reader-safe、claim-safe 与 effect-safe 四个无 gap frontier 的最小值覆盖 sealed segment end。ReaderView 保护可读性，ClaimLease 以 task/epoch/source/expected revision fence effect；TTL 不是删除证据 | 当前无 snapshot generation/reader/claim registry/online GC；schema、terminal detector、claim migration、NFS adapter 与 crash Golden 待实现 |
+| Artifact stuck-frontier / bounded quarantine | heartbeat、PID 消失与 dead-process `flock` release 只产生 `SUSPECT`，不证明 no-more-read/no-more-effect。terminal certificate 必须绑定 actor/incarnation/generation/revision/witness；证据不足时先把最小 source record durable 迁入 quarantine、fence claim epoch 并 CAS snapshot，未知字节持续计费，预算满则 fail-closed admission | 当前无 certificate codec、trusted witness、quarantine segment、snapshot migration CAS 或容量账；PID reuse、multi-rank/NFS、late effect 与 fault-at-every-boundary Golden 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
@@ -218,7 +220,7 @@ permalink: /learning/pto-curriculum/
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [d78561cc](https://github.com/hw-native-sys/simpler/commit/d78561ccafb0b60773a6b1ecf58e6722d13800a6) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 Worker accepted-run drain、native completion fence 与 close-before-workspace-teardown，作为 ArtifactRuntime lease release 的下游证据 | 跨仓深挖 8 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [1f25c43d](https://github.com/hw-native-sys/pypto/commit/1f25c43de09fe935574ffd815843dca26ccd13e9) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter、reservation/reconcile、dual-slot journal、recovery queue/backlog，以及 snapshot ReaderView/ClaimLease 双 frontier 与 whole-segment generation GC 边界 | 跨仓深挖 22 |
+| pypto | [9339b96d](https://github.com/hw-native-sys/pypto/commit/9339b96dd6d42e69b1dee8f43316d407887e2d43) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Worker dispatch；新增 Artifact schema/migration、private retention/lease/reaper、tombstone/dead-letter、reservation/reconcile、dual-slot journal、recovery queue/backlog、snapshot ReaderView/ClaimLease 双 frontier，以及 stale-reader terminal certificate 与 bounded quarantine 边界 | 跨仓深挖 23 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -1857,3 +1859,36 @@ permalink: /learning/pto-curriculum/
 - ISA知识地图：无新增ISA指令、Tile、layout或memory-location语义；新增Host Artifact snapshot generation GC条目，补齐cutover之后的reader/claim ownership与整段回收边界。
 - 新知识债：durable reader/claim schema、incarnation terminal detector、claim migration、frontier aggregation、segment/cutoff policy、CURRENT/manifest codec、NFS/filesystem adapter、partial-delete accounting与fault-at-every-boundary Golden。
 - 下一章：**Frontier 卡住怎么办——Stale Reader Diagnosis、Claim Terminal Certificate 与 Bounded Quarantine。**
+
+## 第 91 章课程账本增量
+
+- 日期：2026-11-09
+- 章节：**Frontier 卡住怎么办：PyPTO Stale Reader Diagnosis、Claim Terminal Certificate 与 Bounded Quarantine**
+- 源码基线：PyPTO [`9339b96d`](https://github.com/hw-native-sys/pypto/commit/9339b96dd6d42e69b1dee8f43316d407887e2d43)，为研究时默认分支最新提交；相对课程 90 前进 [5 个提交](https://github.com/hw-native-sys/pypto/compare/1f25c43de09fe935574ffd815843dca26ccd13e9...9339b96dd6d42e69b1dee8f43316d407887e2d43)，external provider、SIMT/AutoTile 等变更未改动 Artifact Store、persistent JIT、`ArtifactRuntime`、Artifact 文档或直接测试。
+- 所选仓库：仅 PyPTO。真实 persistent 入口、immutable publication、path retention、dead-process `flock` handoff 与 offline-only cleanup contract 足以界定 stuck frontier，无需引入第二仓。
+- 课程位置：`JITFunction → resolve_persistent → ArtifactStore/ArtifactRuntime live path → snapshot ReaderView/ClaimLease → SUSPECT diagnosis → terminal certificate 或 quarantine migration → frontier/segment GC → charge reconcile`。
+- 新覆盖文件与符号：
+  - `python/pypto/jit/_persistent.py`：`resolve_persistent/owner._artifact_objects` 的 READY→GENERATED→build 入口与缺失 generation pin
+  - `python/pypto/jit/artifact_cache.py`：`ArtifactStore.get_or_build/_build_private/_publish`、per-key `flock`、private retention 与 concurrent deletion non-goal
+  - `python/pypto/runtime/_artifact_runtime.py`：`ArtifactRuntime.load/directory/_chips` 的 live path ownership
+  - `docs/en/dev/09-artifact-store.md`、RFC #2653、PR #2723：offline cleanup、all-consumer-stop 与 no online GC 边界
+  - `tests/ut/jit/test_artifact_cache.py`、`tests/ut/runtime/test_prebuilt_artifact.py`：thread/process dedupe、dead-process lock release、private/runtime retention 与并发 load
+- 当前实现边界：PyPTO 没有 BuildRecord segment、durable reader/claim registry、terminal certificate codec、trusted witness、quarantine segment、snapshot migration CAS、capacity ledger、frontier aggregator 或 online GC；本文为建议协议。
+- 新确认不变量：
+  1. heartbeat/TTL、PID 消失和 `flock` 自动释放只允许 `ACTIVE→SUSPECT`，不能单独推进删除 frontier。
+  2. reader identity 必须包含 node/boot/process-start nonce/pid/reader-seq；terminal certificate 绑定 actor、incarnation、generation/revision interval、last I/O、witness 与 digest。
+  3. reader terminal 证明 no-more-read；claim terminal 还必须绑定 task/claim epoch/source/expected revision/effect id，证明 no-more-effect 或由 fenced takeover 接管。
+  4. 无法证明终止时，先 durable 写入最小 quarantine evidence，再 fence claim epoch、CAS snapshot 与转移 charge；旧 segment 才能释放，quarantine 仍 pin 且计费。
+  5. `live + retiring + quarantined + rebuild_headroom <= artifact_budget`；预算满触发 private/readonly/reject admission，不得以 TTL 强删未知对象。
+- 具体演算：S12 revision 100–107 共 32 KiB，R1 pin 103–105、C1 epoch5/source104/effect E9。R1 timeout 后 frontier仍102；准确 incarnation 的 supervisor certificate 只让 reader 越过105。C1 effect未知时，把 rev104与claim evidence迁入6 KiB Q9、CAS snapshot并把claim升至epoch6后，才可删S12；Q9直到E9 terminal仍计费。
+- 直接测试事实：现有UT验证same-key thread/process dedupe、different-key concurrency、dead-process `flock` handoff、private output retention、并发 runtime load 与 path/hash preservation；不覆盖PID reuse、stale reader/claim、certificate mismatch、quarantine migration crash、late effect或budget full。
+- ISA知识地图：无新增ISA指令、Tile、layout或memory-location语义；新增Host Artifact stuck-frontier/bounded quarantine条目。
+- 新知识债：certificate canonical codec、supervisor/runtime witness、process-group terminal、claim migration、quarantine bundle/manifest、capacity ledger、NFS/container adapter、PID reuse/multi-rank与fault-at-every-boundary Golden。
+- 下一章：**Terminal Certificate 如何跨进程/跨 rank 聚合——Supervisor Witness、Process-group Terminal 与 Claim Migration CAS。**
+
+## 第十三次七章知识图谱回顾（课程 85–91）
+
+- 主线：`capacity revision CAS → reservation owner lease → A/B phase journal → recovery queue/no-lost-wake → incremental scan/backlog pressure → snapshot generation frontier → terminal certificate/bounded quarantine`。
+- 已闭合的逻辑：revision CAS 防容量双花；owner/claim epoch 防迟到 effect；journal/queue/snapshot 让恢复有持久证据；terminal certificate 与 quarantine 确保未知 ownership 既不被误删、也不会无界占用整段。
+- 仍未落地：PyPTO 当前没有 durable ledger、recovery queue、snapshot/reader/claim registry、certificate/quarantine 或 online GC；七章协议仍需 canonical schema、可信 witness 和 fault-at-every-boundary Golden。
+- 后续路线：先把单 actor terminal evidence 接到 distributed Worker 的真实 process-group 生命周期，再回接 PTOAS/runtime generation lowering。
