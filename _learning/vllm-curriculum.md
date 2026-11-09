@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 80 章从 main 已合入的进程内 `_stale_job_threshold + _reset_fence` 出发，区分 ledger history 与危险 destination debt：unknown transfer 可以被 immutable snapshot吸收、退出热日志，但在 scoped no-old-writer witness到达前必须保留 destination identity、quarantine capacity charge 与禁止复用责任。安全 compaction cutoff 是 receipt/effect/physical/reader frontiers 的交集；下一章研究 backend reset/revoke certificate怎样关闭 quarantine并释放容量。
+- 当前主线：第 81 章从 main 已有的进程内 `_reset_fence`、NIXL `unregister/restore` 与 `remote_registration_generation` 出发，区分 freshness 与 physical termination：新 generation 让后续请求重新握手，却不能证明旧 transfer 已经失去写权限。关闭 durable quarantine 必须取得 scope 到旧 backend/registration/rank/region/job 的 `NO_OLD_WRITER` certificate，再由 allocator capacity ledger 以 `charge_id` CAS 幂等释放；下一章研究 crash-safe capacity ledger 与 release intent。
 
 ## 已完成章节
 
@@ -93,6 +93,7 @@
 | 2026-11-06 78 | `head owner crash → generation fence → registration revoke census → fresh backing → rebuild activation` | [`70455184`](https://github.com/vllm-project/vllm/commit/7045518494fdf62472947e38fdbe9367ecbd1b71) | [Mirror Generation 与 Rebuild Census]({{ '/articles/vllm-mirror-generation-registration-revoke-rebuild-census/' | relative_url }}) |
 | 2026-11-07 79 | `TransferResult → anonymous count → reset fence → generation/job-seq/rank receipt → quorum rebuild` | [`8176238c`](https://github.com/vllm-project/vllm/commit/8176238c97f982ddc266e8bacb2aca9e11926af7) | [Late Completion Fence 与 Quorum Rebuild]({{ '/articles/vllm-job-sequence-late-completion-fence-scheduler-quorum-rebuild/' | relative_url }}) |
 | 2026-11-08 80 | `durable job ledger → unknown quarantine → vector watermark → snapshot manifest CAS → segment GC` | [`fd8f3f39`](https://github.com/vllm-project/vllm/commit/fd8f3f398e0b720f58a682edf2888549cea71451) | [Job Ledger 的 Crash-safe Compaction]({{ '/articles/vllm-job-ledger-unknown-transfer-quarantine-retired-generation-compaction/' | relative_url }}) |
+| 2026-11-09 81 | `unknown quarantine → backend reset/MR revoke certificate → verified capacity release` | [`3b33a845`](https://github.com/vllm-project/vllm/commit/3b33a845c6733a50aafae933c10ac0be0f18be93) | [Backend Reset Certificate 与 Capacity Release]({{ '/articles/vllm-backend-reset-certificate-registration-revoke-capacity-release/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2146,4 +2147,29 @@
 - 第 75 章把隔离转成capacity census、MISS/backpressure；第 76 章把reset返回与worker fence排空分开；第 77 章把同一不变量扩展到跨节点Region Mirror的per-rank slot和unknown-completion fail-stop。
 - 当前闭合链：`timeout → terminal/release分离 → epoch拒旧 → restart census → slot quarantine → capacity admission → reset fence → cross-node quorum`。
 - 路线调整：第 78–80 章已补上generation rebuild、rank-attributed receipt与crash-safe compaction；下一组先定义backend revoke/reset certificate如何关闭quarantine，再量化恢复吞吐和长期容量债务。
+
+## 第 81 章课程账本增量
+
+- 日期：2026-11-09
+- 章节：**Unknown Transfer 什么时候能离开 Quarantine：Backend Reset Certificate、Registration Revoke 与 Capacity Release**
+- 源码基线：[`3b33a845`](https://github.com/vllm-project/vllm/commit/3b33a845c6733a50aafae933c10ac0be0f18be93)，为研究时默认分支最新提交；相对第 80 章基线前进 [32 个提交](https://github.com/vllm-project/vllm/compare/fd8f3f398e0b720f58a682edf2888549cea71451...3b33a845c6733a50aafae933c10ac0be0f18be93)。直接相关的 offloading Scheduler、tiering manager 与 NIXL registration 代码未变化；开放 [PR #62933](https://github.com/vllm-project/vllm/pull/62933) 仍未合入。
+- 课程位置：`public reset → in-memory reset fence → durable unknown quarantine → backend reset/MR revoke certificate → scope verification → allocator capacity CAS`。
+- 新覆盖文件与符号：
+  - `vllm/v1/core/sched/scheduler.py`：`reset_prefix_cache/reset_connector_cache` 的返回值语义。
+  - `offloading/scheduler.py`：`TransferJobStatus/_reset_cache/_stale_job_threshold/_reset_fence/_update_connector_output/has_pending_push_work`。
+  - `tiering/manager.py`：`reset_cache/on_reset_flushed/_promotions_held`。
+  - `nixl/base_worker.py`：`register_kv_caches/unregister_kv_caches/restore_kv_caches/_cleanup_remote_engine/_finish_shutdown`。
+  - `nixl/base_scheduler.py`、`pull_scheduler.py`、`pull_worker.py`、`metadata.py`：`_registration_generation/remote_registration_generation/set_xfer_handshake_metadata/_read_blocks_for_req`。
+  - `test_nixl_connector.py`、`test_offloading_connector.py`：sleep/wake registration 幂等、payload-change generation、idle-engine reset fence 与 promotion release。
+- 新确认不变量：
+  1. reset success、process restart 与新 registration generation 都不是旧 writer 的物理终止证据；freshness 与 termination 必须分开。
+  2. quarantine closure certificate 必须 scope 到 backend/transport domain、旧 registration generation、worker rank、不可 ABA 的 region identity 及 job frontier/set，并声明 `NO_OLD_WRITER`。
+  3. certificate 只授权验证，不直接 free；allocator ledger 必须以 `(certificate_id, charge_id, region_id)` CAS 幂等应用 release。
+  4. address/length 不足以标识 destination；必须加入 allocation generation 或 nonce。scope 不完整、issuer epoch 回退、identity 不匹配均继续 quarantine。
+  5. backend 无细粒度 revoke receipt 时，可退化为有强作用域的完整 transport-domain reset；TTL 不能替代 witness。
+- 具体演算：TP=2、每 rank slot 64 KiB、row 128 KiB。generation 7/job 41/rank 1 unknown 对应 `charge_id=q-7-41` 和 `region_id=(alloc_gen=22, reg_gen=7, row=3, nonce=9f...)`。generation 8 publish 只触发新请求 re-handshake；只有覆盖旧 rank/region/job 的 revoke/reset certificate durable 后，allocator 才以 `QUARANTINED→RELEASED` CAS 释放 128 KiB。stale/partial certificate、相同地址的新 nonce及重复 replay都不得重复减容量。
+- 测试事实：main 测试验证连续两次 unregister/restore 的幂等、remote agents 清理、payload `old,old,new` 只在变化时递增 generation，以及 reset 时 promotion held 到最后一票 worker report；没有验证真实 NIXL deregister 与在途 RDMA 的 happens-before，也没有 crash 后 durable certificate、partial scope、ABA、重复 release 或多 rank 部分 revoke。PR #62933 的 stuck transfer 选择 engine stop，只是候选 PR 证据。
+- 当前实现边界：main 已有进程内 reset fence、NIXL deregister/re-register 与 generation-aware re-handshake；没有 durable quarantine ledger、backend reset/revoke certificate、certificate verifier、可查询 revoke receipt 或 allocator capacity CAS。
+- 新知识债：NIXL/UCX 对 deregistration completion 的正式契约与真机 late-WRITE 故障注入；certificate issuer authority/epoch、domain reset 作用域、跨 rank certificate 聚合；allocator charge schema、release intent、WAL/fsync 与重放。
+- 下一章：**Quarantine 关闭之后怎样不双重释放——Crash-safe Capacity Ledger、Release Intent 与 Allocator CAS。**
 
