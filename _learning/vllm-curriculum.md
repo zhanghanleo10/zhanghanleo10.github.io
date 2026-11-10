@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 81 章从 main 已有的进程内 `_reset_fence`、NIXL `unregister/restore` 与 `remote_registration_generation` 出发，区分 freshness 与 physical termination：新 generation 让后续请求重新握手，却不能证明旧 transfer 已经失去写权限。关闭 durable quarantine 必须取得 scope 到旧 backend/registration/rank/region/job 的 `NO_OLD_WRITER` certificate，再由 allocator capacity ledger 以 `charge_id` CAS 幂等释放；下一章研究 crash-safe capacity ledger 与 release intent。
+- 当前主线：第 82 章沿 main 已合入的 `defer_write_release → JobResult.deferred_release → release_deferred_write` 追踪容量返还。当前实现能在活进程内做到“逻辑失败立即 MISS、旧 chunk 等 no-old-writer event 后再回 free list”，但 `_deferred_releases`、计数与 `_free_list` 均是内存态；跨 crash 必须先 durable `ReleaseIntent`，再由绑定 allocation generation 的 allocator CAS 幂等提交。下一章量化 quarantine debt 的 age、bytes 与 closure rate，并建立 admission escalation。
 
 ## 已完成章节
 
@@ -94,6 +94,7 @@
 | 2026-11-07 79 | `TransferResult → anonymous count → reset fence → generation/job-seq/rank receipt → quorum rebuild` | [`8176238c`](https://github.com/vllm-project/vllm/commit/8176238c97f982ddc266e8bacb2aca9e11926af7) | [Late Completion Fence 与 Quorum Rebuild]({{ '/articles/vllm-job-sequence-late-completion-fence-scheduler-quorum-rebuild/' | relative_url }}) |
 | 2026-11-08 80 | `durable job ledger → unknown quarantine → vector watermark → snapshot manifest CAS → segment GC` | [`fd8f3f39`](https://github.com/vllm-project/vllm/commit/fd8f3f398e0b720f58a682edf2888549cea71451) | [Job Ledger 的 Crash-safe Compaction]({{ '/articles/vllm-job-ledger-unknown-transfer-quarantine-retired-generation-compaction/' | relative_url }}) |
 | 2026-11-09 81 | `unknown quarantine → backend reset/MR revoke certificate → verified capacity release` | [`3b33a845`](https://github.com/vllm-project/vllm/commit/3b33a845c6733a50aafae933c10ac0be0f18be93) | [Backend Reset Certificate 与 Capacity Release]({{ '/articles/vllm-backend-reset-certificate-registration-revoke-capacity-release/' | relative_url }}) |
+| 2026-11-10 82 | `deferred release → durable release intent → generation-fenced allocator CAS → crash replay` | [`05caae03`](https://github.com/vllm-project/vllm/commit/05caae03c20f69436ff7ec23ded339ea104f1a01) | [Crash-safe Capacity Ledger 与 Allocator CAS]({{ '/articles/vllm-crash-safe-capacity-ledger-release-intent-allocator-cas/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -470,9 +471,10 @@
 - `P2PSecondaryTierManager.submit_load/_poll_once/_reap_dead_sessions/drain_jobs`
 - `test_timed_out_load_holds_chunks_until_abort_ack`、`test_load_abort_ack_timeout_*`
 
-- `CPUOffloadingManager._get_num_free_chunks/_allocate_chunks/prepare_store`
+- `CPUOffloadingManager._get_num_free_chunks/_allocate_chunks/prepare_store/complete_store/reset_cache`
 - `CPUPrimaryTierOffloadingManager._deferred_release_chunk_ids/defer_write_release/release_deferred_write`
-- `TieringOffloadingManager.lookup/_initiate_promotion/_complete_deferred_releases`
+- `TieringOffloadingManager.lookup/_initiate_promotion/_complete_promotion/_process_finished_jobs/_complete_deferred_releases/reset_cache`
+- `JobResult.deferred_release`、`SecondaryTierManager.drain_jobs`
 - `TieringMetricsTracker.on_promotion_allocation_failure/on_release_deferred/on_deferred_release_done/_observe_active_transfer_stats`
 - `test_timed_out_load_holds_chunks_until_abort_ack`、`test_cpu_manager` 的 pinned/full 分配路径、`test_tiering_metrics_tracker_records_promotion_allocation_failures`、`test_inference_reuses_a_finished_kv_request_id`
 
@@ -2173,3 +2175,26 @@
 - 新知识债：NIXL/UCX 对 deregistration completion 的正式契约与真机 late-WRITE 故障注入；certificate issuer authority/epoch、domain reset 作用域、跨 rank certificate 聚合；allocator charge schema、release intent、WAL/fsync 与重放。
 - 下一章：**Quarantine 关闭之后怎样不双重释放——Crash-safe Capacity Ledger、Release Intent 与 Allocator CAS。**
 
+## 第 82 章课程账本增量
+
+- 日期：2026-11-10
+- 章节：**Quarantine 关闭后怎样不双重释放：Crash-safe Capacity Ledger、Release Intent 与 Allocator CAS**
+- 源码基线：[`05caae03`](https://github.com/vllm-project/vllm/commit/05caae03c20f69436ff7ec23ded339ea104f1a01)，为研究时默认分支最新提交；相对第 81 章基线前进 [105 个提交](https://github.com/vllm-project/vllm/compare/3b33a845c6733a50aafae933c10ac0be0f18be93...05caae03c20f69436ff7ec23ded339ea104f1a01)。CPU manager、tiering manager/base、offloading reset fence 与主 deferred-release 测试文件 blob 未变化；`test_obj_tier.py` 有测试演进但不改变本章不变量。
+- 课程位置：`public reset → in-memory reset fence → durable quarantine → scoped no-old-writer certificate → release intent → allocator CAS → capacity replay`。
+- 新覆盖文件与符号：
+  - `vllm/v1/kv_offload/cpu/manager.py::CPUOffloadingManager._get_num_free_chunks/_allocate_chunks/prepare_store/complete_store/reset_cache`。
+  - `vllm/v1/kv_offload/tiering/base.py::JobResult.deferred_release/SecondaryTierManager.drain_jobs`。
+  - `vllm/v1/kv_offload/tiering/manager.py::CPUPrimaryTierOffloadingManager.defer_write_release/release_deferred_write`、`TieringOffloadingManager._complete_promotion/_process_finished_jobs/_complete_deferred_releases/reset_cache`。
+  - `tests/v1/kv_offload/tiering/test_tiering_offloading.py` 与 `test_obj_tier.py` 的 deferred release、fresh-chunk restore、partial failure、reset drain 与 cleanup retry 测试。
+- 新确认不变量：
+  1. event set、certificate durable与capacity returned是三个不同状态；前两者都不能代替allocator effect。
+  2. `RELEASE_INTENT` 在allocator CAS完成前仍必须计入已占容量，防止“计划释放”被当作“已经可用”。
+  3. 唯一线性化点是绑定 `region_id/allocation_generation/intent_id` 的幂等allocator CAS；`RELEASED` record是恢复与审计记录。
+  4. 当前 `dict.pop → held.remove → pending-- → free.append` 跨 crash会产生leak或duplicate窗口；单纯调整pop顺序不能消除二者。
+  5. allocator若不能durable查询applied intent，就不得重放free-list append；只能从non-released charges与physical census重建free set，未知slot继续quarantine。
+  6. multi-rank row若是共同allocation unit，partial rank receipt只能作为内部进度，所有rank齐全前不能对外admission；若物理allocator确实按rank独立分配，才可拆成独立subcharge。
+- 具体演算：TP=2、每 rank slot 64 KiB、row 128 KiB，`charge_id=q-7-41`、`chunk_ids=[12,13]`、`region_id=(alloc_gen=22,reg_gen=7,row=3,nonce=9f)`。certificate verified后先 durable `intent_id=r-900`，再由allocator对generation 22执行幂等release；两rank receipt齐全后slot generation推进到23并发布128 KiB free。若allocator apply后、`RELEASED`前crash，重放只得到`ALREADY_APPLIED`，不能第二次入free list。
+- 测试事实：main测试证明失败key立即MISS但chunk保持held、event前重复poll不释放、restore使用fresh chunk、partial failure只hold失败项、already-set event同轮释放、drain后reset成功；obj-tier测试证明handle cleanup失败时结果保留并只完成一次。没有覆盖intent fsync、partial allocator apply、final-before-snapshot、duplicate intent/certificate、stale epoch、address ABA或跨restart free-list uniqueness。
+- 当前实现边界：main没有durable capacity ledger、release intent、allocator applied-intent/tombstone查询或generation-fenced CAS；本章crash-safe协议是基于当前代码不变量的建议设计。
+- 新知识债：NIXL/UCX revoke certificate正式契约；allocator authority与schema；multi-rank charge粒度；WAL group commit/compaction成本；crash-at-every-boundary及真机same-address late-RDMA测试。
+- 下一章：**Quarantine Debt 何时必须升级——Age×Bytes Budget、Closure Rate 与 Admission Escalation。**
