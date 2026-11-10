@@ -151,7 +151,7 @@ sequenceDiagram
     App->>W: close()
     W->>W: stop admission + drain
     W->>S: close()
-    S->>R: SIGTERM; killpg backstop
+    S->>R: SIGTERM then killpg backstop
 ```
 
 当前真实链到 `killpg`/reap 为止。建议链在每个 group owner 完成 teardown 后追加 `durable receipt → exact rank-set aggregate → claim migration CAS`，而不是把它伪装成现有调用。
