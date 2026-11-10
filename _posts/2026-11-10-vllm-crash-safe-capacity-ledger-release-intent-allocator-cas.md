@@ -86,13 +86,12 @@ ReleaseIntent {
 `region_id` 必须含 allocation generation/nonce，不能只有 base+length；`intent_id` 必须稳定可重放。状态机如下：
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Active
-    Active --> Quarantined: completion unknown
-    Quarantined --> ReleaseIntent: certificate verified and WAL durable
-    ReleaseIntent --> Released: allocator CAS applied
-    ReleaseIntent --> ReleaseIntent: crash or retry
-    Released --> Released: duplicate replay
+flowchart TD
+    A["ACTIVE"] -->|"completion unknown"| Q["QUARANTINED"]
+    Q -->|"certificate verified + WAL durable"| I["RELEASE_INTENT"]
+    I -->|"allocator CAS applied"| R["RELEASED"]
+    I -->|"crash or retry"| I
+    R -->|"duplicate replay"| R
 ```
 
 真正的线性化点不是 event set，也不是 intent fsync，而是 allocator 对 `(region_id, allocation_generation, intent_id)` 的幂等 CAS。`RELEASED` ledger record只是把已发生的 allocator verdict持久化，方便恢复与审计。
