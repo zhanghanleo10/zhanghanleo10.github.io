@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-10。
+最后更新：2026-11-11。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 92 把单 actor terminal evidence 接到真实 distributed Worker/process-group 生命周期：`device_ids` 定义 expected logical rank set，PyPTO 的 run-handle terminal、simpler 的 host process-tree terminal 与 device-effect terminal 必须分层；group certificate 只能由同一 claim/group epoch 下无冲突的 exact rank-set coverage 形成，缺失或 device effect unknown 的 rank 先迁入持续计费的 quarantine，再用 claim epoch + source/effect/revision CAS fence 旧 owner。当前实现仍无 durable receipt codec/log/ACK、rank-set aggregator、claim migration CAS、capacity charge ledger 或 online GC。下一步研究 terminal receipt 的 canonical codec、durable log 与 supervisor takeover replay。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 93 把 PyPTO 进程内 `DistributedRunHandle` terminal、simpler canonical `COMPLETION` 与 reply/reaper ownership 接到可跨重启的恢复证据：建议 `TerminalReceiptV1` 绑定 claim/group/supervisor epoch、rank、source revision、dispatch/effect 与 terminal scope；ACK 只能覆盖 append+durable 的无 gap prefix，takeover 先 CAS 新 supervisor epoch，再严格重放 duplicate/conflict/torn tail，最后由独立 claim/capacity CAS 消费。当前实现仍无 receipt/log/ACK、supervisor registry、rank aggregator、device-effect adapter、claim/charge ledger 或 online compaction。下一步研究 receipt snapshot cut、rank frontier 与 crash-safe segment compaction。
 
 ## 已完成章节
 
@@ -116,6 +116,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-08 | Snapshot Reader Frontier、Claim Lease 与 Generation GC | snapshot cutover → old generation retire → reader/claim/effect frontier → whole-segment GC | [课程 90]({% post_url 2026-11-08-pypto-snapshot-reader-frontier-claim-lease-generation-gc %}) |
 | 2026-11-09 | Stale Reader Diagnosis、Claim Terminal Certificate 与 Bounded Quarantine | timeout diagnose → incarnation certificate → quarantine evidence migration → admission-fenced GC | [课程 91]({% post_url 2026-11-09-pypto-stale-reader-terminal-certificate-bounded-quarantine %}) |
 | 2026-11-10 | Process-group Terminal Certificate 与 Claim Migration CAS | device_ids rank set → run drain → process-group witness → exact-set aggregate → claim CAS | [课程 92]({% post_url 2026-11-10-pypto-process-group-terminal-certificate-claim-migration-cas %}) |
+| 2026-11-11 | Terminal Receipt 的 Canonical Codec、Durable Log 与 Takeover Replay | handle/wire/process facts → canonical receipt → durable ACK → replay → ledger CAS | [课程 93]({% post_url 2026-11-11-pypto-terminal-receipt-canonical-codec-durable-log-takeover-replay %}) |
 
 ## ISA 知识地图
 
@@ -214,15 +215,16 @@ permalink: /learning/pto-curriculum/
 | Artifact snapshot generation GC | `CURRENT` cutover 只关闭新 reader 进入旧 generation；删除证书要求 snapshot cutoff、reader-safe、claim-safe 与 effect-safe 四个无 gap frontier 的最小值覆盖 sealed segment end。ReaderView 保护可读性，ClaimLease 以 task/epoch/source/expected revision fence effect；TTL 不是删除证据 | 当前无 snapshot generation/reader/claim registry/online GC；schema、terminal detector、claim migration、NFS adapter 与 crash Golden 待实现 |
 | Artifact stuck-frontier / bounded quarantine | heartbeat、PID 消失与 dead-process `flock` release 只产生 `SUSPECT`，不证明 no-more-read/no-more-effect。terminal certificate 必须绑定 actor/incarnation/generation/revision/witness；证据不足时先把最小 source record durable 迁入 quarantine、fence claim epoch 并 CAS snapshot，未知字节持续计费，预算满则 fail-closed admission | 当前无 certificate codec、trusted witness、quarantine segment、snapshot migration CAS 或容量账；PID reuse、multi-rank/NFS、late effect 与 fault-at-every-boundary Golden 待实现 |
 | Distributed process-group terminal / claim migration | `DistributedConfig.device_ids` 定义 expected logical rank set；`DistributedRunHandle` terminal、`DistributedWorker.close`、simpler session-runner process-group reap 与 device-effect terminal 是不同证明层。group certificate 需同一 claim/group epoch 的 exact rank-set coverage；unknown effect 先 quarantine，再以 source/effect/claim epoch/ledger revision CAS 接管 | 当前无 durable receipt codec/log/ACK、supervisor incarnation registry、rank-set aggregator、claim migration/charge CAS；跨节点、PID reuse、late-effect 与真机 fault Golden 待实现 |
+| Distributed terminal receipt / takeover replay | 当前 `DistributedRunHandle` 仅缓存进程内 terminal；simpler `COMPLETION` 有 canonical little-endian codec、sequence/length/enum 严格校验，reply/reaper ownership exactly-once，但都不是 durable certificate。建议 receipt 绑定 claim/group/supervisor epoch、rank/source/dispatch/effect/scope；ACK-after-durability，duplicate 幂等、conflict fail closed，takeover 先 CAS owner epoch再 replay | 当前无 receipt/log/snapshot codec、durable ACK、supervisor registry、device-effect adapter、rank aggregator 或 fault-at-every-boundary Golden；segment compaction/retention 待实现 |
 
 ## 六仓版本与覆盖矩阵
 
 | 仓库 | 最近分析 commit | 已覆盖文件/符号 | 覆盖状态 |
 | --- | --- | --- | --- |
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
-| simpler | [c77294c0](https://github.com/hw-native-sys/simpler/commit/c77294c0323bb3c0f145bf5af8729436a3c64d13) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 remote L3 manifest/rank identity、session runner process-group ownership、cooperative SIGTERM→killpg backstop、reply/reaper handoff与 exactly-once reclaim，作为 distributed terminal witness 的真实下游边界 | 跨仓深挖 9 |
+| simpler | [f65b6130](https://github.com/hw-native-sys/simpler/commit/f65b613004d8c33939b69141d78484076d9232fd) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；新增 `remote_wire` Frame/COMPLETION canonical codec、strict decode、sequence matching，及 remote daemon reply/reaper ownership；明确 wire/send completion 不是 durable receipt | 跨仓深挖 10 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [04aed691](https://github.com/hw-native-sys/pypto/commit/04aed6915460a98d1ecd07fe29c6e0e7c6da3022) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Artifact recovery；新增 `DistributedConfig.device_ids` expected rank set、`DistributedCompiledProgram.prepare`、`DistributedWorker/DistributedRunHandle` admission-drain-close 生命周期，以及 process-group certificate/claim migration CAS 边界 | 跨仓深挖 24 |
+| pypto | [cc802e9b](https://github.com/hw-native-sys/pypto/commit/cc802e9b84d428351f7693bf813d4c4b97f4994a) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Artifact recovery；新增 `DistributedRunHandle.result` 的 native wait→cleanup/postprocess→cached terminal→frame retire 线性化边界，以及 durable receipt adapter/ACK/takeover replay 设计 | 跨仓深挖 25 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -463,6 +465,9 @@ permalink: /learning/pto-curriculum/
 - legacy migration 只有在旧记录能唯一决定新语义时才可原位解释；缺失 engine ABI、scope 或 required operations 时必须 clean miss/recompile，不能从 `enable_sdma` 猜出完整 contract。
 - immutable Artifact 不得原地补写新 schema；兼容恢复或重编译必须产生当前 schema 的新身份/slot，旧 slot 的回收另受 reader/build-promotion fence 约束。
 
+- receipt durability、group certificate 与 capacity release 是三个不同线性化点：ACK 只能覆盖已 `fdatasync` 的 canonical prefix；exact-rank aggregate 仍不能直接释放，必须再以 claim/source/effect/expected ledger revision CAS 消费。
+- receipt stable key 下相同 digest duplicate 幂等、不同 digest conflict fail closed；supervisor takeover 必须先 CAS incarnation/owner epoch，再从首条 torn/corrupt record 停止的无 gap prefix 重建状态，旧 epoch late receipt 不得覆盖新状态。
+
 ## 待验证推断
 
 - bounded bypass + oldest-ticket headroom holdback 在单 bytes quota 下比 strict FIFO/fit-first更平衡，但 bypass budget、保护触发点、unused headroom与private fallback代价必须由 Artifact size、build latency、wait age和cache hit分布校准；当前无实现或 benchmark。
@@ -534,6 +539,8 @@ permalink: /learning/pto-curriculum/
 - 当前 GlobalData lit 证明 EmitC shape/stride/slot template，不证明异步 TLOAD 完成点先于 TFREE；需要 delay/poison 设备测试。
 - `if/loop` 下 exactly-once free、producer/consumer 跨函数累计余额、early-exit cancellation 与下一 dispatch flag 基线尚无统一 verifier 或 E2E。
 
+- 基于 simpler remote wire 的 strict canonical codec 与 PyPTO handle cleanup 边界，推断同样的显式 schema 可承载 durable terminal receipt；但存储引擎选择（segment/SQLite）、`fdatasync` 语义、device-effect witness 和跨节点 durability 均未由当前代码验证。
+
 ## 尚未解释的知识债
 
 - PyPTO Artifact admission/lifecycle 仍缺 durable ticket/BuildIntent schema、individual waiter deadline/cancellation、cancel-after-grant owner fence、revision notification、bounded-bypass/starvation Golden、shared/private/physical双预算、compile-slot admission，以及 `PrivateArtifactLease`、object-cache eviction callback、`ArtifactRuntime.close()`、Worker terminal receipt、shared-owner refcount、crash reaper与failed-rmtree accounting。
@@ -563,6 +570,8 @@ permalink: /learning/pto-curriculum/
 - PlanMemory 跨 root physical WAR、modern hard gates、branch/loop alias closure、greedy placement 与 ReserveBuffer Level/resolve 主链已闭合；仍缺 raw/slot/cursor/base checked arithmetic、internal-hole 多 reserve exact golden、Tile/ReserveBuffer 全局 interval verifier、动态 subview/reinterpret provenance、branch×target×semantic 交叉矩阵，以及 legacy/modern 的 `UB peak + event topology + device latency` 三联对照。
 - Pipe peer identity、local base/flag interval、线性 borrow、正常路径析构 drain 与 component balance 的最小静态证明边界已闭合；仍缺 A2/A3 L2G2L vs A5 L2L device ABI、valid DIR_BOTH/disjoint reuse exact golden、verifier 实现与 FIFO-aware pairing、local multi-pipe E2E，以及 fault/cancel/early-exit 后的 entry 与 flag 余额归零证明。
 - Event ID exhaustion、dynamic lane 异常退出/early-exit、zero-trip 嵌套控制流需要真机 race/stall 与死锁故障注入，FileCheck topology 不能替代。
+
+- `TerminalReceiptV1`/segment/snapshot canonical codec、ACK-after-durability writer、supervisor incarnation CAS、device-effect adapter、exact-rank aggregator、ENOSPC/readonly/torn-tail/split-brain fault matrix与 log compaction尚未实现。
 
 ## 下一批候选主线
 
@@ -1921,3 +1930,30 @@ permalink: /learning/pto-curriculum/
 - ISA知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；新增 distributed runtime terminal ownership 与 Artifact frontier 的跨层连接。
 - 新知识债：canonical receipt codec、durable receipt log/ACK、supervisor takeover replay、rank-set conflict schema、claim migration/charge CAS、跨节点与真机 fault-at-every-boundary Golden。
 - 下一章：**Terminal Receipt 写到哪里——Canonical Codec、Durable Receipt Log 与 Supervisor Takeover Replay。**
+
+
+## 第 93 章课程账本增量
+
+- 日期：2026-11-11
+- 章节：**Terminal Receipt 写到哪里：Canonical Codec、Durable Log 与 Supervisor Takeover Replay**
+- 源码基线：PyPTO [`cc802e9b`](https://github.com/hw-native-sys/pypto/commit/cc802e9b84d428351f7693bf813d4c4b97f4994a) 与 simpler [`f65b6130`](https://github.com/hw-native-sys/simpler/commit/f65b613004d8c33939b69141d78484076d9232fd)，均为研究时默认分支最新提交。相对课程 92，PyPTO 前进 [8 个提交](https://github.com/hw-native-sys/pypto/compare/04aed6915460a98d1ecd07fe29c6e0e7c6da3022...cc802e9b84d428351f7693bf813d4c4b97f4994a)，simpler 前进 [15 个提交](https://github.com/hw-native-sys/simpler/compare/c77294c0323bb3c0f145bf5af8729436a3c64d13...f65b613004d8c33939b69141d78484076d9232fd)；本文直接依赖的 distributed handle、remote wire 与 remote session lifecycle 文件未被这些提交改动。
+- 所选仓库：PyPTO（主知识点）+ simpler（紧密执行关系）。PyPTO 给出进程内 native wait/cleanup/terminal publication；simpler 提供真实 canonical COMPLETION codec、strict decoder 与 reply/reaper ownership，二者共同界定“可观察完成”到“durable receipt”的缺口。
+- 课程位置：`DistributedWorker.submit → simpler TASK/COMPLETION → DistributedRunHandle.result/cleanup → TerminalReceiptV1 → durable append/ACK → exact-rank aggregate → takeover replay → claim/capacity CAS`。
+- 新覆盖文件与符号：
+  - PyPTO `distributed_runner.py`：`DistributedRunHandle.result/_retire_dispatch_handle/DistributedWorker.close` 的 native wait、cleanup/postprocess、cached terminal 与 frame retire
+  - simpler `remote_wire.h/.cpp`：`FrameHeader/CompletionPayload/encode_frame/decode_frame/encode_completion/decode_completion`
+  - simpler `remote_l3_worker.py`：`_send_json/_start_session/_serve_connection/_reap_session_runner` 的 reply 与 runner ownership handoff
+  - `test_distributed_worker.py/test_remote_wire.cpp/test_remote_l3_lifecycle.py`：timeout/cleanup/close、bad header/version/type/flags/truncation/sequence、send/reaper exactly-once
+  - 直接相关历史实现：simpler PR [#1008](https://github.com/hw-native-sys/simpler/pull/1008) 的 transport-neutral canonical wire codec
+- 当前实现边界：PyPTO/simpler 没有 `TerminalReceiptV1`、durable receipt writer/log/ACK、supervisor incarnation registry、exact-rank receipt aggregator、device-effect adapter、claim/capacity CAS 或 online segment compaction；本文是建议协议。
+- 新确认不变量：
+  1. handle terminal、wire completion、Host process-tree terminal 与 durable/device terminal 分层；不能把较弱 observation 冒充较强 scope。
+  2. receipt 绑定 claim/group/supervisor epoch、rank-set digest、source revision、dispatch/effect 与 scope；little-endian、bounded length、known enum、zero reserved、digest/CRC 都 fail closed。
+  3. ACK 只覆盖 append+durability 后的无 gap prefix；sync 后 ACK 前 crash 通过 stable id+digest duplicate 幂等恢复。
+  4. takeover 先 CAS owner/supervisor epoch，再 replay；同 key 异 digest conflict、torn tail、stale epoch 保持 quarantine，不能多数票修复。
+  5. receipt durable、group certificate 与 capacity release 是三个线性化点，最终释放仍需 expected ledger revision CAS。
+- 具体演算：`device_ids=[4,5,6,7]`，shared FP16 `[4,32,128]`，每 rank 8192 B。rank0 durable+ACK，rank1 sync 后 ACK 前 crash，rank2 missing，rank3 仅 HOST_TREE；replay 将 rank1 duplicate 幂等，DEVICE_EFFECT coverage 仍只有 `{0,1}`，rank2/3 共 16384 B quarantine，全部 32768 B 在 ledger CAS 前仍计费。
+- 直接测试事实：现有 UT 固定 handle timeout/cleanup/close、wire header/sequence/bounds/truncation 与 reply/reaper exactly-once；当前没有 append/fsync/ACK crash window、torn record、duplicate/conflict、stale supervisor、split brain、exact-rank durable aggregate、ENOSPC或真机 late-effect 测试。
+- ISA知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；新增 distributed terminal receipt 与 supervisor replay 条目，补齐 runtime terminal evidence 到 Artifact recovery ledger 的持久化桥梁。
+- 新知识债：receipt/segment/snapshot codec、durability backend、supervisor registry、device-effect witness、rank aggregator、claim/charge CAS、跨节点 storage 与 fault-at-every-boundary Golden。
+- 下一章：**Receipt Log 如何压缩——Snapshot Cut、Rank Frontier 与 Crash-safe Segment Compaction。**
