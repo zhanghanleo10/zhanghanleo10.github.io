@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 82 章沿 main 已合入的 `defer_write_release → JobResult.deferred_release → release_deferred_write` 追踪容量返还。当前实现能在活进程内做到“逻辑失败立即 MISS、旧 chunk 等 no-old-writer event 后再回 free list”，但 `_deferred_releases`、计数与 `_free_list` 均是内存态；跨 crash 必须先 durable `ReleaseIntent`，再由绑定 allocation generation 的 allocator CAS 幂等提交。下一章量化 quarantine debt 的 age、bytes 与 closure rate，并建立 admission escalation。
+- 当前主线：第 83 章沿 `get_num_new_matched_tokens → tier lookup/promotion → P2P abort → deferred release → primary allocator` 量化 quarantine debt。main 已有实时 deferred chunk gauge、完成后 hold histogram、allocation-failure counter 与 P2P AbortAck/session-close 升级，但尚无未完成 age×bytes、arrival/closure rate 或 debt-aware admission controller；本章据容量预算推导 `ShedCascade → StopPromotion → scoped ResetSession → FailStop`。下一章把 per-peer attribution、hysteresis 与 deterministic Golden 落成可验证状态机。
 
 ## 已完成章节
 
@@ -95,6 +95,7 @@
 | 2026-11-08 80 | `durable job ledger → unknown quarantine → vector watermark → snapshot manifest CAS → segment GC` | [`fd8f3f39`](https://github.com/vllm-project/vllm/commit/fd8f3f398e0b720f58a682edf2888549cea71451) | [Job Ledger 的 Crash-safe Compaction]({{ '/articles/vllm-job-ledger-unknown-transfer-quarantine-retired-generation-compaction/' | relative_url }}) |
 | 2026-11-09 81 | `unknown quarantine → backend reset/MR revoke certificate → verified capacity release` | [`3b33a845`](https://github.com/vllm-project/vllm/commit/3b33a845c6733a50aafae933c10ac0be0f18be93) | [Backend Reset Certificate 与 Capacity Release]({{ '/articles/vllm-backend-reset-certificate-registration-revoke-capacity-release/' | relative_url }}) |
 | 2026-11-10 82 | `deferred release → durable release intent → generation-fenced allocator CAS → crash replay` | [`05caae03`](https://github.com/vllm-project/vllm/commit/05caae03c20f69436ff7ec23ded339ea104f1a01) | [Crash-safe Capacity Ledger 与 Allocator CAS]({{ '/articles/vllm-crash-safe-capacity-ledger-release-intent-allocator-cas/' | relative_url }}) |
+| 2026-11-11 83 | `deferred debt → age×bytes/closure slope → admission escalation → scoped reset` | [`c3cee35a`](https://github.com/vllm-project/vllm/commit/c3cee35ab85ccd1b9f2fb618927d4aa93183dd61) | [Quarantine Debt 与 Admission Escalation]({{ '/articles/vllm-quarantine-debt-age-bytes-closure-rate-admission-escalation/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -477,6 +478,13 @@
 - `JobResult.deferred_release`、`SecondaryTierManager.drain_jobs`
 - `TieringMetricsTracker.on_promotion_allocation_failure/on_release_deferred/on_deferred_release_done/_observe_active_transfer_stats`
 - `test_timed_out_load_holds_chunks_until_abort_ack`、`test_cpu_manager` 的 pinned/full 分配路径、`test_tiering_metrics_tracker_records_promotion_allocation_failures`、`test_inference_reuses_a_finished_kv_request_id`
+- `OffloadingConnector.get_num_new_matched_tokens`、`OffloadingConnectorScheduler.get_num_new_matched_tokens/_lookup`
+- `TieringOffloadingManager.lookup/_initiate_promotion/_flush_pending_promotions/_complete_promotion/_complete_deferred_releases`
+- `TieringMetricsTracker.on_release_deferred/on_deferred_release_done/on_promotion_allocation_failure/record_backpressure`
+- `TieringOffloadingMetrics.DEFERRED_RELEASE_CHUNKS/DEFERRED_RELEASE_HOLD/PROMOTION_ALLOCATION_FAILURES`
+- `EMABackpressureDetector.should_store/update/on_store_failed`
+- `ClientRole._abort_load/abort_loads`、`_InboundLoadState.release/aborted_at/ack_expired`
+- `test_deferred_release_misses_but_holds_chunks_until_released`、`test_deferred_release_restore_gets_a_fresh_chunk`、`test_deferred_release_partial_failure_holds_only_failed_chunks`
 
 ## 已确认不变量
 
@@ -754,6 +762,12 @@
 266. secondary 命中但 primary promotion 分配失败时，当前 main 记录 allocation-failure 并返回 `MISS`，而非无限 `RETRY`；安全代价被转换成本地重算和潜在 GPU 压力。
 267. tiering `PRIMARY_WRITE_USAGE_PERC` 表示 active promotion，CPU cache write usage继续包含 deferred；诊断 quarantine 必须联合 deferred gauge、hold histogram、CPU write usage 与 allocation-failure counter。
 268. quarantine budget 或水位只能限制新的 promotion admission，不能把时间或容量阈值升级为旧 writer 的 no-more-write witness；释放仍需 terminal/fence evidence。
+269. `DEFERRED_RELEASE_HOLD` 只在 release 时 observe；未结束 hold 是右删失样本，不能用完成样本 p99 证明当前最老 debt 有界。
+270. deferred chunk 仍计入 write-pending，既不在 free list、也不可 eviction；因此 debt 会直接压缩 promotion headroom。
+271. promotion allocation failure 是容量已经不足后的滞后信号；提前 admission 必须联合 current bytes、age×bytes、arrival/closure slope 与 conservative free headroom。
+272. `free + evictable` 只是潜在 headroom，因为 protected keys 可让 eviction 返回 `None`；强 admission 保证应使用保守 free headroom，或显式建模保护集合。
+273. secondary-store EMA backpressure 控制慢 store/cascade，不能替代 consumer-slot quarantine controller；二者只能联动，不能混为同一 closure signal。
+274. oldest age 超过协议证据期限只能升级到 peer/session fault、disconnect/reset 或 fail-stop，永远不能直接授权 chunk reuse。
 
 ## 前置依赖与版本注意
 
@@ -761,6 +775,9 @@
 - 直接向 InputProcessor 传 raw prompt、向 LLMEngine 传 `EngineCoreRequest` 均处于 v0.18 移除迁移期。
 
 ## 尚未解释的知识债
+
+- 缺少未完成 deferred release 的 oldest-age、bytes、age×bytes、arrival/closure rate 与 per-peer attribution；缺少 safe-headroom/max-batch/recovery-reserve 参数来源、hysteresis controller、scoped reset 联动及真机 late-RDMA 容量压力 Golden。
+
 
 - 缺少真实 `RevalidationJob/RecoveryLease/RecoveryBudget`、per-key traffic/cost estimator、mandatory-deadline bucket、动态 admission/LB 联动，以及 starvation、online spike、partial-rank 与 worker-crash 联合 Golden。
 
@@ -2198,3 +2215,29 @@
 - 当前实现边界：main没有durable capacity ledger、release intent、allocator applied-intent/tombstone查询或generation-fenced CAS；本章crash-safe协议是基于当前代码不变量的建议设计。
 - 新知识债：NIXL/UCX revoke certificate正式契约；allocator authority与schema；multi-rank charge粒度；WAL group commit/compaction成本；crash-at-every-boundary及真机same-address late-RDMA测试。
 - 下一章：**Quarantine Debt 何时必须升级——Age×Bytes Budget、Closure Rate 与 Admission Escalation。**
+
+## 第 83 章课程账本增量
+
+- 日期：2026-11-11
+- 章节：**Quarantine Debt 何时必须升级：Age×Bytes、Closure Rate 与 Admission Escalation**
+- 源码基线：[`c3cee35a`](https://github.com/vllm-project/vllm/commit/c3cee35ab85ccd1b9f2fb618927d4aa93183dd61)，为研究时默认分支最新提交；相对第 82 章基线前进 [72 个提交](https://github.com/vllm-project/vllm/compare/05caae03c20f69436ff7ec23ded339ea104f1a01...c3cee35ab85ccd1b9f2fb618927d4aa93183dd61)。CPU manager、tiering manager/metrics/spec、P2P client 与主 deferred-release 测试文件 blob 均未变化。
+- 课程位置：`connector prefix lookup → secondary HIT/promotion → P2P timeout/AbortFetch → deferred-release debt → AbortAck/session close → primary free-list release → debt-aware admission`。
+- 新覆盖文件与符号：
+  - `offloading_connector.py::OffloadingConnector.get_num_new_matched_tokens` 与 `offloading/scheduler.py::OffloadingConnectorScheduler.get_num_new_matched_tokens/_lookup`。
+  - `tiering/manager.py::lookup/_initiate_promotion/_complete_promotion/_process_finished_jobs/_complete_deferred_releases` 与 `_DeferredRelease`。
+  - `cpu/manager.py::prepare_store/_get_num_free_chunks`，`tiering/metrics.py::on_release_deferred/on_deferred_release_done/on_promotion_allocation_failure/record_backpressure`。
+  - `tiering/spec.py` 的 deferred gauge/hold histogram 语义，`tiering/backpressure.py::EMABackpressureDetector`，P2P client `_abort_load/abort_loads`。
+  - `test_tiering_offloading.py` 的 held-until-event、fresh-chunk restore、partial failure、already-set event 与 reset drain 测试。
+- 新确认不变量：
+  1. deferred chunk 对 lookup 已是 MISS，但仍 write-pending、非 free、非 evictable；它会直接压缩下一次 promotion admission。
+  2. deferred gauge 是当前量，hold histogram 只含已经关闭的样本；未关闭最老项不会进入 histogram，必须另报 live age/age×bytes。
+  3. allocation-failure counter 是滞后信号；controller 应在 `T_exhaust` 进入恢复窗口或 safe headroom 小于 `max_batch + reserve` 时先停止新 promotion。
+  4. `free + evictable` 受 protected keys 约束，只是潜在 headroom；保守 admission 必须使用 guaranteed free 或验证可驱逐集合。
+  5. age、bytes 与 closure slope 只决定升级动作，不能替代 no-old-writer evidence；TTL 后 free 始终非法。
+  6. secondary-store EMA backpressure 可减少新 cascade 压力，却不能关闭 P2P writer debt；两套控制环职责不同。
+- 具体演算：16 chunks × 64 KiB。t=0 hold 3 块、t=4 hold 2 块；t=8 时 `Q=320 KiB`、`D=2048 KiB·s`、加权平均年龄 6.4s。10s 窗口内进入6块、关闭1块，净增长32 KiB/s；guaranteed free 256 KiB 时 `T_exhaust≈8s`。若 max promotion batch 3块、recovery reserve 2块，需要320 KiB，故应提前 StopPromotion 并返回MISS，而不是等 allocator 归零。
+- 测试事实：main测试证明 event 前 free 减2且 gauge=2、hold histogram无样本；event 后 histogram计1、free/pending/table归零；相邻测试覆盖fresh chunk、partial failure、already-set event与reset drain。未覆盖 live age/bytes/rate 指标、per-peer attribution、hysteresis admission、恢复重开、真机 late-RDMA 与容量压力联合故障。
+- 当前实现边界：main 已有 in-process deferred release、P2P load/AbortAck 超时升级、实时 chunk gauge、完成后 hold histogram、allocation-failure counter和secondary-store EMA backpressure；没有 age×bytes、closure-rate controller 或 debt-aware promotion admission。
+- 新知识债：right-censored live-age观测；per-peer/tier charge；protected-eviction headroom；max-batch/reserve来源；窗口与hysteresis；backend fence与scoped reset authority；deterministic/真机 Golden。
+- 下一章：**Per-peer Quarantine Controller 怎样可验证——Debt Attribution、Hysteresis 与 Deterministic Golden。**
+
