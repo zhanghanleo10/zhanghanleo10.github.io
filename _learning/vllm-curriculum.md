@@ -96,7 +96,6 @@
 | 2026-11-09 81 | `unknown quarantine → backend reset/MR revoke certificate → verified capacity release` | [`3b33a845`](https://github.com/vllm-project/vllm/commit/3b33a845c6733a50aafae933c10ac0be0f18be93) | [Backend Reset Certificate 与 Capacity Release]({{ '/articles/vllm-backend-reset-certificate-registration-revoke-capacity-release/' | relative_url }}) |
 | 2026-11-10 82 | `deferred release → durable release intent → generation-fenced allocator CAS → crash replay` | [`05caae03`](https://github.com/vllm-project/vllm/commit/05caae03c20f69436ff7ec23ded339ea104f1a01) | [Crash-safe Capacity Ledger 与 Allocator CAS]({{ '/articles/vllm-crash-safe-capacity-ledger-release-intent-allocator-cas/' | relative_url }}) |
 | 2026-11-11 83 | `deferred debt → age×bytes/closure slope → admission escalation → scoped reset` | [`c3cee35a`](https://github.com/vllm-project/vllm/commit/c3cee35ab85ccd1b9f2fb618927d4aa93183dd61) | [Quarantine Debt 与 Admission Escalation]({{ '/articles/vllm-quarantine-debt-age-bytes-closure-rate-admission-escalation/' | relative_url }}) |
-
 | 2026-11-12 84 | `LoadResult peer provenance → per-peer debt → hysteresis admission → deterministic Golden` | [`3319c629`](https://github.com/vllm-project/vllm/commit/3319c629a148c8f7ce088445911d9db4119af134) | [Per-peer Quarantine Controller]({{ '/articles/vllm-per-peer-quarantine-controller-debt-attribution-hysteresis-golden/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
