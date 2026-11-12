@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 83 章沿 `get_num_new_matched_tokens → tier lookup/promotion → P2P abort → deferred release → primary allocator` 量化 quarantine debt。main 已有实时 deferred chunk gauge、完成后 hold histogram、allocation-failure counter 与 P2P AbortAck/session-close 升级，但尚无未完成 age×bytes、arrival/closure rate 或 debt-aware admission controller；本章据容量预算推导 `ShedCascade → StopPromotion → scoped ResetSession → FailStop`。下一章把 per-peer attribution、hysteresis 与 deterministic Golden 落成可验证状态机。
+- 当前主线：第 84 章沿 `P2P load timeout → deferred release → debt attribution → per-peer admission → hysteresis escalation → deterministic Golden`，定位 `LoadResult → JobResult` 的 peer provenance 丢失点。main 已有安全的 deferred release 与 session 内 exact-once release event，但尚无 `QuarantineCause`、per-peer debt map、hysteresis controller 或跨 peer Golden；下一章计算 protected/evictable 条件下的 guaranteed headroom。
 
 ## 已完成章节
 
@@ -96,6 +96,8 @@
 | 2026-11-09 81 | `unknown quarantine → backend reset/MR revoke certificate → verified capacity release` | [`3b33a845`](https://github.com/vllm-project/vllm/commit/3b33a845c6733a50aafae933c10ac0be0f18be93) | [Backend Reset Certificate 与 Capacity Release]({{ '/articles/vllm-backend-reset-certificate-registration-revoke-capacity-release/' | relative_url }}) |
 | 2026-11-10 82 | `deferred release → durable release intent → generation-fenced allocator CAS → crash replay` | [`05caae03`](https://github.com/vllm-project/vllm/commit/05caae03c20f69436ff7ec23ded339ea104f1a01) | [Crash-safe Capacity Ledger 与 Allocator CAS]({{ '/articles/vllm-crash-safe-capacity-ledger-release-intent-allocator-cas/' | relative_url }}) |
 | 2026-11-11 83 | `deferred debt → age×bytes/closure slope → admission escalation → scoped reset` | [`c3cee35a`](https://github.com/vllm-project/vllm/commit/c3cee35ab85ccd1b9f2fb618927d4aa93183dd61) | [Quarantine Debt 与 Admission Escalation]({{ '/articles/vllm-quarantine-debt-age-bytes-closure-rate-admission-escalation/' | relative_url }}) |
+
+| 2026-11-12 84 | `LoadResult peer provenance → per-peer debt → hysteresis admission → deterministic Golden` | [`3319c629`](https://github.com/vllm-project/vllm/commit/3319c629a148c8f7ce088445911d9db4119af134) | [Per-peer Quarantine Controller]({{ '/articles/vllm-per-peer-quarantine-controller-debt-attribution-hysteresis-golden/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2241,3 +2243,37 @@
 - 新知识债：right-censored live-age观测；per-peer/tier charge；protected-eviction headroom；max-batch/reserve来源；窗口与hysteresis；backend fence与scoped reset authority；deterministic/真机 Golden。
 - 下一章：**Per-peer Quarantine Controller 怎样可验证——Debt Attribution、Hysteresis 与 Deterministic Golden。**
 
+## 第 84 章课程账本增量
+
+- 日期：2026-11-12
+- 章节：**Per-peer Quarantine Controller：Debt Attribution、Hysteresis 与 Deterministic Golden**
+- 源码基线：[`3319c629`](https://github.com/vllm-project/vllm/commit/3319c629a148c8f7ce088445911d9db4119af134)，为研究时默认分支最新提交；相对第 83 章基线前进 [91 个提交](https://github.com/vllm-project/vllm/compare/c3cee35ab85ccd1b9f2fb618927d4aa93183dd61...3319c629a148c8f7ce088445911d9db4119af134)。P2P client/session/manager、tiering manager/metrics 与直接测试文件 blob 未变化。
+- 课程位置：`P2P load timeout → deferred release → debt attribution → per-peer admission → hysteresis escalation → deterministic Golden`。
+- 新覆盖文件与符号：
+  - `tiering/base.py::TransferJob/JobResult.deferred_release`。
+  - `p2p/session/client.py::_InboundLoadState/LoadResult/_abort_load/collect_results/close`。
+  - `p2p/session/session.py::P2PSession.poll/close/abort_loads`。
+  - `p2p/manager.py::_sessions/_data_plane_faults/_retained/_poll_once`。
+  - `tiering/manager.py::_DeferredRelease/_complete_promotion/_complete_deferred_releases`，`tiering/metrics.py` deferred gauge/hold histogram。
+  - `test_tiering_offloading.py`、`p2p/test_manager.py`、`p2p/test_sessions.py` 的 deferred-release、AbortAck timeout 与 exact-once 测试。
+- 新确认不变量：
+  1. 当前 `ClientRole` 知道 `peer_id/kv_request_id/round_seq`，但 `_poll_once` 构造 `JobResult` 时只保留 `job_id/success/Event`；consumer debt 在进入通用 tiering 层时失去 peer provenance。
+  2. per-peer attribution 必须使用 `(peer_id, session_generation)`，否则重连产生 ABA；不可变 provenance 不应持有可变 `P2PSession` 引用。
+  3. `sum(peer_debt.chunks) == held_chunks` 与 allocator 容量守恒必须同时成立；找不到 charge、集合不一致或负数均应 fail-stop。
+  4. peer-local gate 必须叠加 global reserve；一次 admission 的检查与 chunk reservation 需要同一线性化点。
+  5. entry 与 exit 使用不同水位，并要求 dwell/连续良好窗口；reset/disconnect 只能索取证据，不能授权 free。
+  6. controller action 以单调 revision 幂等发出；慢动作锁外执行，旧 revision 回报不能覆盖新状态。
+- 具体演算：16 chunks × 64 KiB、reserve 2块。A 两次 timeout 累积5块/320 KiB debt，free从10降到4，A进入 `STOP_PROMOTION`；B 1块请求仍满足 `requested+reserve<=free`，继续 admission。若 aggregate free低于reserve，再触发全局stop。
+- 测试事实：main测试证明timeout后请求只失败一次、key立即MISS、chunk保持held，AbortAck/session close后才恰好释放一次；fake monotonic clock已用于单peer timeout测试。未覆盖双peer attribution、session-generation ABA、hysteresis、revision action、global+peer联合守恒和controller restart。
+- 建议 Golden：fake clock + ordered actions；每步比较规范化 snapshot，验证物理/归因双守恒、no-evidence-no-release、旧代ack不关新债、exact-once、健康peer隔离和exit+dwell。
+- 当前实现边界：main没有 `QuarantineCause`、per-peer debt map、hysteresis controller或对应Golden；本文控制器是从当前安全不变量推导的建议设计。Issue #63602 的GPU/故障记录是实验事实，不是main实现。
+- 新知识债：session generation authority与持久化；protected/evictable guaranteed headroom；peer metrics label基数；controller crash recovery；backend no-old-writer certificate；NIXL/UCX late-WRITE、重连ABA与多peer压力测试。
+- 下一章：**Guaranteed Headroom 怎样计算——Protected Keys、Evictable Set 与 Concurrent Promotion Admission。**
+
+## 第十二次七章知识图谱回顾（第 78–84 章）
+
+- 第 78–80 章把 mirror generation、rank receipt 与 unknown transfer 收敛为可压缩但不可丢证据的 quarantine ledger。
+- 第 81–82 章把 backend revoke/reset certificate 接到 release intent 与 allocator CAS，明确 witness、intent、physical release 三个状态。
+- 第 83–84 章量化 age×bytes/closure debt，再补 per-peer provenance、peer-local admission、global guard、hysteresis 与 deterministic oracle。
+- 当前闭合链：`writer generation → terminal quorum → unknown quarantine → scoped revoke → allocator CAS → debt budget → peer isolation`。
+- 路线调整：下一组先补 guaranteed headroom/protected eviction，再进入 backend fence 与跨进程恢复 Golden，保证 controller 的输入和恢复语义都可验证。
