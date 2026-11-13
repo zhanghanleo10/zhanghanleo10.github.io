@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-12。
+最后更新：2026-11-13。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 94 在课程 93 的 canonical receipt 与 takeover replay 之上，建立多 rank receipt log 的安全压缩协议：cut 必须是按完整 identity 域分组、逐 rank 连续的 vector frontier；snapshot/manifest durable 后仍须原子发布 `CURRENT`，再等待旧 reader generation 退出，最后整段回收或先 copy survivor。当前实现仍无 receipt/snapshot/manifest codec、durability backend、compactor lease、reader pin、device-effect adapter、rank aggregator、claim/charge CAS 或 fault-at-every-boundary Golden。下一步研究 compactor generation lease、reader pin 与双 supervisor 抢占。
+当前阶段：从 Host admission 回接 Python IR → PTOAS → runtime/device 生成链。课程 95 沿课程 94 的 snapshot/manifest 与 reader-safe GC，补齐 online compaction 的所有权协议：per-key `flock` 只串行同 artifact key，不能充当 generation lease；takeover 必须以 CAS 推进 owner epoch/lease revision，并以 fencing token 拒绝旧 Supervisor 的迟到 publish/unlink；reader 必须先注册 generation pin、重读 `CURRENT`，最后一个 path/native user 终态后才 release。当前实现仍无 receipt/snapshot/manifest codec、online GC、generation lease、reader pin registry、CAS/durability backend、device-effect adapter、rank aggregator、claim/charge CAS 或 fault-at-every-boundary Golden。下一步研究 `CURRENT` 已切换而 unlink/reconcile 崩溃时的 Delete Intent、Physical Census 与幂等恢复。
 
 ## 已完成章节
 
@@ -118,6 +118,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-10 | Process-group Terminal Certificate 与 Claim Migration CAS | device_ids rank set → run drain → process-group witness → exact-set aggregate → claim CAS | [课程 92]({% post_url 2026-11-10-pypto-process-group-terminal-certificate-claim-migration-cas %}) |
 | 2026-11-11 | Terminal Receipt 的 Canonical Codec、Durable Log 与 Takeover Replay | handle/wire/process facts → canonical receipt → durable ACK → replay → ledger CAS | [课程 93]({% post_url 2026-11-11-pypto-terminal-receipt-canonical-codec-durable-log-takeover-replay %}) |
 | 2026-11-12 | Receipt Log 的 Snapshot Cut、Rank Frontier 与 Crash-safe Segment Compaction | durable receipt → sealed segment → vector cut → snapshot/CURRENT → reader-safe GC | [课程 94]({% post_url 2026-11-12-pypto-receipt-log-snapshot-rank-frontier-crash-safe-compaction %}) |
+| 2026-11-13 | Compactor Generation Lease、Reader Pin 与双 Supervisor 抢占 | per-key flock → generation CAS/fence → pin/revalidate → CURRENT → fenced GC | [课程 95]({% post_url 2026-11-13-pypto-compactor-generation-lease-reader-pin-supervisor-takeover %}) |
 
 ## ISA 知识地图
 
@@ -142,6 +143,7 @@ permalink: /learning/pto-curriculum/
 | AsyncEvent/aggregate SDMA recovery | SDMA handle 只编码 `postId+queueCount`；`DEFER` 可在 doorbell 前返回 future handle。恢复必须绑定 domain/session/workspace generation 与 owner-range，按 physical post 共同 retire；query 不可用时只能可信 reset 或 quarantine | 已讲透恢复边界；runtime adapter/canary 待实现 |
 | Workspace reuse / ABA boundary | persistent `nextPostId` 与 58-bit fail-before-wrap 只保护 live workspace；fresh allocation 可从零状态开始。generation tombstone 拒绝旧 evidence，但同址 late write 必须由 drain/reset 的 `NoOldWriter` fence 消灭；安全顺序是 fence→tombstone→capacity release→g+1 register | 逻辑/物理 ABA 与顺序证明已讲透；registry、fence adapter、same-VA Golden 待实现 |
 | Completion frontier / tombstone compaction | SDMA watermark 必须逐 queue 维护连续、同代、已持久化的 `postId` 前缀；URMA 必须逐 `(peer,jetty)` 维护 logical `targetCqe`，raw owner bit 不可取 max。tombstone 仅在 producer completion/reset 全覆盖、active reader 越过创建 revision、checkpoint 吸收 `retired_through` 后，按 manifest-first 顺序压缩 | safe cutoff 与 crash 顺序已讲透；schema、reset certificate、reader lease、segment GC 与真机 Golden 待实现 |\n| Snapshot/manifest atomic cutover | current `AsyncCompletionRecord` 是 borrowed runtime view，GM `nextPostId` 只保证 live workspace/session 连续性。建议在 revision R seal segment，先 durable immutable snapshot/manifest，再 CAS/rename `CURRENT`；R+1 起无 gap replay，reader fence 后幂等 GC | cutover/recovery 不变量已讲透；durable store、owner-fenced rotation、reader token、ENOSPC 与 crash harness 待实现 |
+| Compactor generation lease / reader pin | per-key `flock` 仅串行同 artifact key，不能授权 generation compaction。takeover 要 CAS 推进 lease revision/owner epoch，所有 publish/unlink 携 fencing token；reader 先 Pin(G)、重读 `CURRENT`，最后一个 path/native user 终态后 release。TTL/心跳过期只产生 suspect | 所有权与 reader-safe deletion 不变量已讲透；lease/pin codec、CAS backend、多节点 adapter、late-token 与 fault matrix 待实现 |
 | Compaction cadence / backpressure | cadence 必须落在 WA 下界与 replay RTO、durable-space 上界的交集；若 canonical 输入长期不低于 compactor 吸收能力，调周期不能收敛。backpressure 只能抑制新债务，已提交 operation 的完整 completion/reset evidence 必须走预留 safety lane | 稳定性与压力传播边界已讲透；真实 census、benchmark、emergency segment、admission controller 与 ENOSPC Golden 待实现 |
 | TPipe/TPUSH/TPOP | A2/A3 跨 Cube/Vector Tile 传递包含 GM payload ring 与 ready/free credit | 已讲基础 |
 | DIR_BOTH ownership | C2V/V2C 必须使用两条不重叠 ring；总 footprint=`2×SlotNum×SlotSize` | 已讲透核心缺陷 |
@@ -226,12 +228,13 @@ permalink: /learning/pto-curriculum/
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [e151a2d5](https://github.com/hw-native-sys/simpler/commit/e151a2d5433fbc2acdfd21eca41afe3a7cca07c2) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；`remote_wire` Frame/COMPLETION 的 session/worker/sequence、strict decode 与 sequence matching 为 rank frontier 提供最小 source identity；明确 wire completion 不等于 durable snapshot evidence | 跨仓深挖 11 |
 | PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [7f56be24](https://github.com/hw-native-sys/pypto/commit/7f56be2474acc1c4db4034755e5df129a0caf404) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Artifact recovery；沿 `DistributedRunHandle.result/_retire_dispatch_handle/submit` 推导 durable receipt 的 sealed segment、vector cut、snapshot/manifest、`CURRENT` publish 与 reader-safe GC | 跨仓深挖 26 |
+| pypto | [e35f3687](https://github.com/hw-native-sys/pypto/commit/e35f3687af69f6acdea7d15e199df601f05ba007) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Artifact recovery；新增 `ArtifactStore` per-key `flock`/immutable publish、`resolve_persistent → owner._artifact_objects` 与 `ArtifactRuntime` path lifetime，并由此推导 generation lease CAS、reader pin/revalidate、双 Supervisor fencing 与 fenced GC | 跨仓深挖 27 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
 ## 已确认接口与不变量
 
+- online compactor 的删除授权必须同时满足当前 owner epoch/fencing token、`CURRENT` 已越代、segment 被 frontier 完整覆盖、无 unresolved dependency、旧 generation reader pin 归零。lease TTL/reader heartbeat 过期都只允许进入 takeover/suspect 流程，不能直接证明旧 writer 或 native path user 已终止。
 - receipt compaction 的 snapshot cut 是按完整 epoch/session/rank identity 分组的无 gap vector frontier；`CURRENT` durable publish 只提交逻辑替代，旧 segment 必须等 reader pin 离开旧 generation 且所有 unresolved dependency 已保留后才可整段删除。straddling segment 只能保留或先 copy survivor 并发布新 manifest。
 - private artifact 的安全删除不是 build/publish 事件，而是 `PathRefs=0 ∧ InFlight=0 ∧ NativeUse=0`；terminal 后仍须按当前 reaper generation 先 tombstone、再幂等删除，最后以实例 `charge_id` CAS exactly-once release。rename/partial delete/`ENOENT` 都不能越过 identity 核验，删除完成前继续计入 retained bytes。
 - dead-letter 只表示自动删除预算耗尽，不表示 physical bytes 已释放；`DELETE_RETRY/DEAD_LETTER` 都保持 charge。admission 必须原子满足 `live + quarantine + dead-letter + reserved + recovery headroom <= physical budget`，backoff/jitter 无权替代 generation CAS 或 physical absence 证据。
@@ -1987,3 +1990,31 @@ permalink: /learning/pto-curriculum/
 - ISA知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；新增 receipt snapshot/rank frontier/segment GC，补齐 distributed terminal evidence 的长期存储生命周期。
 - 新知识债：receipt/snapshot/manifest canonical codec、durability backend、generation lease、reader pin registry、device-effect witness、rank aggregator、claim/charge CAS 与 fault-at-every-boundary Golden。
 - 下一章：**Compactor 如何取得唯一租约——Generation CAS、Reader Pin 与双 Supervisor 抢占。**
+
+
+## 第 95 章课程账本增量
+
+- 日期：2026-11-13
+- 章节：**Compactor 如何取得唯一租约：Generation CAS、Reader Pin 与双 Supervisor 抢占**
+- 源码基线：PyPTO [`e35f3687`](https://github.com/hw-native-sys/pypto/commit/e35f3687af69f6acdea7d15e199df601f05ba007)，为研究时默认分支最新提交；相对课程 94 前进 [5 个提交](https://github.com/hw-native-sys/pypto/compare/7f56be2474acc1c4db4034755e5df129a0caf404...e35f3687af69f6acdea7d15e199df601f05ba007)，直接依赖的 Artifact Store、persistent JIT、ArtifactRuntime、文档与 UT 未改动。
+- 所选仓库：仅 PyPTO。当前 `ArtifactStore → ArtifactHandle → ArtifactRuntime` 已闭合 writer serialization、path ownership 与 reader lifetime 证据，无需引入第二仓。
+- 课程位置：`receipt vector frontier → snapshot/manifest → generation lease CAS → CURRENT publish → reader pin drain → fenced segment GC → delete reconcile`。
+- 新覆盖文件与符号：
+  - `python/pypto/_fslock.py`：`file_lock` 的 POSIX advisory lock、dead-process release 与 cooperating-writer 边界
+  - `python/pypto/jit/artifact_cache.py`：`ArtifactStore.lookup/get_or_build/_get_or_build/_publish`、`ArtifactHandle`、no-replace publication 与 concurrent deletion unsupported
+  - `python/pypto/jit/_persistent.py`：`resolve_persistent`、`owner._artifact_objects` 的 restored object lifetime
+  - `python/pypto/runtime/_artifact_runtime.py`：`ArtifactRuntime.load/handle/directory/_chips`、`bind_artifact/_attach/restore_artifact` 的 path/native owner lifetime
+  - `docs/en/dev/09-artifact-store.md`、PR [#2723](https://github.com/hw-native-sys/pypto/pull/2723)：offline-only cleanup、reader path validity 与 no cleanup/eviction API
+  - `tests/ut/jit/test_artifact_cache.py`：same-key thread/process dedupe、different-key concurrency、dead-process lock release、fresh publish private retention
+- 当前实现边界：PyPTO 没有 receipt/snapshot/manifest/`CURRENT`、online GC、generation lease、reader pin、CAS/durability backend、session epoch fence 或双 Supervisor takeover；本文为基于现有 immutable publication 与 runtime path lifetime 的建议协议。
+- 新确认不变量：
+  1. per-key `flock` 只消除同 key publication 竞争，不提供 manifest generation 的唯一 compactor authority。
+  2. TTL 过期只允许发起 takeover；CAS 必须单调推进 `lease_revision/owner_epoch`，所有 publish/unlink 携 fencing token，旧 token 的副作用必须被拒绝。
+  3. reader 先读 `CURRENT=G`、注册 `Pin(G)`、再读 `CURRENT`；若已越代则释放并重试，禁止在 handle 暴露后补 pin。
+  4. stale pin 只表示 suspect；必须由 terminal certificate、session/worker epoch fence 或 quarantine 收束，不能按心跳超时直接 GC。
+  5. 删除需同时满足 `CURRENT>G ∧ covered ∧ no-unresolved ∧ ActivePins(G)=∅ ∧ token.epoch=current owner_epoch`。
+- 具体演算：A 以 lease rev40→41/epoch5 构建 G13 后失联；B takeover 到 rev42/epoch6，A 的迟到 publish/unlink 被 fence。B 发布 `CURRENT=G13` 后，R1 仍 Pin(G12)，故 fully covered 的 S17 也不能删；R1 terminal release 后才 fenced delete，含 gap survivor 的 S18 仍保留或先 rewrite。
+- 直接测试事实：现有 UT 证明 4 thread 同 key为1 PUBLISHED+3 HIT、3 spawn process 为1 PUBLISHED+2 HIT、dead process 释放同 inode lock、不同 key 可并发且 fresh PUBLISHED 保留 private path；当前没有双 compactor CAS、late token、pin/revalidate、CURRENT/crash、跨节点存储或 NPU native-user deletion test。
+- ISA 知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；新增 Host Artifact compactor authority 与 reader generation pin，补齐 snapshot cutover 到 physical GC 的并发所有权。
+- 新知识债：lease/pin canonical codec、CAS/durability backend、pin batching/renew/release journal、session epoch fence、orphan inventory、NFS/object-store adapter、双 Supervisor deterministic race 与 fault-at-every-boundary Golden。
+- 下一章：**`CURRENT` 已切换但 unlink 崩溃怎么办——Delete Intent、Physical Census 与幂等 Reconcile。**
