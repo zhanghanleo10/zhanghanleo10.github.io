@@ -116,12 +116,12 @@ sequenceDiagram
     participant A as Supervisor A
     participant L as Lease/CURRENT Store
     participant B as Supervisor B
-    R->>L: read CURRENT=G12, register Pin(G12), re-read
-    A->>L: CAS lease rev40→41, epoch=5, base=G12
+    R->>L: read CURRENT=G12 and register Pin(G12) and re-read
+    A->>L: CAS lease rev40→41 with epoch=5 and base=G12
     A->>L: durable snapshot/manifest G13
-    B->>L: lease timeout; CAS rev41→42, epoch=6
+    B->>L: lease timeout then CAS rev41→42 with epoch=6
     A-->>L: late publish/unlink(epoch=5) rejected
-    B->>L: verify G13 digest; CAS CURRENT G12→G13(epoch=6)
+    B->>L: verify G13 digest then CAS CURRENT G12→G13(epoch=6)
     L-->>B: Pin(G12) still active; GC denied
     R->>L: terminal release Pin(G12)
     B->>L: fenced delete of fully covered old segment
