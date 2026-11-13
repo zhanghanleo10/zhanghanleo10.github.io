@@ -122,7 +122,7 @@ sequenceDiagram
     B->>L: lease timeout then CAS rev41→42 with epoch=6
     A-->>L: late publish/unlink(epoch=5) rejected
     B->>L: verify G13 digest then CAS CURRENT G12→G13(epoch=6)
-    L-->>B: Pin(G12) still active; GC denied
+    L-->>B: Pin(G12) still active so GC is denied
     R->>L: terminal release Pin(G12)
     B->>L: fenced delete of fully covered old segment
 ```
