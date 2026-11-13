@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 84 章沿 `P2P load timeout → deferred release → debt attribution → per-peer admission → hysteresis escalation → deterministic Golden`，定位 `LoadResult → JobResult` 的 peer provenance 丢失点。main 已有安全的 deferred release 与 session 内 exact-once release event，但尚无 `QuarantineCause`、per-peer debt map、hysteresis controller 或跨 peer Golden；下一章计算 protected/evictable 条件下的 guaranteed headroom。
+- 当前主线：第 85 章沿 `Scheduler lookup → primary HIT → secondary promotion → protected eviction → prepare_load`，定位“已报告但未 pin 的 HIT”仍处于 `ref_cnt == 0`、可被同一步 promotion 驱逐的窗口。main 已有 step-scoped manager lock、原子 policy eviction 与精确 evictable count，但还没有 step-level HIT protection；开放 PR #63551 提供候选修复与三条回归测试。下一章把 backend fence 后的 quarantine release 接回 guaranteed headroom。
 
 ## 已完成章节
 
@@ -97,6 +97,7 @@
 | 2026-11-10 82 | `deferred release → durable release intent → generation-fenced allocator CAS → crash replay` | [`05caae03`](https://github.com/vllm-project/vllm/commit/05caae03c20f69436ff7ec23ded339ea104f1a01) | [Crash-safe Capacity Ledger 与 Allocator CAS]({{ '/articles/vllm-crash-safe-capacity-ledger-release-intent-allocator-cas/' | relative_url }}) |
 | 2026-11-11 83 | `deferred debt → age×bytes/closure slope → admission escalation → scoped reset` | [`c3cee35a`](https://github.com/vllm-project/vllm/commit/c3cee35ab85ccd1b9f2fb618927d4aa93183dd61) | [Quarantine Debt 与 Admission Escalation]({{ '/articles/vllm-quarantine-debt-age-bytes-closure-rate-admission-escalation/' | relative_url }}) |
 | 2026-11-12 84 | `LoadResult peer provenance → per-peer debt → hysteresis admission → deterministic Golden` | [`3319c629`](https://github.com/vllm-project/vllm/commit/3319c629a148c8f7ce088445911d9db4119af134) | [Per-peer Quarantine Controller]({{ '/articles/vllm-per-peer-quarantine-controller-debt-attribution-hysteresis-golden/' | relative_url }}) |
+| 2026-11-13 85 | `primary HIT → unpinned window → protected eviction → atomic promotion admission` | [`c07d58dc`](https://github.com/vllm-project/vllm/commit/c07d58dc82d75f7d1a947b3264b460384ec3e18d) | [Guaranteed Headroom]({{ '/articles/vllm-guaranteed-headroom-protected-hits-concurrent-promotion-admission/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2276,3 +2277,29 @@
 - 第 83–84 章量化 age×bytes/closure debt，再补 per-peer provenance、peer-local admission、global guard、hysteresis 与 deterministic oracle。
 - 当前闭合链：`writer generation → terminal quorum → unknown quarantine → scoped revoke → allocator CAS → debt budget → peer isolation`。
 - 路线调整：下一组先补 guaranteed headroom/protected eviction，再进入 backend fence 与跨进程恢复 Golden，保证 controller 的输入和恢复语义都可验证。
+
+## 第 85 章课程账本增量
+
+- 日期：2026-11-13
+- 章节：**Guaranteed Headroom：Protected HITs 与 Concurrent Promotion Admission**
+- 源码基线：[`c07d58dc`](https://github.com/vllm-project/vllm/commit/c07d58dc82d75f7d1a947b3264b460384ec3e18d)，为研究时默认分支最新提交；相对第 84 章基线前进 [91 个提交](https://github.com/vllm-project/vllm/compare/3319c629a148c8f7ce088445911d9db4119af134...c07d58dc82d75f7d1a947b3264b460384ec3e18d)。直接相关代码语义未改变；开放 [PR #63551](https://github.com/vllm-project/vllm/pull/63551) 尚未合入。
+- 课程位置：`per-peer debt gate → primary HIT promise → protected evictable set → atomic promotion reservation → MISS/recompute`。
+- 新覆盖文件与符号：
+  - `vllm/v1/core/sched/scheduler.py::Scheduler.schedule/get_num_new_matched_tokens/update_state_after_alloc`。
+  - `offloading_connector.py::OffloadingConnector.get_num_new_matched_tokens` 与 `offloading/scheduler.py::get_num_new_matched_tokens/update_state_after_alloc/build_connector_meta` 的 step-scoped manager region。
+  - `tiering/manager.py::lookup/_initiate_promotion/on_schedule_end`。
+  - `cpu/manager.py::prepare_load/complete_load/_prepare_store/_get_num_free_chunks/get_stats`。
+  - `cpu/policies/base.py::ChunkStatus/CachePolicy.evict`、`cpu/policies/lru.py::evict/mark_evictable/mark_non_evictable`。
+  - `test_manager.py::test_lru_batch_eviction_failure_is_atomic/test_evictable_cache_chunk_count`；PR #63551 的 `test_step_hit_protection.py` 仅作候选回归证据。
+- 新确认不变量：
+  1. primary lookup 返回 `HIT` 不等于 chunk 已 pin；main 在稍后的 `prepare_load` 才执行 `ref_cnt: 0→1`。
+  2. step-scoped lock 阻止外部线程插入 eviction，却不能阻止同一临界区内后续 promotion 驱逐先前报告的 HIT。
+  3. `_num_evictable_cache_chunks` 是必要条件的 O(1) 快速筛选；充分条件必须由 policy 在完整 protected union 上原子选择 victims。
+  4. `H_guaranteed = |F| + |E \ (P_input ∪ P_step)| - A`；`W/R/Q` 已不在 `F/E`，不可重复扣减。
+  5. 最强 admission certificate 是锁内实际返回的 victim/chunk reservation，而不是脱离 allocator 的瞬时 headroom 数字。
+  6. 容量不足的安全语义是 promotion 返回失败、lookup 降级 `MISS` 并重算，不能牺牲已向 Scheduler 承诺的 HIT。
+- 具体演算：6 chunks × 64 KiB；`E={A,B,C,D}`、`R={E}`、`W={F}`、无 free。当前 step 已报告 `A,B` 为 primary HIT，故 `P_step={A,B}`。两个 promotion `X,Y` 的 nominal headroom 是4，guaranteed headroom只有2，只能原子驱逐 `C,D`；第三个 promotion必须MISS/recompute。
+- 测试事实：main 的 LRU 原子失败测试证明保护3/4 keys时无法驱逐2个且状态不变；evictable-count测试覆盖store、并发load、complete、eviction、failed store与reset。main未覆盖“primary HIT→secondary promotion→prepare_load”同一步顺序。PR #63551 新增保护最老HIT、全idle均被HIT时退化MISS、schedule end释放保护三条候选测试，但未合入。
+- 当前实现边界：main已有step lock、ref-count pin、protected-input eviction、atomic failure和promotion allocation failure→MISS；没有step-level reported-HIT set或`extra_protected` API。PR #63551 是候选实现，不能当作当前代码事实。
+- 新知识债：候选修复的异常路径/finally清理；reset与allocation generation fencing；ARC、多secondary、多request和batch fairness；protected-set大小/扫描成本；quarantine release如何原子加入guaranteed set；真实内存压力Golden。
+- 下一章：**Backend Fence 如何把 Quarantine 容量重新并入 Guaranteed Headroom——Release Witness、Generation Fence 与 Recovery Golden。**
