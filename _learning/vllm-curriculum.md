@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 85 章沿 `Scheduler lookup → primary HIT → secondary promotion → protected eviction → prepare_load`，定位“已报告但未 pin 的 HIT”仍处于 `ref_cnt == 0`、可被同一步 promotion 驱逐的窗口。main 已有 step-scoped manager lock、原子 policy eviction 与精确 evictable count，但还没有 step-level HIT protection；开放 PR #63551 提供候选修复与三条回归测试。下一章把 backend fence 后的 quarantine release 接回 guaranteed headroom。
+- 当前主线：第 86 章沿 `P2P timeout → AbortFetch → deferred release → AbortAck/TransferDone/session close → free-list re-entry`，确认进程内 Event 只证明当前 session 的 writer closure；真正让 Guaranteed Headroom 增长的线性化点是 manager 把 held chunk 重新放入 free list。跨进程恢复仍缺 durable release witness、allocation generation fence、幂等 allocator CAS 与 crash-replay Golden。下一章研究 capacity revision 与 waiter retry，防止释放后的容量被双重预订或丢失唤醒。
 
 ## 已完成章节
 
@@ -98,6 +98,7 @@
 | 2026-11-11 83 | `deferred debt → age×bytes/closure slope → admission escalation → scoped reset` | [`c3cee35a`](https://github.com/vllm-project/vllm/commit/c3cee35ab85ccd1b9f2fb618927d4aa93183dd61) | [Quarantine Debt 与 Admission Escalation]({{ '/articles/vllm-quarantine-debt-age-bytes-closure-rate-admission-escalation/' | relative_url }}) |
 | 2026-11-12 84 | `LoadResult peer provenance → per-peer debt → hysteresis admission → deterministic Golden` | [`3319c629`](https://github.com/vllm-project/vllm/commit/3319c629a148c8f7ce088445911d9db4119af134) | [Per-peer Quarantine Controller]({{ '/articles/vllm-per-peer-quarantine-controller-debt-attribution-hysteresis-golden/' | relative_url }}) |
 | 2026-11-13 85 | `primary HIT → unpinned window → protected eviction → atomic promotion admission` | [`c07d58dc`](https://github.com/vllm-project/vllm/commit/c07d58dc82d75f7d1a947b3264b460384ec3e18d) | [Guaranteed Headroom]({{ '/articles/vllm-guaranteed-headroom-protected-hits-concurrent-promotion-admission/' | relative_url }}) |
+| 2026-11-14 86 | `P2P timeout → deferred release → release witness → generation fence → headroom re-entry` | [`555ae7d1`](https://github.com/vllm-project/vllm/commit/555ae7d1d1989dbf21abb6cee96d8f2cf810ff74) | [Backend Fence 后恢复 Headroom]({{ '/articles/vllm-backend-fence-release-witness-generation-fence-recovery-golden/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2303,3 +2304,29 @@
 - 当前实现边界：main已有step lock、ref-count pin、protected-input eviction、atomic failure和promotion allocation failure→MISS；没有step-level reported-HIT set或`extra_protected` API。PR #63551 是候选实现，不能当作当前代码事实。
 - 新知识债：候选修复的异常路径/finally清理；reset与allocation generation fencing；ARC、多secondary、多request和batch fairness；protected-set大小/扫描成本；quarantine release如何原子加入guaranteed set；真实内存压力Golden。
 - 下一章：**Backend Fence 如何把 Quarantine 容量重新并入 Guaranteed Headroom——Release Witness、Generation Fence 与 Recovery Golden。**
+
+
+## 第 86 章课程账本增量
+
+- 日期：2026-11-14
+- 章节：**Backend Fence 后怎样恢复 Headroom：Release Witness、Generation Fence 与 Recovery Golden**
+- 源码基线：[`555ae7d1`](https://github.com/vllm-project/vllm/commit/555ae7d1d1989dbf21abb6cee96d8f2cf810ff74)，为研究时默认分支最新提交；相对第 85 章基线前进 [103 个提交](https://github.com/vllm-project/vllm/compare/c07d58dc82d75f7d1a947b3264b460384ec3e18d...555ae7d1d1989dbf21abb6cee96d8f2cf810ff74)。直接相关 tiering/P2P 文件未改变；已合入 PR #63779/#64256 是 deferred-release 机制的历史证据，PR #63551 仍未合入。
+- 课程位置：`P2P timeout → failed promotion → deferred release/Q → peer closure witness → primary free list/F → Guaranteed Headroom → next admission`。
+- 新覆盖文件与符号：
+  - `tiering/p2p/session/client.py::_InboundLoadState/LoadResult/_abort_load/abort_loads/on_transfer_done/on_abort_ack/collect_results/close`。
+  - `tiering/manager.py::_DeferredRelease/_complete_promotion/_process_finished_jobs/_complete_deferred_releases`。
+  - `CPUPrimaryTierOffloadingManager.defer_write_release/release_deferred_write/reset_cache`。
+  - `test_tiering_offloading.py` 的 held-until-event、fresh-chunk restore、partial failure、reset drain 测试；`p2p/test_manager.py::test_timed_out_load_holds_chunks_until_abort_ack`。
+- 新确认不变量：
+  1. timeout/逻辑 MISS、writer closure、allocator capacity effect 是三个不同边界；只有最后一项能增加 Guaranteed Headroom。
+  2. 当前 Event 是 in-process release witness：transport/session线程 set，manager poll 线程消费；free-list mutation不在transport线程执行。
+  3. deferred key从policy删除但chunk保持write-pending，既不free也不evictable；同key重建必须获得fresh chunk。
+  4. `release_deferred_write` 的 `held.remove → pending-- → free.append` 是当前容量重入点；重复release在held set处失败，不能静默双重append。
+  5. AbortAck、TransferDone与session close能关闭当前session的writer；Event不携带durable backend/session/allocation generation，不能独立支撑进程重启后的ABA-safe replay。
+  6. 跨恢复的最小充分机制是scoped `NO_OLD_WRITER` witness + allocation-generation/nonce校验 + idempotent allocator CAS；CAS成功才允许 `Q→F`。
+- 具体演算：6 chunks ×64 KiB；`E={A,B}`、`P_step={A}`、`Q={C,D}`、`W={E}`、`F={F}`，初始 `H_g=2`。job 41超时后C/D仍在Q；完整Event被manager消费后两块进入F，`H_g=4`。跨崩溃协议下，stale generation 11 witness不得释放generation 12同地址allocation；partial scope只释放allocator独立建模的subcharge。
+- 测试事实：main测试证明2-key failure后MISS/held=2/free减2，重复poll不释放，Event后held/pending归零且free恢复；fresh restore不复用held ID；3-key partial failure只hold两个失败项；4-chunk P2P集成测试中PD timeout后held=1且free不增，注入AbortAck后free精确加1。
+- Recovery Golden：fake allocator在`WITNESS_DURABLE/CAS_APPLIED/RELEASED_DURABLE`边界逐点崩溃并重放；oracle检查capacity守恒、free ID唯一、stale/duplicate witness不增free、partial scope仍held。当前main没有这组跨restart测试。
+- 当前实现边界：main已有进程内Event gate、AbortAck timeout→disconnect、session close release、deferred gauge/hold histogram与reset drain断言；没有durable release witness、generation-fenced allocator CAS、applied-intent查询或recovery ledger。
+- 新知识债：backend `NO_OLD_WRITER` 正式契约与issuer authority；multi-rank/subcharge粒度；WAL/fsync与compaction；真实NIXL/UCX late-WRITE、address ABA、restart fault injection；Recovery Golden落地。
+- 下一章：**Capacity Revision 怎样防止释放后被双重预订——Waiter Queue、Lost Wakeup 与 Fair Retry Golden。**
