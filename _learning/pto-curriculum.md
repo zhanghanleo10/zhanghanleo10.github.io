@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-14。
+最后更新：2026-11-15。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：从 Host Artifact recovery 收口并回接 Python IR → PTOAS → runtime/device 生成链。课程 96 在课程 95 的 generation lease、Reader Pin 与 fenced GC 之后，区分 logical retirement、physical purge 与 capacity accounting：destructive effect 前先持久化 Delete Intent；同文件系统 tombstone rename 只提供 namespace 提交点、不替代 Pin；重启后由稳定 identity、当前 fence、新鲜 Physical Census 与 `intent_id` ledger CAS 幂等收口。当前实现仍明确不支持 concurrent deletion，也没有 receipt/snapshot/manifest codec、online GC、Delete Intent/Census、generation lease、reader pin registry、CAS/durability backend 或 fault-at-every-boundary Golden。Host recovery 主线至此形成完整建议协议；下一步回到已合入生成链，追踪 grouped A5 VF helper artifact 的 package/load/execute 生命周期。
+当前阶段：课程 97 已从 Host Artifact recovery 回到当前已合入的 Python IR → PTOAS → runtime/device 生成链，闭合 grouped A5 VF helper 的入口归属与独立链接：`PTOCodegenBundle.entry_helpers` 区分 empty 与 missing，把 helper 精确归属到真实 AIC/AIV entry；backend 将该关系投影为 per-entry `vpto_sources`；mixed group 中 AIC 保持空依赖，只有 AIV 进入 PTOAS VPTO LLVM、Bisheng device object 与 caller+helper ELF 链接。当前路径只接受 A5 AIV、PyPTO planner 的静态 local UB capture，并在注册前拒绝 grouped SIMT、dynamic/parameter-backed capture、Bridge dependency 与 unresolved device image。下一步课程 98 深挖 adapter ABI、UB byte offset、parameter effect 与 PTOAS 同步证明，并在正常新章后追加课程 92–98 七章知识图谱回顾。
 
 ## 已完成章节
 
@@ -120,6 +120,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-12 | Receipt Log 的 Snapshot Cut、Rank Frontier 与 Crash-safe Segment Compaction | durable receipt → sealed segment → vector cut → snapshot/CURRENT → reader-safe GC | [课程 94]({% post_url 2026-11-12-pypto-receipt-log-snapshot-rank-frontier-crash-safe-compaction %}) |
 | 2026-11-13 | Compactor Generation Lease、Reader Pin 与双 Supervisor 抢占 | per-key flock → generation CAS/fence → pin/revalidate → CURRENT → fenced GC | [课程 95]({% post_url 2026-11-13-pypto-compactor-generation-lease-reader-pin-supervisor-takeover %}) |
 | 2026-11-14 | Delete Intent、Physical Census 与幂等 Reconcile | CURRENT → durable intent → tombstone rename → purge → census/ledger CAS | [课程 96]({% post_url 2026-11-14-pypto-delete-intent-physical-census-idempotent-reconcile %}) |
+| 2026-11-15 | Grouped A5 VF helper 的入口归属与独立链接 | reg_scope → PTOCodegenBundle.entry_helpers → vpto_sources → PTOAS/Bisheng → AIV ELF | [课程 97]({% post_url 2026-11-15-pypto-grouped-a5-vf-helper-entry-ownership-link %}) |
 
 ## ISA 知识地图
 
@@ -197,6 +198,7 @@ permalink: /learning/pto-curriculum/
 | Cross-backend correlation / evidence join | 公共层统一 logical operation/attempt/generation 与 typed causal DAG，不统一 native topology：A2/A3 mode2 一次 broadcast/reduce 可实现多条逻辑边，A5 必须逐 subblock/pipe 闭包，CPU_SIM 跨 worker 因果必须由 launch/event adapter 补充。physical event/address/sequence 与 timestamp 均不可替代 identity；缺失、冲突或 wrong-generation evidence 为 `UNKNOWN` | identity、causal 与 closure 不变量已讲透；schema/adapter/A5 fault 与真机 Golden 待实现 |
 | Partial graph / fail-closed reconciliation | `missing node/edge/participant` 是证据缺口而非 negative witness；deadline 只触发 reload/query/reset/quarantine。late witness 只闭合原 attempt；scoped reset 只证明安全退休，不证明计算成功；allocator 只消费 owner-fenced、revision-CAS 后的 canonical state | deficit 与 reconciliation 边界已讲透；schema/query/reset/CAS/fault Golden 待实现 |
 
+| Grouped A5 VF helper ownership/link | `PTOCodegenBundle.entry_helpers` 以真实 entry 为 key，empty 与 missing 不等价；backend 将其投影为 per-entry `vpto_sources`，因此 mixed AIC/AIV group 只在 AIV ELF 链入静态 local-UB helper。PTOAS 负责 helper 的 VMI→VPTO/LLVM lowering，PyPTO/Bisheng 负责 object/link 与 runtime registration | 已闭合当前 A5 local-UB 主链；adapter effect/sync、dynamic/FIFO capture 与性能矩阵待补 |
 | VMI→VPTO physical memory legality | VMI logical value 经 layout assignment 后按 1:N 物理化；load 可在 `policy/warn` 下接受未证明的 full-chunk over-read，store 必须保持 exact semantic footprint；readable guard、defined fill 与 consumer observation 是三份证明 | 已讲透当前 VPTO 主路径；shared/EmitC contract 待补 |
 | PTOAddressAnalysis / MemoryAccessPlan | `PTOAddressAnalysis` 从 VPTO address-semantics op 构造 root、typed element/op offset，证明 byte/unit delta、同 root difference 与有限 remainder/alignment；它不证明 allocation extent、alias、coverage 或 fill。现有 `VMIMemoryAccessPlan` 是 VMIToVPTO 内部瞬时 plan，应演进为 shared intent + backend candidate，而非复制第二套地址求解器 | 分析能力边界已讲透；shared IR/provenance/parity 待实现 |
 | Allocation provenance through view/phi/loop | `subview` 平移 base但不新建 owner，`addptr` 不产生 coverage；phi 保留可达 owner集合，loop需证明 backedge owner稳定、offset range/no-wrap，并联合 backend envelope 检查 `maxOffset+envelope≤guard` | 证明规则已闭合；shared certificate与negative matrix待实现 |
@@ -228,8 +230,8 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [e151a2d5](https://github.com/hw-native-sys/simpler/commit/e151a2d5433fbc2acdfd21eca41afe3a7cca07c2) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；`remote_wire` Frame/COMPLETION 的 session/worker/sequence、strict decode 与 sequence matching 为 rank frontier 提供最小 source identity；明确 wire completion 不等于 durable snapshot evidence | 跨仓深挖 11 |
-| PTOAS | [739480c3](https://github.com/hw-native-sys/PTOAS/commit/739480c309c265feee7703cdde42fe89da60b1d9) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `MakePrefetchAsyncContext/TPrefetchAsync/GetPrefetchAsyncSession/WaitAsyncEvent` 的 type/verifier/EmitC 链，确认 PTOAS 消费已绑定 GM workspace pointer 而不拥有全局 admission | 跨仓深挖 26 |
-| pypto | [d0127ff7](https://github.com/hw-native-sys/pypto/commit/d0127ff79cc0e829e420cd01ffded5f4084cdadb) | 既有 Tensor→Tile/partition、prefetch handle、hidden workspace 与 Artifact recovery；沿 `ArtifactStore` immutable publish、manifest inventory、private retention 与 `ArtifactRuntime` path lifetime，补齐 CURRENT 后 Delete Intent、tombstone、Physical Census 与幂等 capacity reconcile 边界 | 跨仓深挖 28 |
+| PTOAS | [e26c3f2](https://github.com/hw-native-sys/PTOAS/commit/e26c3f2af0517a37b71319e2b86ba452eeeecc3a) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 A5 VF helper 的 `--emit-vpto-llvm-ir` text job、VMI strict lowering、vecscope memory-barrier 与 PyPTO 独立 Bisheng/link 消费边界 | 跨仓深挖 27 |
+| pypto | [d0127ff7](https://github.com/hw-native-sys/pypto/commit/d0127ff79cc0e829e420cd01ffded5f4084cdadb) | 既有 Tensor→Tile/partition、prefetch 与 Artifact recovery；新增 `VFHelper/PTOCodegenBundle.entry_helpers`、schema-v4 manifest、per-entry `vpto_sources`、mixed AIC/AIV compile/link/cache 与 `ChipWorker` execution 链 | 跨仓深挖 29 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
@@ -478,6 +480,8 @@ permalink: /learning/pto-curriculum/
 
 ## 待验证推断
 
+- 独立 helper artifact 能缩小增量编译失效域；系统测试已证明 helper source 变化只重编 AIV、不重编 AIC。但 cold PTOAS/Bisheng/link latency、AIV ELF 增量体积、I-cache 与 barrier stall 尚无 benchmark，不能据结构宣称端到端更快。
+
 - bounded bypass + oldest-ticket headroom holdback 在单 bytes quota 下比 strict FIFO/fit-first更平衡，但 bypass budget、保护触发点、unused headroom与private fallback代价必须由 Artifact size、build latency、wait age和cache hit分布校准；当前无实现或 benchmark。
 - `WAIT_SHARED / FALLBACK_PRIVATE / REJECT_RETRYABLE` 是满足deadline与hard resource invariant的最小tri-state候选，但queue ETA、stage-size、private retained lifetime、duplicate compile cost与retry storm需要per-stage telemetry校准；当前没有deadline admission或双预算benchmark。
 
@@ -551,6 +555,8 @@ permalink: /learning/pto-curriculum/
 
 ## 尚未解释的知识债
 
+- Grouped A5 VF 仍缺 direct FIFO/dynamic/parameter-backed capture 的可验证 ownership、helper ABI/schema 跨 PyPTO/PTOAS 版本矩阵、alias/overlap/effect-underclaim/异常退出负向测试，以及 cold compile、link、ELF size 与 single/dual lane barrier 性能数据。
+
 - Receipt generation online deletion 仍缺 `DeleteIntentV1` canonical codec、tombstone namespace、Physical Census revision、owner-fenced purge、capacity ledger CAS、跨节点 storage adapter，以及 intent/rename/parent-fsync/per-file-unlink/ledger 每个边界的 process-kill Golden；native callable 的 terminal witness 也未闭合。
 
 - PyPTO Artifact admission/lifecycle 仍缺 durable ticket/BuildIntent schema、individual waiter deadline/cancellation、cancel-after-grant owner fence、revision notification、bounded-bypass/starvation Golden、shared/private/physical双预算、compile-slot admission，以及 `PrivateArtifactLease`、object-cache eviction callback、`ArtifactRuntime.close()`、Worker terminal receipt、shared-owner refcount、crash reaper与failed-rmtree accounting。
@@ -585,7 +591,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：回到当前已合入生成链，追踪 grouped A5 VF helper artifact 从 `PTOCodegenBundle`、group packaging 到 AIV runtime load/execute 的真实生命周期；课程 98 在正常新章后追加七章知识图谱回顾。
+1. 主线：课程 98 深挖 grouped A5 VF adapter ABI：`parameter_indices/capture_byte_offsets/parameter_effects` 如何约束 caller→helper UB borrow 与 PTOAS 同步；在正常新章后追加课程 92–98 七章知识图谱回顾。
 2. 定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
 3. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 4. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
@@ -2037,3 +2043,20 @@ permalink: /learning/pto-curriculum/
 - ISA 知识地图：无新增 ISA 指令、Tile、layout 或 memory-location 语义；更新 Host Artifact lifecycle/eviction 条目，补齐共享 generation 的 crash-safe physical deletion 与 capacity accounting 边界。
 - 新知识债：DeleteIntent codec、tombstone namespace、census revision、fenced purge、ledger CAS、跨节点 backend、native terminal witness 与 fault-at-every-boundary Golden。
 - 下一章：**Grouped A5 VF 的 helper artifact 如何真正执行——`PTOCodegenBundle`、Group Packaging 与 AIV Runtime。**
+
+## 第 97 章课程账本增量
+
+- 日期：2026-11-15
+- 章节：**Grouped A5 VF helper 怎样只进入 AIV：PTOCodegenBundle、entry_helpers 与独立链接**
+- 源码基线：PyPTO [`d0127ff7`](https://github.com/hw-native-sys/pypto/commit/d0127ff79cc0e829e420cd01ffded5f4084cdadb)，PTOAS [`e26c3f2`](https://github.com/hw-native-sys/PTOAS/commit/e26c3f2af0517a37b71319e2b86ba452eeeecc3a)；直接功能合入为 PyPTO [PR #3416](https://github.com/hw-native-sys/pypto/pull/3416) / [`afa2f835`](https://github.com/hw-native-sys/pypto/commit/afa2f8358aac63727e74ca4ebb8f8e3861a1b921)。
+- 所选仓库：PyPTO 为主，PTOAS 为紧密下游。PyPTO 负责 helper capture、entry ownership、artifact/config 与 runtime link；PTOAS 负责 A5 VMI→VPTO/LLVM lowering 与 sync/barrier pipeline。
+- 课程位置：`reg_scope → PTOCodegenBundle(VFHelper, entry_helpers) → schema-v4 manifest/per-entry vpto_sources → PTOAS LLVM → Bisheng helper.o → AIV ELF → ChipWorker.run`。
+- 新覆盖文件：PyPTO `pto_codegen.h/.cpp`、`vf_codegen.cpp`、`pto_backend.py`、`kernel_compiler.py`、`device_runner.py`、`worker.py`、`03-vpto-vf-integration.md`、`test_reg_bundle.py`、`test_mixed_reg_onboard.py`；PTOAS `ptoas.cpp`、`driver.cpp`、`vmi_ptoas_cli_pipeline.pto`、`vecscope_membar_all.pto`。
+- 新覆盖符号/产物：`VFHelper`、`PTOCodegenBundle`、`GenerateBundle`、`RecordEntryHelperUse`、`_CodegenUnit.entry_helpers`、`_emit_unit`、`vpto_sources`、`_compile_vpto_helpers`、helper PTO/LLVM/object、AIV ELF、`CoreCallable/ChipCallable/ChipWorker`。
+- 新确认不变量：helper 必须归属真实 callable entry，empty 与 missing 不等价；mixed `1 AIC + 1 AIV` 中 AIC helper 集为空、AIV 链入全部归属 helper；helper 只借用 planner 静态 local UB，不拥有 allocation；PTOAS/Bisheng/link 错误必须在 runtime registration 前 fail closed；helper 内容/工具版本进入缓存 identity。
+- 具体演算：`[32,32] BF16 = 1024 elements = 2048 B`；single AIV helper 处理前 64 elements/128 B；dual AIV 两个 helper 分别处理 `[0,64)` double 与 `[64,128)` square，二者均归 AIV entry，完整 1024 elements 逐元素验证。
+- 直接测试事实：bundle ownership/determinism/reset isolation、schema-v4 metadata、PTOAS version gate、parameter-backed rejection；PTOAS lit 验证 VMI→VPTO strict/fast lowering 与 vecscope barrier；mixed ST 验证 AIC/AIV config、helper compile 参数、ELF symbol/relocation、cold/warm cache、helper-only AIV invalidation与完整输出。PR #3416 记录 focused UT 377 passed，Ascend 950DT single/dual case 通过并完成 64 次 1024-element exact comparison，但未宣称全量 suite 全绿。
+- ISA 知识地图：新增 grouped A5 VF helper ownership/link 条目；没有新增 PTO ISA 指令语义，补齐 register/VMI helper 从 local UB borrow 到 AIV executable 的全栈边界。
+- 新知识债：direct FIFO/dynamic capture ownership、adapter effect/sync 证明、ABI/schema 版本矩阵、overlap/underclaim/异常负向测试、cold compile/link/ELF size/barrier benchmark。
+- 下一章：**Grouped A5 VF adapter ABI——`parameter_indices`、`capture_byte_offsets`、`parameter_effects` 与 PTOAS sync 如何组成可验证调用契约**；随后追加课程 92–98 七章知识图谱回顾。
+
