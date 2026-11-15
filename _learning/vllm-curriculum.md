@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 86 章沿 `P2P timeout → AbortFetch → deferred release → AbortAck/TransferDone/session close → free-list re-entry`，确认进程内 Event 只证明当前 session 的 writer closure；真正让 Guaranteed Headroom 增长的线性化点是 manager 把 held chunk 重新放入 free list。跨进程恢复仍缺 durable release witness、allocation generation fence、幂等 allocator CAS 与 crash-replay Golden。下一章研究 capacity revision 与 waiter retry，防止释放后的容量被双重预订或丢失唤醒。
+- 当前主线：第 87 章沿 `secondary HIT → primary real reservation → allocation None → MISS/recompute`，确认 main 没有 Capacity Revision 或 waiter queue；同进程双重预订由 step-scoped manager lock、完整 victim 选择与 free-list pop 的真实 reservation 阻止。lost wakeup 只会在未来引入等待语义后出现；下一章量化 allocation failure 导致的重算成本，建立 wait-or-recompute 的证据阈值。
 
 ## 已完成章节
 
@@ -99,6 +99,7 @@
 | 2026-11-12 84 | `LoadResult peer provenance → per-peer debt → hysteresis admission → deterministic Golden` | [`3319c629`](https://github.com/vllm-project/vllm/commit/3319c629a148c8f7ce088445911d9db4119af134) | [Per-peer Quarantine Controller]({{ '/articles/vllm-per-peer-quarantine-controller-debt-attribution-hysteresis-golden/' | relative_url }}) |
 | 2026-11-13 85 | `primary HIT → unpinned window → protected eviction → atomic promotion admission` | [`c07d58dc`](https://github.com/vllm-project/vllm/commit/c07d58dc82d75f7d1a947b3264b460384ec3e18d) | [Guaranteed Headroom]({{ '/articles/vllm-guaranteed-headroom-protected-hits-concurrent-promotion-admission/' | relative_url }}) |
 | 2026-11-14 86 | `P2P timeout → deferred release → release witness → generation fence → headroom re-entry` | [`555ae7d1`](https://github.com/vllm-project/vllm/commit/555ae7d1d1989dbf21abb6cee96d8f2cf810ff74) | [Backend Fence 后恢复 Headroom]({{ '/articles/vllm-backend-fence-release-witness-generation-fence-recovery-golden/' | relative_url }}) |
+| 2026-11-15 87 | `secondary HIT → primary reservation → allocation failure → MISS/recompute → optional revisioned retry` | [`a16bfee1`](https://github.com/vllm-project/vllm/commit/a16bfee11b92f1809628a8bd1f4bd70cdcb9b576) | [Primary 满了为何直接 MISS]({{ '/articles/vllm-primary-full-miss-capacity-revision-fair-retry/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -772,12 +773,20 @@
 273. secondary-store EMA backpressure 控制慢 store/cascade，不能替代 consumer-slot quarantine controller；二者只能联动，不能混为同一 closure signal。
 274. oldest age 超过协议证据期限只能升级到 peer/session fault、disconnect/reset 或 fail-stop，永远不能直接授权 chunk reuse。
 
+275. 当前 primary 容量不足不进入等待协议：secondary `HIT` 的 promotion reservation 返回 `None` 后，tiering 把它降级为 `MISS`，请求重算；因此 main 没有 waiter 可被“漏唤醒”。
+276. 同进程容量 ownership 的线性化点是 manager lock 内完整 victim 选择与 `_allocate_chunks()` 返回具体 chunk IDs；瞬时 free/evictable 数字本身不是 reservation。
+277. `release_deferred_write()` 只恢复 pool 供给，不绑定 request/waiter；`held.remove` 阻止重复 release，后续 `_free_list.pop()` 决定唯一消费者，当前不提供先失败者优先或 starvation 保证。
+278. 若未来引入异步等待，最小正确顺序是 observe revision、在同一 allocator authority 下 enqueue/subscribe、recheck revision，再在 wake 后重新执行真实 reservation；revision 只能防 lost wakeup，不能授予 slot ownership。
+279. strict FIFO 可给出不饥饿基线但会造成多-chunk 队首阻塞；bounded bypass/aging 若用于提高利用率，必须有显式上界、幂等取消与最终 head reservation，参数只能由重算成本和等待尾延迟实验校准。
+
 ## 前置依赖与版本注意
 
 - 本课程以每章记录的 `main` commit 为准，不把 v0.22.1 专题中的实现自动视为当前事实。
 - 直接向 InputProcessor 传 raw prompt、向 LLMEngine 传 `EngineCoreRequest` 均处于 v0.18 移除迁移期。
 
 ## 尚未解释的知识债
+
+- primary-full 路径缺专门的 secondary-HIT→MISS 回归断言、并发 contender 抢同一 free chunk 的 race test，以及 allocation-failure 与 recompute tokens/GPU time/P99 的关联观测；main 没有 Capacity Revision、waiter queue、取消或 fair retry Golden。
 
 - 缺少未完成 deferred release 的 oldest-age、bytes、age×bytes、arrival/closure rate 与 per-peer attribution；缺少 safe-headroom/max-batch/recovery-reserve 参数来源、hysteresis controller、scoped reset 联动及真机 late-RDMA 容量压力 Golden。
 
@@ -2330,3 +2339,27 @@
 - 当前实现边界：main已有进程内Event gate、AbortAck timeout→disconnect、session close release、deferred gauge/hold histogram与reset drain断言；没有durable release witness、generation-fenced allocator CAS、applied-intent查询或recovery ledger。
 - 新知识债：backend `NO_OLD_WRITER` 正式契约与issuer authority；multi-rank/subcharge粒度；WAL/fsync与compaction；真实NIXL/UCX late-WRITE、address ABA、restart fault injection；Recovery Golden落地。
 - 下一章：**Capacity Revision 怎样防止释放后被双重预订——Waiter Queue、Lost Wakeup 与 Fair Retry Golden。**
+
+
+## 第 87 章课程账本增量
+
+- 日期：2026-11-15
+- 章节：**Primary Tier 满了为何直接 MISS：Capacity Revision、Lost Wakeup 与公平重试**
+- 源码基线：[`a16bfee1`](https://github.com/vllm-project/vllm/commit/a16bfee11b92f1809628a8bd1f4bd70cdcb9b576)，为研究时默认分支最新提交；相对第 86 章基线前进 [46 个提交](https://github.com/vllm-project/vllm/compare/555ae7d1d1989dbf21abb6cee96d8f2cf810ff74...a16bfee11b92f1809628a8bd1f4bd70cdcb9b576)。直接相关 CPU/tiering/offloading Scheduler 文件未变化；已合入 PR #63779/#64256 只作 deferred-release 历史证据。
+- 课程位置：`deferred release → free-list re-entry → secondary HIT → primary real reservation → MISS/recompute → optional revisioned retry`。
+- 新覆盖文件与符号：
+  - `offloading/scheduler.py::OffloadingConnectorScheduler._acquire_step/_release_step/get_num_new_matched_tokens/_maximal_prefix_lookup/build_connector_meta`。
+  - `tiering/manager.py::TieringOffloadingManager.lookup/_initiate_promotion/_complete_deferred_releases` 与 `CPUPrimaryTierOffloadingManager.release_deferred_write`。
+  - `cpu/manager.py::CPUOffloadingManager._get_num_free_chunks/_prepare_store/_allocate_chunks/_free_chunk`。
+  - `test_manager.py::test_lru_batch_eviction_failure_is_atomic/TestARCPolicy.test_batch_eviction_failure_is_atomic`；`test_tiering_offloading.py::test_deferred_release_misses_but_holds_chunks_until_released`。
+- 新确认不变量：
+  1. main 没有 capacity waiter；primary promotion allocation 失败直接变为 `MISS`，所以不存在已承诺的 wakeup。
+  2. capacity observation 不是 ownership；同进程唯一提交点是 manager lock 内完整 victim-set 与具体 chunk-id reservation。
+  3. release 只增加 pool 供给，不定向唤醒或赋予公平次序；下一次成功的 `free_list.pop` 才确定 consumer。
+  4. 未来等待协议必须 observe–subscribe–recheck revision，wake 后重新 reserve；revision 不可替代 allocator ownership。
+  5. FIFO 保证与 slot 利用率冲突；任何 bypass 都要 bounded/aged，并覆盖 abort、already-reserved 与 retry 幂等。
+- 具体演算：4 chunks ×64 KiB，A read-pinned、B evictable、C deferred-held、D write-pending。X 需要2块时 `free=0, evictable=1`，整次 promotion 返回 `None` 且不部分驱逐 B；C release 后 Y 需要1块并在锁内 pop C，随后 Z 不可再次取得 C。X 没有 waiter，已走重算。
+- 测试事实：LRU/ARC 原子失败测试证明 victim 不足时 cache state 不部分变化；deferred-release 测试证明 Event 前 free 不增、重复 poll 不释放、Event 后 free 精确恢复。main 未专门覆盖 primary-full secondary HIT→MISS、两个 contender、lost wakeup、waiter cancellation 或 fairness，因为相应等待机制不存在。
+- 当前实现边界：step-scoped `threading.Lock` 只提供进程内串行化；跨进程 crash recovery 仍需第 86 章的 generation-fenced allocator CAS。Capacity Revision、waiter queue 与 Fair Retry Golden 是基于现有不变量的建议，不是代码事实或已合入计划。
+- 新知识债：allocation-failure attribution；recompute token/FLOP/P99 成本；wait-vs-recompute 阈值；promotion-full 专项回归与 race test；ticket cancel、bounded bypass、跨进程 revision authority 和 crash recovery。
+- 下一章：**Promotion MISS 到底有多贵——Allocation-failure Attribution、Recompute Cost 与 Wait-or-Recompute Golden。**
