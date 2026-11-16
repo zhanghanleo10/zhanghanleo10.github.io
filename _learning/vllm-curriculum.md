@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 87 章沿 `secondary HIT → primary real reservation → allocation None → MISS/recompute`，确认 main 没有 Capacity Revision 或 waiter queue；同进程双重预订由 step-scoped manager lock、完整 victim 选择与 free-list pop 的真实 reservation 阻止。lost wakeup 只会在未来引入等待语义后出现；下一章量化 allocation failure 导致的重算成本，建立 wait-or-recompute 的证据阈值。
+- 当前主线：第 88 章沿 `promotion allocation failure → first MISS → actual prefix boundary → Scheduler token budget → multi-step recompute debt`，确认 main 只记录无 label 的失败次数；失败发生在 `TransferJob` 创建前，promotion latency 也无法覆盖。下一章研究无副作用 counterfactual lookup，为 request/chunk 归因与 wait-or-recompute 校准建立可守恒的 oracle boundary。
 
 ## 已完成章节
 
@@ -100,6 +100,7 @@
 | 2026-11-13 85 | `primary HIT → unpinned window → protected eviction → atomic promotion admission` | [`c07d58dc`](https://github.com/vllm-project/vllm/commit/c07d58dc82d75f7d1a947b3264b460384ec3e18d) | [Guaranteed Headroom]({{ '/articles/vllm-guaranteed-headroom-protected-hits-concurrent-promotion-admission/' | relative_url }}) |
 | 2026-11-14 86 | `P2P timeout → deferred release → release witness → generation fence → headroom re-entry` | [`555ae7d1`](https://github.com/vllm-project/vllm/commit/555ae7d1d1989dbf21abb6cee96d8f2cf810ff74) | [Backend Fence 后恢复 Headroom]({{ '/articles/vllm-backend-fence-release-witness-generation-fence-recovery-golden/' | relative_url }}) |
 | 2026-11-15 87 | `secondary HIT → primary reservation → allocation failure → MISS/recompute → optional revisioned retry` | [`a16bfee1`](https://github.com/vllm-project/vllm/commit/a16bfee11b92f1809628a8bd1f4bd70cdcb9b576) | [Primary 满了为何直接 MISS]({{ '/articles/vllm-primary-full-miss-capacity-revision-fair-retry/' | relative_url }}) |
+| 2026-11-16 88 | `promotion allocation failure → prefix truncation → token budget → recompute debt → wait-or-recompute Golden` | [`1bf414e9`](https://github.com/vllm-project/vllm/commit/1bf414e97acf7563297726531f702cdbea6b2921) | [Promotion MISS 的重算成本]({{ '/articles/vllm-promotion-miss-recompute-cost-wait-or-recompute/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -778,6 +779,11 @@
 277. `release_deferred_write()` 只恢复 pool 供给，不绑定 request/waiter；`held.remove` 阻止重复 release，后续 `_free_list.pop()` 决定唯一消费者，当前不提供先失败者优先或 starvation 保证。
 278. 若未来引入异步等待，最小正确顺序是 observe revision、在同一 allocator authority 下 enqueue/subscribe、recheck revision，再在 wake 后重新执行真实 reservation；revision 只能防 lost wakeup，不能授予 slot ownership。
 279. strict FIFO 可给出不饥饿基线但会造成多-chunk 队首阻塞；bounded bypass/aging 若用于提高利用率，必须有显式上界、幂等取消与最终 head reservation，参数只能由重算成本和等待尾延迟实验校准。
+280. promotion allocation failure 发生在 `TransferJob` 创建前：它没有 copy、job latency 或失败 key 的 primary ownership；现有 counter 只表示 attempt 数。
+281. 直接性能后果是连续可信 prefix 缩短；Core 以 `num_new_tokens = request.num_tokens - num_computed_tokens` 将后缀纳入 token/input budget，代价可能跨多个 engine step。
+282. 精确 allocation-failure debt 定义为 `oracle_boundary - actual_boundary`，不是 failure count × chunk size；首个 MISS 后未扫描的 secondary suffix 使反事实边界在 main 中不可见。
+283. 正常 lookup 在 MISS 后继续会触发更多 promotion并改变被测容量；精确 attribution 需要无副作用 peek/shadow oracle，或明确只报告 actual recompute 与可复用上界。
+284. wait-or-recompute 必须比较 capacity wait + promotion + reschedule 与 cause-tagged recompute GPU time/queue externality，并按模型、并发、prompt/tier 分桶；全局固定阈值没有证据基础。
 
 ## 前置依赖与版本注意
 
@@ -786,7 +792,7 @@
 
 ## 尚未解释的知识债
 
-- primary-full 路径缺专门的 secondary-HIT→MISS 回归断言、并发 contender 抢同一 free chunk 的 race test，以及 allocation-failure 与 recompute tokens/GPU time/P99 的关联观测；main 没有 Capacity Revision、waiter queue、取消或 fair retry Golden。
+- primary-full 路径仍缺 secondary-HIT→MISS→Core token budget 的端到端 Golden、双请求 contender race、无副作用 counterfactual peek、request/group/chunk attribution、cause-tagged scheduled token/GPU time/P99，以及按模型/并发/tier 校准的 wait-or-recompute controller；main 也没有 Capacity Revision、waiter queue、取消或 fair retry Golden。
 
 - 缺少未完成 deferred release 的 oldest-age、bytes、age×bytes、arrival/closure rate 与 per-peer attribution；缺少 safe-headroom/max-batch/recovery-reserve 参数来源、hysteresis controller、scoped reset 联动及真机 late-RDMA 容量压力 Golden。
 
@@ -2363,3 +2369,30 @@
 - 当前实现边界：step-scoped `threading.Lock` 只提供进程内串行化；跨进程 crash recovery 仍需第 86 章的 generation-fenced allocator CAS。Capacity Revision、waiter queue 与 Fair Retry Golden 是基于现有不变量的建议，不是代码事实或已合入计划。
 - 新知识债：allocation-failure attribution；recompute token/FLOP/P99 成本；wait-vs-recompute 阈值；promotion-full 专项回归与 race test；ticket cancel、bounded bypass、跨进程 revision authority 和 crash recovery。
 - 下一章：**Promotion MISS 到底有多贵——Allocation-failure Attribution、Recompute Cost 与 Wait-or-Recompute Golden。**
+
+
+## 第 88 章课程账本增量
+
+- 日期：2026-11-16
+- 章节：**Promotion MISS 到底重算多少：Token Debt 与 Wait-or-Recompute Golden**
+- 源码基线：[`1bf414e9`](https://github.com/vllm-project/vllm/commit/1bf414e97acf7563297726531f702cdbea6b2921)，为研究时默认分支最新提交；相对第 87 章基线前进 [27 个提交](https://github.com/vllm-project/vllm/compare/a16bfee11b92f1809628a8bd1f4bd70cdcb9b576...1bf414e97acf7563297726531f702cdbea6b2921)。直接分析的 CPU/tiering/offloading/core Scheduler 与 metrics 文件没有语义变化；开放 PR #60128/#67052 均未合入。
+- 课程位置：`secondary HIT → primary allocation failure → first MISS → actual boundary → Scheduler num_new_tokens → multi-step recompute debt → wait-or-recompute Golden`。
+- 新覆盖文件与符号：
+  - `offloading_connector.py::OffloadingConnector.get_num_new_matched_tokens/_max_loadable_tokens`。
+  - `offloading/scheduler.py::OffloadingConnectorScheduler.get_num_new_matched_tokens/_lookup_complete_chunks/_maximal_prefix_lookup`。
+  - `tiering/manager.py::TieringOffloadingManager.lookup/_initiate_promotion`。
+  - `cpu/manager.py::CPUOffloadingManager._prepare_store/_allocate_chunks`；`tiering/metrics.py::on_promotion_allocation_failure/_observe_promotion_latency`。
+  - `vllm/v1/core/sched/scheduler.py::Scheduler.schedule` 的 local/external boundary 合并、`num_new_tokens` 与 budget clipping。
+  - `test_metrics.py::test_tiering_metrics_tracker_records_promotion_allocation_failures`、`test_tiering_offloading.py::test_partial_lookup`、`test_scheduler.py::test_scheduler_reports_allocation_failure`。
+- 新确认不变量：
+  1. allocation failure 发生在 promotion `TransferJob` 创建前，没有 copy、job latency 或失败 key 的 primary slot；`kv_load_failure_policy` 不参与。
+  2. `_maximal_prefix_lookup` 在首个 `MISS` 停止，失败点后的 secondary keys 不再推进 resume boundary；Core 把实际 boundary 后缀变成普通 prefill work。
+  3. failure counter 是 attempt count，不含 request/group/chunk position、actual boundary 或后续 scheduled tokens；promotion latency histogram也看不到无 job 的失败。
+  4. 精确债务为 `ΔN = oracle_boundary - actual_boundary`；actual `num_new_tokens` 还包含即使全命中也必须计算的尾 token，二者不能混同。
+  5. 反事实扫描必须无副作用；继续正常 lookup会启动更多 promotion并污染容量。没有 oracle 时只能报告 actual recompute与上界。
+  6. wait-or-recompute阈值必须比较请求完成时间与GPU竞争外部性，并按模型、硬件、prompt、并发和tier分桶校准。
+- 具体演算：`tokens_per_chunk=4`、21-token request；local prefix 4 token，后两块 primary HIT到 boundary 12；token 12–15 的 secondary HIT因 primary full变成MISS，token 16–19虽在secondary也未继续扫描。actual `num_new_tokens=21-12=9`，oracle full hit只需1 token，故allocation-failure debt为8 token；若step token budget=4，代价跨至少3个step。
+- 测试事实：metrics tracker测试只证明一次hook导出counter=1；partial lookup测试证明5 keys中只存前3时连续hit为3；connector scheduler allocation测试证明4-token store offer失败在运行/完成step各计一次。三者没有串成promotion-full→MISS→Core recompute Golden，也未验证无job/无latency sample与输出parity。
+- PR/实验边界：开放 PR #60128 提议FS tier lazy primary allocation并给出性能实验；开放 PR #67052 提议promotion落地后的outcome指标。二者都不是当前main事实，也不提供allocation-failure反事实token debt。
+- 新知识债：side-effect-free `peek` 语义/成本/一致性；attribution trace schema与守恒；cause-tagged token/GPU-time；双请求race、跨step Golden与输出parity；wait threshold实验矩阵；PR #60128/#67052最终状态/API漂移。
+- 下一章：**反事实 Prefix 怎样测而不改变现实——Side-effect-free Peek、Attribution Trace 与 Cost Golden。**
