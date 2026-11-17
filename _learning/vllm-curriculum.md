@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 88 章沿 `promotion allocation failure → first MISS → actual prefix boundary → Scheduler token budget → multi-step recompute debt`，确认 main 只记录无 label 的失败次数；失败发生在 `TransferJob` 创建前，promotion latency 也无法覆盖。下一章研究无副作用 counterfactual lookup，为 request/chunk 归因与 wait-or-recompute 校准建立可守恒的 oracle boundary。
+- 当前主线：第 89 章沿 `actual prefix boundary → normal lookup side effects → isolated async peek → lower/upper observed boundary → cross-step token charge`，确认 main 没有 side-effect-free peek；manager lookup 会 reservation/promotion，FS existence lookup 也拥有独立异步状态生命周期。下一章把 cause-tagged token intervals 接到 ModelRunner/GPU time，研究 padding、batch sharing 与 graph bucket 的成本守恒。
 
 ## 已完成章节
 
@@ -101,6 +101,7 @@
 | 2026-11-14 86 | `P2P timeout → deferred release → release witness → generation fence → headroom re-entry` | [`555ae7d1`](https://github.com/vllm-project/vllm/commit/555ae7d1d1989dbf21abb6cee96d8f2cf810ff74) | [Backend Fence 后恢复 Headroom]({{ '/articles/vllm-backend-fence-release-witness-generation-fence-recovery-golden/' | relative_url }}) |
 | 2026-11-15 87 | `secondary HIT → primary reservation → allocation failure → MISS/recompute → optional revisioned retry` | [`a16bfee1`](https://github.com/vllm-project/vllm/commit/a16bfee11b92f1809628a8bd1f4bd70cdcb9b576) | [Primary 满了为何直接 MISS]({{ '/articles/vllm-primary-full-miss-capacity-revision-fair-retry/' | relative_url }}) |
 | 2026-11-16 88 | `promotion allocation failure → prefix truncation → token budget → recompute debt → wait-or-recompute Golden` | [`1bf414e9`](https://github.com/vllm-project/vllm/commit/1bf414e97acf7563297726531f702cdbea6b2921) | [Promotion MISS 的重算成本]({{ '/articles/vllm-promotion-miss-recompute-cost-wait-or-recompute/' | relative_url }}) |
+| 2026-11-17 89 | `normal lookup side effects → async tri-state peek → boundary interval → cross-step debt conservation` | [`3ea7fcdc`](https://github.com/vllm-project/vllm/commit/3ea7fcdc98380289bb496de0ffff24a2746c9c77) | [反事实 Prefix 的无副作用观测]({{ '/articles/vllm-counterfactual-prefix-side-effect-free-peek-attribution/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -491,6 +492,11 @@
 - `ClientRole._abort_load/abort_loads`、`_InboundLoadState.release/aborted_at/ack_expired`
 - `test_deferred_release_misses_but_holds_chunks_until_released`、`test_deferred_release_restore_gets_a_fresh_chunk`、`test_deferred_release_partial_failure_holds_only_failed_chunks`
 
+- `AsyncLookupManager.LookupState/LookupPhase/lookup/flush/drain_results/cleanup/_worker`
+- `FileSystemTierManager.lookup/on_schedule_end/on_request_finished`、`FsAsyncLookupManager.batch_lookup`
+- `OffloadingConnectorScheduler._maximal_prefix_lookup/get_num_new_matched_tokens` 的 `async_init` gate
+- `PeekTicket/AttributionTrace/PRESENT-ABSENT-UNKNOWN`（第 89 章建议观测协议，尚未合入）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -785,6 +791,14 @@
 283. 正常 lookup 在 MISS 后继续会触发更多 promotion并改变被测容量；精确 attribution 需要无副作用 peek/shadow oracle，或明确只报告 actual recompute 与可复用上界。
 284. wait-or-recompute 必须比较 capacity wait + promotion + reschedule 与 cause-tagged recompute GPU time/queue externality，并按模型、并发、prompt/tier 分桶；全局固定阈值没有证据基础。
 
+285. production `lookup` 的语义是“查找并尽力使 KV 可消费”：secondary HIT 可触发 primary reservation、eviction、promotion、pending job 与指标，因此不能充当反事实观测。
+286. FS secondary existence lookup 也不是纯函数：它创建 request-owned `LookupState`，经历 `PENDING→IN_FLIGHT→RESOLVED`，并依赖 reverse index、generation 与 cleanup。
+287. scheduler 线程直接调用 synchronous `batch_lookup` 会违反 tier 非阻塞契约；反事实扫描必须使用独立、受限的异步 observer，而不能偷用 normal lookup state。
+288. production lookup 将 backend/iterator error fail-closed 为 MISS；cost attribution 必须保留 `UNKNOWN`，否则会把不可观测错误当作不存在并系统性低估 debt。
+289. counterfactual observation 只能提供带时间窗口的 lower/upper boundary，不授予 primary ownership，也不得回写 `num_computed_tokens` 或改变 SchedulerOutput。
+290. 跨 step token charge 应取 scheduled interval 与 `[actual_boundary, observed_boundary)` 的交集；其累计值不得超过 boundary debt，必算 tail、abort 后工作与其他 cause 不得重复归因。
+291. request identity 可存在于有界 trace，但不能成为 Prometheus 高基数 label；聚合维度只能保留 cause/tier/status 等受控集合。
+
 ## 前置依赖与版本注意
 
 - 本课程以每章记录的 `main` commit 为准，不把 v0.22.1 专题中的实现自动视为当前事实。
@@ -792,7 +806,7 @@
 
 ## 尚未解释的知识债
 
-- primary-full 路径仍缺 secondary-HIT→MISS→Core token budget 的端到端 Golden、双请求 contender race、无副作用 counterfactual peek、request/group/chunk attribution、cause-tagged scheduled token/GPU time/P99，以及按模型/并发/tier 校准的 wait-or-recompute controller；main 也没有 Capacity Revision、waiter queue、取消或 fair retry Golden。
+- primary-full 路径仍缺已实现的 side-effect-free peek、跨 tier presence/consistency 契约、采样/QPS/in-flight budget、request-local trace retention，以及 FS/P2P store-delete race 与双请求 observer-noninterference Golden；下一步需把已有 token interval 归因接到 ModelRunner/GPU time，并区分 padding、batch sharing、queueing 与 graph bucket。main 也没有 Capacity Revision、waiter queue、取消或 fair retry Golden。
 
 - 缺少未完成 deferred release 的 oldest-age、bytes、age×bytes、arrival/closure rate 与 per-peer attribution；缺少 safe-headroom/max-batch/recovery-reserve 参数来源、hysteresis controller、scoped reset 联动及真机 late-RDMA 容量压力 Golden。
 
@@ -2396,3 +2410,30 @@
 - PR/实验边界：开放 PR #60128 提议FS tier lazy primary allocation并给出性能实验；开放 PR #67052 提议promotion落地后的outcome指标。二者都不是当前main事实，也不提供allocation-failure反事实token debt。
 - 新知识债：side-effect-free `peek` 语义/成本/一致性；attribution trace schema与守恒；cause-tagged token/GPU-time；双请求race、跨step Golden与输出parity；wait threshold实验矩阵；PR #60128/#67052最终状态/API漂移。
 - 下一章：**反事实 Prefix 怎样测而不改变现实——Side-effect-free Peek、Attribution Trace 与 Cost Golden。**
+
+## 第 89 章课程账本增量
+
+- 日期：2026-11-17
+- 章节：**反事实 Prefix 怎样测而不改变现实：Side-effect-free Peek 与 Attribution Trace**
+- 源码基线：[`3ea7fcdc`](https://github.com/vllm-project/vllm/commit/3ea7fcdc98380289bb496de0ffff24a2746c9c77)，为研究时默认分支最新提交；相对第 88 章基线前进 [116 个提交](https://github.com/vllm-project/vllm/compare/1bf414e97acf7563297726531f702cdbea6b2921...3ea7fcdc98380289bb496de0ffff24a2746c9c77)。`tiering/manager.py`、`tiering/async_lookup.py` 与 connector 入口未改变；[`33ca7f41`](https://github.com/vllm-project/vllm/commit/33ca7f415b23346a8601ac6dc46297dafcfd9f64) 新增 `async_init` readiness gate，形成独立的 `OFFLOADING_DISABLED` 归因原因，但没有增加 peek。
+- 课程位置：`actual boundary → normal lookup side effects → isolated async peek → lower/upper observed boundary → cause-tagged cross-step token charge`。
+- 新覆盖文件与符号：
+  - `vllm/v1/kv_offload/base.py::OffloadKey/ReqContext/LookupResult/OffloadingManager.lookup`。
+  - `tiering/manager.py::TieringOffloadingManager.lookup/_initiate_promotion`。
+  - `tiering/async_lookup.py::LookupState/LookupPhase/AsyncLookupManager.lookup/flush/drain_results/cleanup/_worker`。
+  - `tiering/fs/manager.py::FsAsyncLookupManager.batch_lookup/FileSystemTierManager.lookup/on_schedule_end/on_request_finished`。
+  - `offloading/scheduler.py::_maximal_prefix_lookup/get_num_new_matched_tokens` 与 Core `Scheduler.schedule` 的 boundary/token interval。
+  - `test_async_lookup.py` 的 phase、dedup、shared cleanup、stale generation、iterator failure；`test_tiering_offloading.py::test_partial_lookup`。
+- 新确认不变量：
+  1. normal manager lookup 是 ownership-producing 操作，不是 observational query；secondary HIT 可分配 primary slot、触发 eviction/promotion、pending job 与指标。
+  2. existence probe 也有 request-owned async lifecycle；直接调用 FS lookup 会污染正常 `LookupState/_req_keys`，直接同步调用 backend probe会阻塞 scheduler。
+  3. counterfactual verdict 至少为 `PRESENT/ABSENT/UNKNOWN`；backend error 在 production 可 fail-closed 为 MISS，在 cost attribution 中必须保留 unknown interval。
+  4. observer 不得改变 allocator、policy、jobs、normal metrics、request scheduling 或 SchedulerOutput；结果只用于诊断，不能授予 KV ownership。
+  5. 精确跨 step charge 为 scheduled interval 与 `[actual_boundary, observed_boundary)` 的交集；unknown suffix 只能输出 debt lower/upper bound。
+  6. request id 只进入有界 trace，不进入 Prometheus label；聚合维度保持低基数。
+- 具体演算：21-token request、4 tokens/chunk，actual boundary=12；peek 得到 K3/K4=`PRESENT/PRESENT` 时 observed boundary=20，三步 `[12,16),[16,20),[20,21)` 分别 charge 4/4/0，总 debt=8。若 K4=`UNKNOWN`，只能报告 `debt∈[4,8]`。
+- 测试事实：现有 async lookup 测试证明 phase lifecycle、same-key dedup、shared request cleanup、stale result fencing，以及 iterator failure→MISS 的 production 语义；partial lookup 测试只证明连续 prefix。main 没有 peek purity、tri-state interval、cross-step cost conservation 或 observer-noninterference Golden。
+- PR/实验边界：开放 [PR #60128](https://github.com/vllm-project/vllm/pull/60128) 与 [PR #67052](https://github.com/vllm-project/vllm/pull/67052) 截至 2026-11-17 均未合入；前者改变 lazy primary allocation，后者观测 promotion 落地后的 outcome，均不提供 allocation-failure counterfactual peek。
+- 新知识债：跨 tier consistency/revision、observer sampling/QPS budget、trace codec/TTL、abort/late-result closing、P2P/FS race、GPU-time join与真机 overhead。
+- 下一章：**从 Token Debt 到 GPU Time——Cause-tagged Step Interval、Padding 分摊与 Cost Conservation Golden。**
+
