@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-16。
+最后更新：2026-11-17。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 98 已闭合 grouped A5 VF adapter 的 borrowed-UB 调用契约：caller 侧保留 Tile 参数与 whole-Tile `parameter_effects`，让 PTOAS `InsertSync` 建模 MTE2↔PIPE_V↔MTE3；helper 侧用 `parameter_indices` 选择真实 caller base，以 `capture_byte_offsets` 重建同一 allocation 的静态别名，让 VPTO footprint/membar 区分 overlap 与 disjoint。physical `MemRef.byte_offset` 与 logical `TileView.start_offset` 只各加一次，masked/partial store 保守升级为 `readwrite`。课程 92–98 七章回顾已完成；下一步课程 99 深挖 grouped A5 VF hardware loop 的 loop-carried register/mask、动态 view origin 与跨迭代 UB hazard。
+当前阶段：课程 99 已闭合 grouped A5 VF hardware loop 的双通道回边契约：`VecReg`/`MaskReg` 以 `scf.for iter_args`/`scf.yield` 传递 immutable SSA state；borrowed UB 不作为 Tile carry，而由稳定 capture root、dynamic loop-invariant `TileView.start_offset` 与每迭代 access offset 定址。PTOAS 对跨迭代 RAW/WAR/WAW 做 footprint/Presburger 证明，disjoint 时不加屏障，重叠或未知时在 carrying-loop latch 插入 typed `membar`。下一步课程 100 深挖 Reg/Mask layout fixed point 与 VMI group-slot allocation。
 
 ## 已完成章节
 
@@ -122,11 +122,13 @@ permalink: /learning/pto-curriculum/
 | 2026-11-14 | Delete Intent、Physical Census 与幂等 Reconcile | CURRENT → durable intent → tombstone rename → purge → census/ledger CAS | [课程 96]({% post_url 2026-11-14-pypto-delete-intent-physical-census-idempotent-reconcile %}) |
 | 2026-11-15 | Grouped A5 VF helper 的入口归属与独立链接 | reg_scope → PTOCodegenBundle.entry_helpers → vpto_sources → PTOAS/Bisheng → AIV ELF | [课程 97]({% post_url 2026-11-15-pypto-grouped-a5-vf-helper-entry-ownership-link %}) |
 | 2026-11-16 | Grouped A5 VF adapter ABI 与双层同步 | Tile effects + UB base/offset → caller InsertSync + helper membar | [课程 98]({% post_url 2026-11-16-pypto-grouped-a5-vf-adapter-abi-sync-contract %}) |
+| 2026-11-17 | Grouped A5 VF hardware loop 的跨迭代状态与同步 | Reg/Mask iter_args + stable UB capture → footprint proof / loop-latch membar | [课程 99]({% post_url 2026-11-17-pto-grouped-a5-vf-hardware-loop-state-and-membar %}) |
 
 ## ISA 知识地图
 
 | 主题 | 已确认结论 | 状态 |
 | --- | --- | --- |
+| Grouped A5 VF hardware loop | canonical `[0, stop)`、step=1、嵌套≤4；Reg/Mask 以 `iter_args/yield` carry，UB 以稳定 base/origin+access offset 定址；PTOAS 证明 loop-carried footprint disjoint 或在 latch 插 typed membar。`Require` 不是 final instruction certificate | PyPTO→PTOAS 主链已闭合；真机 dynamic/carry 与最终指令审计待补 |
 | Tile static capacity | 编译期决定资源盒子、布局合法性和指令特化 | 已讲透基础 |
 | Valid region | destination 通常定义语义域；是连续前缀，不是任意 mask；区外默认 unspecified | 已讲透基础 |
 | TileType/location | Vec、Mat、Left、Right、Acc 等位置参与指令重载与校验 | 已讲基础 |
@@ -232,13 +234,16 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [e151a2d5](https://github.com/hw-native-sys/simpler/commit/e151a2d5433fbc2acdfd21eca41afe3a7cca07c2) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；`remote_wire` Frame/COMPLETION 的 session/worker/sequence、strict decode 与 sequence matching 为 rank frontier 提供最小 source identity；明确 wire completion 不等于 durable snapshot evidence | 跨仓深挖 11 |
-| PTOAS | [e26c3f2](https://github.com/hw-native-sys/PTOAS/commit/e26c3f2af0517a37b71319e2b86ba452eeeecc3a) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `PTOIRTranslator::UpdateHelperCallInfo` 对 `pto.tileop.effects`/`subkernel_helper=simd` 的 PIPE_V def-use 建模，以及 VPTO shared-base footprint/membar 的双层同步边界 | 跨仓深挖 28 |
-| pypto | [d0127ff7](https://github.com/hw-native-sys/pypto/commit/d0127ff79cc0e829e420cd01ffded5f4084cdadb) | 既有 Tensor→Tile/partition、prefetch 与 Artifact recovery；新增 `VFOperands/EmitVFHelperCall/EmitVFAdapter`、`parameter_indices/capture_byte_offsets/parameter_effects`、schema-v4 manifest、shared UB base reconstruction 与 alias/effect tests | 跨仓深挖 30 |
+| PTOAS | [5089169d](https://github.com/hw-native-sys/PTOAS/commit/5089169d517c921842e644a0d5ec09921c6351ab) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `PTONarrowVPTOLoopCounters`、`VecScopeMemBarAnalysis` 的 loop result/iter_arg/yield value walk、跨迭代 RAW/WAR/WAW footprint 与 mask/dynamic-disjoint lit | 跨仓深挖 29 |
+| pypto | [442b793f](https://github.com/hw-native-sys/pypto/commit/442b793f38ab7ff43ab6304d6bc34fb001841f81) | 既有 Tensor→Tile/partition、prefetch、Artifact recovery 与 grouped VF ABI；新增 `hardware_loop` contract、Reg/Mask-only carry、`scf.for iter_args/yield`、dynamic loop-invariant view-origin capture 与 compile tests | 跨仓深挖 31 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
 
 ## 已确认接口与不变量
 
+- Grouped A5 VF hardware loop 的回边状态分为两条通道：`VecReg`/`MaskReg` 是 immutable SSA，经 `scf.for iter_args`/`scf.yield` 形成下一版本；borrowed UB Tile 是 mutable reference，不作为 iter_arg，跨迭代 ordering 由地址 footprint 与 `membar` 证明。
+- dynamic stop 与 loop-invariant dynamic `TileView.start_offset` 可被 helper 捕获，但 PyPTO 不为动态 stop 插运行时范围 guard；capture root/ownership 在调用期间稳定，per-iteration 只改变可分析的 access offset。
+- PTOAS 只有在 mask、IV range 与 footprint 能证明相邻迭代 disjoint 时才能省略 latch barrier；RAW/WAR/WAW 分别映射 typed barrier，多个依赖共享 cut 可合并为 `VV_ALL`。`hardware_loop_policy=Require` 与 PTOAS compilation 都不是 final machine instruction certificate。
 - Grouped A5 VF adapter 必须同时保留两种表示：caller 的 `TileBuf` identity/effect 供 PTOAS 建跨 pipe dependency，helper 的 borrowed UB pointer/relative offset 供 VMI/VPTO 建内部 footprint；先降成裸指针会丢 caller ownership，只保留 Tile 又无法形成独立 helper ABI。
 - `parameter_indices` 映射 helper 参数到 caller 参数，`capture_byte_offsets` 映射每个 caller capture 到共享 UB base；两者索引空间不同。base 选择最小 static `MemRef.byte_offset`，位移按目标 element width 对齐；`TileView.start_offset` 由 VMI access 单独加入，不能重复进入 capture displacement。
 - VF memory effect 从 `read` 开始，任一 `reg.store/reg.scatter` 把同 root 累积为 `readwrite`；masked/partial store 不可降成 whole-Tile `write`。caller event 与 helper vecscope membar 分属外部 pipe 与内部 UB hazard，任何一层都不能替代另一层。
@@ -564,7 +569,7 @@ permalink: /learning/pto-curriculum/
 
 ## 尚未解释的知识债
 
-- Grouped A5 VF 静态 local-UB adapter 已闭合 caller Tile effect、shared base/byte offset 与双层同步；仍缺 direct FIFO/dynamic/parameter-backed capture 的可验证 ownership、effect-underclaim fail-closed verifier、跨 helper alias/异常退出负向测试、helper ABI/schema 跨 PyPTO/PTOAS 版本矩阵，以及 cold compile、link、ELF size、event/membar stall 与 single/dual lane性能数据。
+- Grouped A5 VF 静态 local-UB adapter 与 hardware-loop Reg/Mask/UB 回边契约已闭合；仍缺 final hardware-loop instruction certificate、dynamic stop runtime guard、Tile carry 的 owner/alias/effect contract、direct FIFO/parameter-backed capture、跨 helper alias/异常退出、PyPTO/PTOAS ABI 矩阵，以及真机 nested carry、barrier stall、代码体积和展开版本对照。
 
 - Receipt generation online deletion 仍缺 `DeleteIntentV1` canonical codec、tombstone namespace、Physical Census revision、owner-fenced purge、capacity ledger CAS、跨节点 storage adapter，以及 intent/rename/parent-fsync/per-file-unlink/ledger 每个边界的 process-kill Golden；native callable 的 terminal witness 也未闭合。
 
@@ -600,7 +605,7 @@ permalink: /learning/pto-curriculum/
 
 ## 下一批候选主线
 
-1. 主线：课程 99 深挖 grouped A5 VF hardware loop：loop-carried register/mask、dynamic `TileView.start_offset`、跨迭代 UB RAW/WAR/WAW 与 membar placement。
+1. 主线：课程 100 深挖 grouped A5 VF Reg/Mask layout fixed point：`scf.for iter_args`、VMI layout assignment、group-slot allocation 与 loop backedge 的物理寄存器稳定性。
 2. 定义 tombstone safe-cutoff：把 completion consumer watermark、reset certificate scope、reader lease 与 generation wrap policy组合成可验证的 compaction gate；补 same-VA late write、旧 evidence、partial reset 与 crash-at-every-boundary Golden。
 3. 将 scheduler-state、allocator committed/free、fragmentation 与 outside peak 接入 device-wide `MemoryCensus`，再用 pressure metrics 校准 high/low watermark；只有 suballocation 可独立返还 HBM 后才评估 interval index。
 4. 为 Online Softmax/四阶段 pipeline 增加 max 上升/下降、全 mask、non-divisible S1、exp-ring poison/wrap、stage delay 与 CPU/A2A3 parity CI contract。
@@ -2098,3 +2103,26 @@ permalink: /learning/pto-curriculum/
 - 98：`Tile effect + UB base/offset` 把独立 helper 的调用契约闭合为 caller InsertSync 与 helper membar 两层证明。
 - 共同主线：稳定 identity 决定“是谁”，ownership/lifetime 决定“谁能用/删”，effect/terminal evidence 决定“何时可继续”；任何一层缺失都必须 fail closed。
 - 路线调整：Host Artifact recovery 保留为知识债，近期先完成已合入 grouped A5 VF 的 loop/dynamic-view/sync 边界，再评估 dynamic/FIFO capture。
+
+
+## 第 99 章课程账本增量
+
+- 日期：2026-11-17
+- 章节：**Grouped A5 VF hardware loop：跨迭代寄存器状态与 UB membar**
+- 源码基线：PyPTO [`442b793f`](https://github.com/hw-native-sys/pypto/commit/442b793f38ab7ff43ab6304d6bc34fb001841f81) 与 PTOAS [`5089169d`](https://github.com/hw-native-sys/PTOAS/commit/5089169d517c921842e644a0d5ec09921c6351ab)，均为研究时默认分支最新提交；相对课程 98 分别前进 [13](https://github.com/hw-native-sys/pypto/compare/d0127ff79cc0e829e420cd01ffded5f4084cdadb...442b793f38ab7ff43ab6304d6bc34fb001841f81) 与 [9](https://github.com/hw-native-sys/PTOAS/compare/e26c3f2af0517a37b71319e2b86ba452eeeecc3a...5089169d517c921842e644a0d5ec09921c6351ab) 个提交。直接动态循环历史合入为 PyPTO PR [#3253](https://github.com/hw-native-sys/pypto/pull/3253)，当前 Reg/Mask carry 是 grouped VF 后续实现边界。
+- 所选仓库：PyPTO 为主，PTOAS 为紧密下游。PyPTO 定义 hardware-loop 形状、capture 与 SSA carry；PTOAS 消费 `scf.for`、VMI footprint 和 value relay，决定 loop-latch membar。
+- 课程位置：`pl.hardware_loop → ForStmt Require → VF helper scf.for iter_args/yield → VMI load/compute/store → PTOAS loop-carried dependence → no barrier / typed membar`。
+- 新覆盖文件与符号：
+  - PyPTO `dsl_api.py`、`verify_hardware_loop_contract.cpp`、`hardware_loop_analysis.cpp`、`vf_codegen.cpp`、`pto_control_flow_codegen.cpp`、`05_register_add_mul.py`
+  - PyPTO `test_reg_bundle.py`：Reg/Mask carry、scalar carry rejection、dynamic view origin、dynamic stop/nesting
+  - PTOAS `PTONarrowVPTOLoopCounters.cpp`、`VecScopeMemBarAnalysis.cpp`、loop-carried RAW/WAR/WAW、mask footprint 与 dynamic-disjoint lit
+- 新确认不变量：
+  1. Reg/Mask 以 immutable SSA carry；Tile/UB 以 mutable borrowed reference 存活，二者不能用同一机制解释。
+  2. dynamic view origin 是 loop-invariant capture；capture root/owner 不随迭代改变，VMI access offset 可依赖 IV。
+  3. footprint 可证明 disjoint才省略 latch barrier；重叠/未知必须保留 typed membar，多个风险共享 cut 可升级 `VV_ALL`。
+  4. dynamic stop 不带自动 range guard；`Require`、生成 `scf.for` 与 PTOAS 编译都不是最终硬件指令/真机证书。
+- 具体演算：FP32 `[1024]` 拆成 16 个 64-lane chunk，每迭代两次 256 B load + 一次 256 B store，总 UB vector traffic 12288 B；stride=64 时相邻 footprint disjoint，stride=32 时重叠 128 B并需按访问方向插 barrier。
+- 直接测试事实：PyPTO compile tests 覆盖 19-trip VecReg/MaskReg carry、scalar reject、1–4 层/dynamic stop、dynamic INDEX/UINT32 view origin；PTOAS lit 固定 RAW+WAW→`VV_ALL`、look-ahead WAR→`VLD_VST`、prefix mask/dynamic chunk disjoint→无 barrier。直接证据止于 PTOAS compilation/FileCheck，示例明确 codegen-only。
+- ISA 知识地图：无新增高层 PTO ISA 指令；新增 grouped A5 VF loop 的 VMI/VPTO 执行语义，把 Python loop、SSA register state、UB footprint 与 loop-latch synchronization 串成闭环。
+- 新知识债：final instruction audit、dynamic bound guard、Tile carry owner/alias contract、真机 nested/dynamic/carry Golden、跨 helper alias/异常退出，以及 barrier stall/代码体积/展开对照。
+- 下一章：**Grouped A5 VF 的 Reg/Mask layout fixed point——`scf.for iter_args` 如何进入 VMI group-slot allocation。**
