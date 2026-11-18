@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-17。
+最后更新：2026-11-18。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 99 已闭合 grouped A5 VF hardware loop 的双通道回边契约：`VecReg`/`MaskReg` 以 `scf.for iter_args`/`scf.yield` 传递 immutable SSA state；borrowed UB 不作为 Tile carry，而由稳定 capture root、dynamic loop-invariant `TileView.start_offset` 与每迭代 access offset 定址。PTOAS 对跨迭代 RAW/WAR/WAW 做 footprint/Presburger 证明，disjoint 时不加屏障，重叠或未知时在 carrying-loop latch 插入 typed `membar`。下一步课程 100 深挖 Reg/Mask layout fixed point 与 VMI group-slot allocation。
+当前阶段：课程 100 已闭合 grouped A5 VF 的 Reg/Mask layout fixed point：PyPTO 只生成无物理 layout 的 VMI `scf.for` carry；PTOAS 将 `init ↔ region iter_arg ↔ scf.yield operand ↔ scf.for result` 纳入同一 layout equality component，由 cost planner 选择合法 relation，再以 1:N conversion 物理化为 VPTO carrier。`group_slots<8,8>` 可把八个 grouped FP32 结果压入一个 `64xf32` carrier 的 lane 0–7，但这仍不是实际硬件寄存器号分配。下一步课程 101 追踪 VPTO carrier 的 live range、scheduler、backend register allocation 与 spill/reuse 证据。
 
 ## 已完成章节
 
@@ -123,11 +123,13 @@ permalink: /learning/pto-curriculum/
 | 2026-11-15 | Grouped A5 VF helper 的入口归属与独立链接 | reg_scope → PTOCodegenBundle.entry_helpers → vpto_sources → PTOAS/Bisheng → AIV ELF | [课程 97]({% post_url 2026-11-15-pypto-grouped-a5-vf-helper-entry-ownership-link %}) |
 | 2026-11-16 | Grouped A5 VF adapter ABI 与双层同步 | Tile effects + UB base/offset → caller InsertSync + helper membar | [课程 98]({% post_url 2026-11-16-pypto-grouped-a5-vf-adapter-abi-sync-contract %}) |
 | 2026-11-17 | Grouped A5 VF hardware loop 的跨迭代状态与同步 | Reg/Mask iter_args + stable UB capture → footprint proof / loop-latch membar | [课程 99]({% post_url 2026-11-17-pto-grouped-a5-vf-hardware-loop-state-and-membar %}) |
+| 2026-11-18 | Reg/Mask carry 的 layout fixed point 与 group-slot 物理化 | scf.for equality component → costed layout → 1:N VPTO carriers | [课程 100]({% post_url 2026-11-18-pto-vmi-loop-layout-fixed-point-group-slots %}) |
 
 ## ISA 知识地图
 
 | 主题 | 已确认结论 | 状态 |
 | --- | --- | --- |
+| VMI loop layout 与 group-slot | `scf.for` init/iter_arg/yield/result 必须共享 layout；`group_slots<G,K,LS>` 只给映射 lane 语义，carrier 数为 `ceil(G/K)`；VMI 1:N physicalization 改变 VPTO value arity，不等于硬件寄存器编号分配 | PTOAS assignment→VPTO carrier 已闭合；Mask专项、partial packet、allocator/spill 待补 |
 | Grouped A5 VF hardware loop | canonical `[0, stop)`、step=1、嵌套≤4；Reg/Mask 以 `iter_args/yield` carry，UB 以稳定 base/origin+access offset 定址；PTOAS 证明 loop-carried footprint disjoint 或在 latch 插 typed membar。`Require` 不是 final instruction certificate | PyPTO→PTOAS 主链已闭合；真机 dynamic/carry 与最终指令审计待补 |
 | Tile static capacity | 编译期决定资源盒子、布局合法性和指令特化 | 已讲透基础 |
 | Valid region | destination 通常定义语义域；是连续前缀，不是任意 mask；区外默认 unspecified | 已讲透基础 |
@@ -2126,3 +2128,38 @@ permalink: /learning/pto-curriculum/
 - ISA 知识地图：无新增高层 PTO ISA 指令；新增 grouped A5 VF loop 的 VMI/VPTO 执行语义，把 Python loop、SSA register state、UB footprint 与 loop-latch synchronization 串成闭环。
 - 新知识债：final instruction audit、dynamic bound guard、Tile carry owner/alias contract、真机 nested/dynamic/carry Golden、跨 helper alias/异常退出，以及 barrier stall/代码体积/展开对照。
 - 下一章：**Grouped A5 VF 的 Reg/Mask layout fixed point——`scf.for iter_args` 如何进入 VMI group-slot allocation。**
+
+## 第 100 章课程账本增量
+
+- 日期：2026-11-18
+- 章节：**Reg/Mask carry 如何穿过 VMI：循环 layout fixed point 与 group-slot 物理化**
+- 源码基线：PyPTO [`1c445b337e5a`](https://github.com/hw-native-sys/pypto/commit/1c445b337e5af267fd8966fbf4480ed5501932bf) 与 PTOAS [`6c8f9e845496`](https://github.com/hw-native-sys/PTOAS/commit/6c8f9e845496adda51d7e5642caeb58006186742)，均为研究时默认分支最新提交；相对课程 99 分别前进 [8](https://github.com/hw-native-sys/pypto/compare/442b793f38ab7ff43ab6304d6bc34fb001841f81...1c445b337e5af267fd8966fbf4480ed5501932bf) 与 [4](https://github.com/hw-native-sys/PTOAS/compare/5089169d517c921842e644a0d5ec09921c6351ab...6c8f9e845496adda51d7e5642caeb58006186742) 个提交。直接相关 cost-driven planner 合入提交为 PTOAS [`b8fa2e93b5dd`](https://github.com/hw-native-sys/PTOAS/commit/b8fa2e93b5dde141d5f58ac6d83928699e9dbd79)。
+- 所选仓库：PyPTO 作为上游边界，PTOAS 为本章主仓。PyPTO 证明 carry 的逻辑类型和 SSA 形状；PTOAS 决定 control-flow equality、layout relation 与 1:N physicalization。
+- 课程位置：`pl.hardware_loop(init_values) → VMI scf.for → structural equality → costed layout plan → assigned VMI types → VPTO carriers → backend allocator（待下章）`。
+- 新覆盖文件与符号：
+  - PyPTO `vf_codegen.cpp`、`pto_control_flow_codegen.cpp`、`test_reg_bundle.py`
+  - PTOAS `VMIControlFlowSupport::addForConstraints`、`VMILayoutPlanner`、`VMILayoutStructuralEdgeProvider`、`VMIToVPTODataLayoutInternals.cpp`
+  - PTOAS group-slot loop lit 与 DSL-ST numerical Golden
+- 新确认不变量：
+  1. `scf.for` init、region iter_arg、yield operand、result 是硬 layout equality；zero-trip 单独要求 result 可直接承接 init。
+  2. `group_slots<G,K,LS>` 只有映射 lane 有语义，physical carrier 数为 `ceil(G/K)`；padding lane 不能被普通 dense consumer 隐式读取。
+  3. assignment 选择逻辑-物理映射，1:N conversion 改写 VPTO SSA arity；actual register numbering/spill 属于更低后端。
+  4. 不支持 group-slot 的 consumer 必须显式 group broadcast/materialization 或诊断，不能静默 reinterpret。
+- 具体演算：8×16 FP32 UB source 每迭代物理化为两个 `64xf32` carrier，经两次 `vcgadd` 与 `PAT_VL8` 合并；8 个 reduction 结果和 accumulator 使用 `group_slots<8,8>`，循环只 carry 一个 `64xf32` carrier。两次迭代得到 `out[r]=init[r]+2×Σ_c src[r,c]`。
+- 直接测试事实：assignment-only FileCheck 固定五个 accumulator SSA 端点同为 `group_slots<8,8>`；assignment+VMI-to-VPTO 固定单-carrier loop、双-carrier source 与 `PAT_VL8`；DSL-ST 以 `atol=rtol=1e-4` 比较 8 个 FP32 输出。未覆盖 zero/dynamic trip、Mask carry、partial packet、`LS>1`、search-budget failure 与 spill。
+- ISA 知识地图：新增 VMI control-flow layout 与 group-slot 物理化；明确“carrier/slot allocation”不等于实际寄存器编号分配。
+- 知识债：MaskReg layout/granularity；partial packet 与 stride；layout materialization 的循环权重边界；VPTO scheduler/live range；backend register allocation、spill/reload、真机性能与最终指令审计。
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新读取；沿用既有 VPTO/ISA carrier 语义 | ISA 核心地图已较完整；final register/spill 证据待补 |
+| hw-native-sys/PTOAS | control-flow equality、cost planner、group-slot assignment、1:N physicalization、lit/DSL-ST | 本章主仓，layout 主链已闭合 |
+| hw-native-sys/pypto | Reg/Mask logical carry 与无-layout VMI 输出边界 | 紧密上游，生成边界已闭合 |
+| hw-native-sys/simpler | 无新增 | 既有 runtime/task 覆盖保持 |
+| hw-native-sys/pypto-lib | 无新增 | 既有 kernel/model/Golden 覆盖保持 |
+| hw-native-sys/pypto-serving | 无新增 | 既有 serving/KV/request 覆盖保持 |
+
+- 下一章：**VMI 1:N carrier 的 live range 与实际寄存器分配——从 VPTO SSA 到 spill/reuse 的证据边界。**
+
