@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 89 章沿 `actual prefix boundary → normal lookup side effects → isolated async peek → lower/upper observed boundary → cross-step token charge`，确认 main 没有 side-effect-free peek；manager lookup 会 reservation/promotion，FS existence lookup 也拥有独立异步状态生命周期。下一章把 cause-tagged token intervals 接到 ModelRunner/GPU time，研究 padding、batch sharing 与 graph bucket 的成本守恒。
+- 当前主线：第 90 章沿 `cause-tagged step interval → Scheduler logical tokens → CUDA Graph padding → batch GPU Event → conservation ledger`，确认 main 保留 logical/padded 形状并能产生 batch timing sample，但没有 per-request/per-cause GPU time；执行位置分摊只能作为守恒诊断账，边际收益仍需保持 co-batch/context/rank/graph policy 的 paired replay。下一章落地 Cost Conservation Golden，验证 graph bucket cliff 与 multi-rank timing join。
 
 ## 已完成章节
 
@@ -102,6 +102,7 @@
 | 2026-11-15 87 | `secondary HIT → primary reservation → allocation failure → MISS/recompute → optional revisioned retry` | [`a16bfee1`](https://github.com/vllm-project/vllm/commit/a16bfee11b92f1809628a8bd1f4bd70cdcb9b576) | [Primary 满了为何直接 MISS]({{ '/articles/vllm-primary-full-miss-capacity-revision-fair-retry/' | relative_url }}) |
 | 2026-11-16 88 | `promotion allocation failure → prefix truncation → token budget → recompute debt → wait-or-recompute Golden` | [`1bf414e9`](https://github.com/vllm-project/vllm/commit/1bf414e97acf7563297726531f702cdbea6b2921) | [Promotion MISS 的重算成本]({{ '/articles/vllm-promotion-miss-recompute-cost-wait-or-recompute/' | relative_url }}) |
 | 2026-11-17 89 | `normal lookup side effects → async tri-state peek → boundary interval → cross-step debt conservation` | [`3ea7fcdc`](https://github.com/vllm-project/vllm/commit/3ea7fcdc98380289bb496de0ffff24a2746c9c77) | [反事实 Prefix 的无副作用观测]({{ '/articles/vllm-counterfactual-prefix-side-effect-free-peek-attribution/' | relative_url }}) |
+| 2026-11-18 90 | `logical token map → CUDA Graph padding → batch GPU Event → conserved diagnostic allocation` | [`a2915755`](https://github.com/vllm-project/vllm/commit/a2915755bf1dcaf80623e36d079713bfb190c1e7) | [共享 Batch 的 Padding 与 GPU Time 守恒]({{ '/articles/vllm-token-debt-gpu-time-padding-cost-conservation/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2436,4 +2437,30 @@
 - PR/实验边界：开放 [PR #60128](https://github.com/vllm-project/vllm/pull/60128) 与 [PR #67052](https://github.com/vllm-project/vllm/pull/67052) 截至 2026-11-17 均未合入；前者改变 lazy primary allocation，后者观测 promotion 落地后的 outcome，均不提供 allocation-failure counterfactual peek。
 - 新知识债：跨 tier consistency/revision、observer sampling/QPS budget、trace codec/TTL、abort/late-result closing、P2P/FS race、GPU-time join与真机 overhead。
 - 下一章：**从 Token Debt 到 GPU Time——Cause-tagged Step Interval、Padding 分摊与 Cost Conservation Golden。**
+
+## 第 90 章课程账本增量
+
+- 日期：2026-11-18
+- 章节：**Token Debt 不能直接乘毫秒：共享 Batch 的 Padding 与 GPU Time 守恒**
+- 源码基线：[`a2915755`](https://github.com/vllm-project/vllm/commit/a2915755bf1dcaf80623e36d079713bfb190c1e7)，为研究时默认分支最新提交；相对第 89 章基线前进 [91 个提交](https://github.com/vllm-project/vllm/compare/3ea7fcdc98380289bb496de0ffff24a2746c9c77...a2915755bf1dcaf80623e36d079713bfb190c1e7)。Scheduler、ModelRunner、CUDA Graph dispatch 与 timing collector 生产路径没有语义变化；最新 reload 参数修复与本章无关。
+- 课程位置：`cause-tagged step interval → Scheduler logical tokens → CUDA Graph padding → batch GPU Event → conservation ledger → paired replay`。
+- 新覆盖文件与符号：
+  - `vllm/v1/engine/core.py::EngineCore.step`。
+  - `vllm/v1/core/sched/output.py::SchedulerOutput.num_scheduled_tokens/total_num_scheduled_tokens` 与 `scheduler.py::Scheduler.schedule/_update_after_schedule/update_from_output`。
+  - `vllm/v1/worker/gpu/input_batch.py::InputBuffers/InputBatch`，`model_runner.py::GPUModelRunner.execute_model/prepare_inputs/dispatch_cg_and_sync_dp`。
+  - `cudagraph_utils.py::BatchExecutionDescriptor/CUDAGraphManager.dispatch/make_cudagraph_stats`，`dp_utils.py::DPSyncState`。
+  - `async_utils.py::StepTimingCollector/StepTimingSample`，`spec_decode/adaptive_verification.py::batches_to_profile/set_initial_cost_curves`。
+  - `test_cudagraph_manager.py`、`test_gpu_model_runner_v2.py`、`test_adaptive_verification.py` 的 padding、DP dummy、cost-curve 与 compact-batch 测试。
+- 新确认不变量：
+  1. logical work `L = sum(SchedulerOutput.num_scheduled_tokens.values())`；它只覆盖真实 request，不包含 graph/DP padding。
+  2. execution shape `P = BatchExecutionDescriptor.num_tokens >= L`；padding 改变 buffer/graph shape，但不推进 request 的 computed token。
+  3. `StepTimingSample.forward_ms` 是共享 batch 的 GPU Event 时间，当前 schema 没有 request/cause identity。
+  4. `InputBatch.num_scheduled_tokens` 在 adaptive verification 下可为 upper bound；归因必须使用实际 compact 后 token 数或标记样本不完整。
+  5. `cause + padding + residual == T_batch` 可作为诊断守恒 Golden；执行位置线性分摊不是边际因果估计。
+  6. 真正的 `marginal_gpu_time` 需要 paired replay 固定其余 request、context、rank 与 graph policy，并显式处理 graph bucket cliff。
+- 具体演算：5 个 uniform decode 请求各3 token，`L=15`；现有 CUDA Graph 测试证明 FULL graph descriptor 可为 `P=18`、6 padded requests。若A的cause debt为2 token、演算用 `T=0.90 ms`，则独立padding bucket为0.15 ms、cause diagnostic account为0.10 ms、residual为0.65 ms，严格守恒；0.10 ms不等于修复后的可节省时间。
+- 测试事实：main测试覆盖5×3 uniform decode的15→18 FULL padding、非uniform 15→16 PIECEWISE padding、DP dummy shape、prompt-tail graph bound、profile sample进入cost curve以及compact batch token守恒。没有测试per-request/per-cause GPU time、padding独立分摊、cause overlap、DP多rank event聚合或shape-preserving paired replay。
+- PR边界：开放 [PR #62960](https://github.com/vllm-project/vllm/pull/62960) 提议把adaptive-verification单一成本曲线拆成token/context/slot等因素并处理graph cliff；截至本章仍未合入，不能当作main事实。
+- 新知识债：稳定step-id/timing join；cause冲突优先级；DP/PP event聚合；MoE/context/request-slot非线性；paired replay harness；真机event overhead与bucket cliff；PR #62960最终状态/API漂移。
+- 下一章：**Cost Conservation Golden 怎样做成真——Paired Replay、Graph Bucket Cliff 与 Multi-rank Timing Join。**
 
