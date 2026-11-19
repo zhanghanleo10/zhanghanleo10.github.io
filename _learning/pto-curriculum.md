@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-18。
+最后更新：2026-11-19。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 100 已闭合 grouped A5 VF 的 Reg/Mask layout fixed point：PyPTO 只生成无物理 layout 的 VMI `scf.for` carry；PTOAS 将 `init ↔ region iter_arg ↔ scf.yield operand ↔ scf.for result` 纳入同一 layout equality component，由 cost planner 选择合法 relation，再以 1:N conversion 物理化为 VPTO carrier。`group_slots<8,8>` 可把八个 grouped FP32 结果压入一个 `64xf32` carrier 的 lane 0–7，但这仍不是实际硬件寄存器号分配。下一步课程 101 追踪 VPTO carrier 的 live range、scheduler、backend register allocation 与 spill/reuse 证据。
+当前阶段：课程 101 已闭合 VPTO carrier 的静态 live-range/pressure 主链：PTOAS 从 sched DAG 的 live-in、remaining uses、last use 与 live-out 计算 vector/predicate pressure；A5 模型的上限为 vector 32、predicate 7；高压时只对 cheap/pure/已知 trip-count producer 做有界 rematerialization，并在第二次调度后以“所有 pressure set 不超限且 vector peak 严格下降”决定提交或回滚。该 pass 不分配真实 V0/V1，也不插入 spill；实际编号、复用和必要 spill 属于 Bisheng，VF stack bytes 只是风险指标。下一步课程 102 从真实 kernel 的 VPTO emission 追到 LLVM/hivm、Bisheng VReg/MaskReg/Stack report 与 allocator/spill 可见证据。
 
 ## 已完成章节
 
@@ -124,12 +124,14 @@ permalink: /learning/pto-curriculum/
 | 2026-11-16 | Grouped A5 VF adapter ABI 与双层同步 | Tile effects + UB base/offset → caller InsertSync + helper membar | [课程 98]({% post_url 2026-11-16-pypto-grouped-a5-vf-adapter-abi-sync-contract %}) |
 | 2026-11-17 | Grouped A5 VF hardware loop 的跨迭代状态与同步 | Reg/Mask iter_args + stable UB capture → footprint proof / loop-latch membar | [课程 99]({% post_url 2026-11-17-pto-grouped-a5-vf-hardware-loop-state-and-membar %}) |
 | 2026-11-18 | Reg/Mask carry 的 layout fixed point 与 group-slot 物理化 | scf.for equality component → costed layout → 1:N VPTO carriers | [课程 100]({% post_url 2026-11-18-pto-vmi-loop-layout-fixed-point-group-slots %}) |
+| 2026-11-19 | VPTO carrier live range、rematerialization 与 spill 边界 | SSA liveness → pressure sets → transactional remat → Bisheng allocation boundary | [课程 101]({% post_url 2026-11-19-pto-vpto-live-range-rematerialization-spill-boundary %}) |
 
 ## ISA 知识地图
 
 | 主题 | 已确认结论 | 状态 |
 | --- | --- | --- |
 | VMI loop layout 与 group-slot | `scf.for` init/iter_arg/yield/result 必须共享 layout；`group_slots<G,K,LS>` 只给映射 lane 语义，carrier 数为 `ceil(G/K)`；VMI 1:N physicalization 改变 VPTO value arity，不等于硬件寄存器编号分配 | PTOAS assignment→VPTO carrier 已闭合；Mask专项、partial packet、allocator/spill 待补 |
+| VPTO carrier live range 与 register pressure | `VRegType`/`MaskType` 分别贡献 vector/predicate 1 单位；bitcast 共享 pressure representative；last use 与 live-through 决定静态峰值。高压 remat 只塑造 live range，提交需二次调度后全部 set 合法且 vector peak 下降；真实编号/spill 留给 Bisheng，stack bytes 不是 spill 证明 | PTOAS scheduler/remat 已闭合；VPTO emission、allocator mapping/spill dump 待补 |
 | Grouped A5 VF hardware loop | canonical `[0, stop)`、step=1、嵌套≤4；Reg/Mask 以 `iter_args/yield` carry，UB 以稳定 base/origin+access offset 定址；PTOAS 证明 loop-carried footprint disjoint 或在 latch 插 typed membar。`Require` 不是 final instruction certificate | PyPTO→PTOAS 主链已闭合；真机 dynamic/carry 与最终指令审计待补 |
 | Tile static capacity | 编译期决定资源盒子、布局合法性和指令特化 | 已讲透基础 |
 | Valid region | destination 通常定义语义域；是连续前缀，不是任意 mask；区外默认 unspecified | 已讲透基础 |
@@ -2163,3 +2165,38 @@ permalink: /learning/pto-curriculum/
 
 - 下一章：**VMI 1:N carrier 的 live range 与实际寄存器分配——从 VPTO SSA 到 spill/reuse 的证据边界。**
 
+
+
+## 课程 101 增量（2026-11-19）
+
+- 文章：[VPTO carrier 如何活到后端：live range、rematerialization 与 spill 证据边界]({% post_url 2026-11-19-pto-vpto-live-range-rematerialization-spill-boundary %})。
+- 源码基线：PTOAS [`3b344c1277d8`](https://github.com/hw-native-sys/PTOAS/commit/3b344c1277d8b44d04ff9de6dd8325198b83a43c)；相对课程 100 基线前进 8 个提交，直接 scheduler/remat 文件未变，本文补齐既有主线而非源码变更摘要。
+- 主知识点：`VPTORegPressureTracker` 以 sched DAG 的 live-in、representative、remaining uses、last use 与 live-out 维护 `current/peak`；A5 `vector=32`、`predicate=7`，`VRegType`/`MaskType` 各贡献 1，`vbitcast/pbitcast` 不重复计数。
+- 紧密关联点：rematerialization 按 `schedule → high-pressure analysis → bounded clone → second schedule → commit/rollback` 执行；candidate 必须 cheap、pure、单结果、无 region、dominance 合法且 loop trip count 可知。搜索预算为 16 candidates、depth 2、4 groups/candidate、2 uses/group、96 clones、2048 dynamic micro-ops。
+- 具体演算：31 个 `64xi32` 输入 carrier + 2 个索引 carrier 使 vector peak 为 33；两个 candidate/三个 use group 重物化后 vector 为 32，但 predicate 从 6 到 7。最终结果同时满足两类 limit 才提交。
+- 已确认边界：PTOAS 这里不编物理寄存器号，不创建 spill buffer，不插 spill/reload。Bisheng auto 比较 scheduler on/off 的 SIMD VF stack bytes 并选较小产物；stack 是风险指标，不能证明具体 SSA value 已 spill，也不保证 ticks 更低。
+- 直接测试事实：pressure-set 正例固定 `33→32`、`6→7`；rollback 用例固定无改善 `33→33` 后恢复原 IR；budget 用 48 candidate 触发 16 上限并因最终 33 超限回滚；legality 覆盖 depth、target cost、uncovered use、unknown trip cost；live-through 覆盖跨 `scf.for` region 的 5 个 live-in/live-out；真实工具链脚本验证 on/off/auto stack decision 与 SIM 数值。
+- 待验证推断：静态 pressure 下降可能降低 spill 风险，但本章没有 allocator dump、V0/V1 mapping、spill/reload 指令或该合成用例的 ticks，因此不把它写成实际 spill 消除或性能提升。
+- 知识债：VPTO→LLVM/hivm emission；Bisheng `VReg number/MaskReg/Stack size` 与 SSA 的可追溯关系；allocator/spill dump；dynamic-trip 替代策略；stack、UB traffic 与 ticks 的相关性。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| VPTO carrier → live range | SSA definition/use、live-in/live-out 与 last use 决定活跃集合；多 carrier value 已在 1:N lowering 中拆开计数 | 跨函数 ABI 与真实 kernel 的 carrier-to-VReg mapping |
+| live range → static pressure | vector/predicate 独立计数，跨类 release 不能抵消另一个 pressure set | 真实硬件同时活跃寄存器与模型误差 |
+| static pressure → remat | 仅 vector peak>32 触发；cheap/pure/已知 trip producer可近用点复制，二次调度验收 | dynamic trip、profile-guided 与更广 op 成本模型 |
+| PTOAS → Bisheng | 中层塑造 live range；后端负责实际 allocation/reuse/spill，stack report 仅作 scheduler 选择指标 | 物理编号、spill 位置/指令及可用诊断格式 |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增；沿用已建立的 256 B/2048-bit carrier 语义 | ISA 核心语义保持；最终 allocator 非该仓公开职责 |
+| hw-native-sys/PTOAS | `VPTOSchedModel`、`VPTORegPressureTracker`、remat candidates/planner/transaction、Bisheng auto 与 5 组测试 | 本章唯一主仓；static pressure/remat 主链闭合 |
+| hw-native-sys/pypto | 无新增 | 上一章生成的无物理编号 carrier 作为本章输入 |
+| hw-native-sys/simpler | 无新增 | 既有 runtime/task 覆盖保持 |
+| hw-native-sys/pypto-lib | 无新增 | 既有 kernel/model/Golden 覆盖保持；后续可选真实 kernel |
+| hw-native-sys/pypto-serving | 无新增 | 既有 serving/KV/request 覆盖保持 |
+
+- 下一章：**VPTO emission 到 Bisheng resource report——真实 kernel 的 carrier、VReg/MaskReg 数与 stack 证据链。**
