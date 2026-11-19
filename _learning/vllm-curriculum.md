@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 90 章沿 `cause-tagged step interval → Scheduler logical tokens → CUDA Graph padding → batch GPU Event → conservation ledger`，确认 main 保留 logical/padded 形状并能产生 batch timing sample，但没有 per-request/per-cause GPU time；执行位置分摊只能作为守恒诊断账，边际收益仍需保持 co-batch/context/rank/graph policy 的 paired replay。下一章落地 Cost Conservation Golden，验证 graph bucket cliff 与 multi-rank timing join。
+- 当前主线：第 91 章沿 `Scheduler logical work → worker actual batch → DP/graph descriptor → GPU Event → evidence join`，确认 main 能分别产生 SchedulerOutput、DPSyncState/BatchExecutionDescriptor 与 warmup StepTimingSample，却没有跨进程、跨 rank 的稳定 step identity；Cost Conservation Golden 必须先以 generation/step/rank/attempt 完成 fail-closed join，再用固定 co-batch/context/RNG/rank/graph policy 的 paired replay估计边际收益。下一章实现 paired replay fixture 的冻结与输出等价契约。
 
 ## 已完成章节
 
@@ -103,6 +103,7 @@
 | 2026-11-16 88 | `promotion allocation failure → prefix truncation → token budget → recompute debt → wait-or-recompute Golden` | [`1bf414e9`](https://github.com/vllm-project/vllm/commit/1bf414e97acf7563297726531f702cdbea6b2921) | [Promotion MISS 的重算成本]({{ '/articles/vllm-promotion-miss-recompute-cost-wait-or-recompute/' | relative_url }}) |
 | 2026-11-17 89 | `normal lookup side effects → async tri-state peek → boundary interval → cross-step debt conservation` | [`3ea7fcdc`](https://github.com/vllm-project/vllm/commit/3ea7fcdc98380289bb496de0ffff24a2746c9c77) | [反事实 Prefix 的无副作用观测]({{ '/articles/vllm-counterfactual-prefix-side-effect-free-peek-attribution/' | relative_url }}) |
 | 2026-11-18 90 | `logical token map → CUDA Graph padding → batch GPU Event → conserved diagnostic allocation` | [`a2915755`](https://github.com/vllm-project/vllm/commit/a2915755bf1dcaf80623e36d079713bfb190c1e7) | [共享 Batch 的 Padding 与 GPU Time 守恒]({{ '/articles/vllm-token-debt-gpu-time-padding-cost-conservation/' | relative_url }}) |
+| 2026-11-19 91 | `SchedulerOutput → DP/graph shape → per-rank GPU Event → fail-closed evidence join` | [`79897d9f`](https://github.com/vllm-project/vllm/commit/79897d9f47cfe9727749a79253c5b220e71acb39) | [Cost Conservation Golden 的 Join 契约]({{ '/articles/vllm-cost-conservation-step-join-graph-bucket-dp-timing/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2464,3 +2465,41 @@
 - 新知识债：稳定step-id/timing join；cause冲突优先级；DP/PP event聚合；MoE/context/request-slot非线性；paired replay harness；真机event overhead与bucket cliff；PR #62960最终状态/API漂移。
 - 下一章：**Cost Conservation Golden 怎样做成真——Paired Replay、Graph Bucket Cliff 与 Multi-rank Timing Join。**
 
+
+
+## 第 91 章课程账本增量
+
+- 日期：2026-11-19
+- 章节：**Cost Conservation Golden 的 Join 契约：Graph Bucket 与多 Rank Timing**
+- 源码基线：[`79897d9f`](https://github.com/vllm-project/vllm/commit/79897d9f47cfe9727749a79253c5b220e71acb39)，为研究时默认分支最新提交；相对第 90 章基线前进 [118 个提交](https://github.com/vllm-project/vllm/compare/a2915755bf1dcaf80623e36d079713bfb190c1e7...79897d9f47cfe9727749a79253c5b220e71acb39)。直接分析的 Scheduler output、GPU ModelRunner、CUDA Graph dispatch、DP sync 与 timing collector 文件没有语义变化；最新 CPU CI 自动分片提交与本题无关。
+- 课程位置：`cause-tagged interval → SchedulerOutput logical work → worker compaction → DP/graph descriptor → GPU Event → fail-closed join → paired replay`。
+- 新覆盖文件与符号：
+  - `vllm/entrypoints/llm.py::LLM.generate`、`entrypoints/common/offline.py::_run_engine`、`v1/engine/llm_engine.py::LLMEngine.step` 与 `v1/engine/core.py::EngineCore.step`。
+  - `v1/core/sched/output.py::SchedulerOutput` 与其 `num_scheduled_tokens/total_num_scheduled_tokens/iteration_details`。
+  - `v1/worker/gpu/model_runner.py::GPUModelRunner.execute_model/profile_adaptive_verification`。
+  - `v1/worker/gpu/dp_utils.py::sync_cudagraph_and_dp_padding/dispatch_cg_and_sync_dp/DPSyncState`。
+  - `v1/worker/gpu/cudagraph_utils.py::BatchExecutionDescriptor/CudaGraphManager.dispatch`。
+  - `v1/worker/gpu/async_utils.py::StepTimingCollector/StepTimingEvents/StepTimingSample` 与 `spec_decode/adaptive_verification.py::batches_to_profile/set_initial_cost_curves`。
+  - `test_cudagraph_manager.py::test_uniform_decode_pads_up_to_full_graph`、`test_gpu_dp_utils.py::test_skip_drafts_requires_all_ranks/test_dispatch_dp1_returns_no_sync`、`test_adaptive_verification.py::test_profiled_batches_seed_cost_curves_via_consumer/test_compact_batch_preserves_totals_and_bounds/test_tp_ranks_agree_on_batch_layout`。
+- 新确认不变量：
+  1. main 能独立产生 logical work、actual/graph-padded execution shape 与 warmup GPU Event sample，但三者没有共同的稳定 step/rank identity。
+  2. `StepTimingCollector` 只在 `collect()` 内激活；当前用途是 adaptive-verification 启动期 profiling，不是每个线上 step 的审计日志。
+  3. DP coordination 使用 `[7, dp_size]`、`torch.int32`、CPU tensor 协调 token/mode/uniform/max-query/ubatch/request/skip-drafts；它达成 shape/control-flow agreement，不产生 per-rank timing quorum。
+  4. `BatchExecutionDescriptor` 是离散 graphability 状态；logical/actual/padded token 即使数值相等也不能省略 descriptor identity。
+  5. 没有 timing sample 的 step 必须标记 evidence incomplete，不能按0ms入账；generation、attempt或live-rank membership不一致时也必须 fail-closed。
+  6. 守恒 Golden 检查同一 closed record 内 cause+padding+residual；因果 Golden 需要 paired replay。若 descriptor 改变，必须单列 `GRAPH_BUCKET_TRANSITION`。
+  7. 对同步 DP，per-rank Event 用于定位 straggler；以 live-rank max 作为服务延迟是设计推断，不是 main 已实现聚合规则。设备时间总和与关键路径最大值语义不同。
+- 具体演算：现有测试证明5个uniform decode请求×3 tokens产生 `L=15`，FULL descriptor为18 tokens/6 requests。另设DP rank0/1的mixed logical tokens为15/9，协调元数据取max=15并共同选择PIECEWISE 16；本地Event若为0.80/0.92ms，提议的同步关键路径候选为0.92ms，但main没有把两条Event与Scheduler step、rank membership和descriptor join。
+- 测试事实：graph测试验证15→18 FULL和15→16 PIECEWISE；DP测试以本地4 tokens、对端8 tokens验证skip-drafts必须全rank同意，单rank无sync；adaptive测试用8/1024及1536/2048/4096 synthetic samples验证cost curves，并验证`[3,3,40]` compact总数与行边界。没有测试把SchedulerOutput、descriptor、rank和Event串成端到端Cost Golden。
+- PR/实验边界：开放 [PR #62960](https://github.com/vllm-project/vllm/pull/62960) 提议拆分token/context/slot曲线、恢复capture-limit graph cliff并给出paired benchmark；截至2026-11-19仍未合入，不能当作main接口事实。
+- 新建议（非main事实）：`StepCostKey=(engine_generation,scheduler_step,dp_rank,pp_rank,attempt)`；Schedule/Execute/Timing三阶段记录；只有预期phase/rank齐全才close，常态只导出低基数join指标，抽样保留bounded trace。
+- 新知识债：跨进程wire schema；FT live-rank revision；PP stage timing；bounded collector/TTL/Event异步回收；paired replay fixture；RNG/KV/context/MoE/co-batch/rank/graph policy冻结；真机bucket cliff与event overhead；PR #62960最终状态。
+- 下一章：**Paired Replay Fixture 怎样冻结反事实——Co-batch、Context、RNG、Rank 与 Graph Policy。**
+
+## 第十三次七章知识图谱回顾（第 85–91 章）
+
+- 第 85–87 章从 protected HIT、guaranteed headroom 推到 backend fence 后的 capacity re-entry，再确认 primary full 时 main 直接 MISS、没有 waiter ownership。
+- 第 88–89 章把 MISS 变成反事实 prefix boundary 与跨 step token debt，并用 side-effect-free tri-state peek 隔离观测与 ownership。
+- 第 90–91 章把 logical work、padded shape、batch Event 分账，再指出跨进程、多 rank 的 identity/quorum 是 Cost Golden 的前置条件。
+- 当前闭合链：`capacity authority → promotion outcome → counterfactual boundary → conserved token interval → graph/DP execution shape → joinable timing evidence`。
+- 路线调整：下一组先完成 paired replay 的冻结与输出等价 Golden，再补 PP/MoE timing 和低开销线上采样，避免把诊断分摊误当因果优化收益。
