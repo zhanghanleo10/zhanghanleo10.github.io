@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-19。
+最后更新：2026-11-20。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 101 已闭合 VPTO carrier 的静态 live-range/pressure 主链：PTOAS 从 sched DAG 的 live-in、remaining uses、last use 与 live-out 计算 vector/predicate pressure；A5 模型的上限为 vector 32、predicate 7；高压时只对 cheap/pure/已知 trip-count producer 做有界 rematerialization，并在第二次调度后以“所有 pressure set 不超限且 vector peak 严格下降”决定提交或回滚。该 pass 不分配真实 V0/V1，也不插入 spill；实际编号、复用和必要 spill 属于 Bisheng，VF stack bytes 只是风险指标。下一步课程 102 从真实 kernel 的 VPTO emission 追到 LLVM/hivm、Bisheng VReg/MaskReg/Stack report 与 allocator/spill 可见证据。
+当前阶段：课程 102 已闭合 `VPTO carrier → LLVM vector/HiVM → Bisheng object/resource log` 主链：`VRegType` 保留 lane/dtype 转成 LLVM vector，`MaskType` 转成 `vector<256xi1>`，但两者仍是 SSA；Bisheng 才完成机器级 scheduling/RA。当前 PTOAS auto policy 的 parser 只保存每个 SIMD VF 的 stack bytes，报告尾部的 VReg/MaskReg 数不会进入选择逻辑；同 VF 集合下仅当 off stack total 严格更小时才替换 on object。下一步课程 103 寻找 allocator/debug dump 与反汇编证据，把 machine VReg、spill/reload、stack traffic 和 ticks 对齐；若公开工具链无稳定接口，就明确停在黑盒边界。
 
 ## 已完成章节
 
@@ -125,6 +125,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-17 | Grouped A5 VF hardware loop 的跨迭代状态与同步 | Reg/Mask iter_args + stable UB capture → footprint proof / loop-latch membar | [课程 99]({% post_url 2026-11-17-pto-grouped-a5-vf-hardware-loop-state-and-membar %}) |
 | 2026-11-18 | Reg/Mask carry 的 layout fixed point 与 group-slot 物理化 | scf.for equality component → costed layout → 1:N VPTO carriers | [课程 100]({% post_url 2026-11-18-pto-vmi-loop-layout-fixed-point-group-slots %}) |
 | 2026-11-19 | VPTO carrier live range、rematerialization 与 spill 边界 | SSA liveness → pressure sets → transactional remat → Bisheng allocation boundary | [课程 101]({% post_url 2026-11-19-pto-vpto-live-range-rematerialization-spill-boundary %}) |
+| 2026-11-20 | VPTO carrier 到 Bisheng：LLVM/HiVM 发射与资源报告边界 | vreg/mask SSA → LLVM vector/HiVM → object → stack-only auto decision | [课程 102]({% post_url 2026-11-20-pto-vpto-llvm-hivm-bisheng-resource-report %}) |
 
 ## ISA 知识地图
 
@@ -2200,3 +2201,54 @@ permalink: /learning/pto-curriculum/
 | hw-native-sys/pypto-serving | 无新增 | 既有 serving/KV/request 覆盖保持 |
 
 - 下一章：**VPTO emission 到 Bisheng resource report——真实 kernel 的 carrier、VReg/MaskReg 数与 stack 证据链。**
+
+## 课程 102 增量（2026-11-20）
+
+- 文章：[VPTO carrier 到 Bisheng：LLVM/HiVM 发射与资源报告的证据边界]({% post_url 2026-11-20-pto-vpto-llvm-hivm-bisheng-resource-report %})。
+- 源码基线：PTOAS [`3ffcf6c7e204`](https://github.com/hw-native-sys/PTOAS/commit/3ffcf6c7e2046641db64be9346d3885ddd6ad701)；相对课程 101 基线前进 [10 个提交](https://github.com/hw-native-sys/PTOAS/compare/3b344c1277d8b44d04ff9de6dd8325198b83a43c...3ffcf6c7e2046641db64be9346d3885ddd6ad701)，直接 emitter/object/Bisheng policy/test 文件未变，最新 Tile conversion saturation 修复与本题无关。
+- 所选仓库：仅 hw-native-sys/PTOAS；本章沿上一章明确留下的 backend evidence boundary 深挖，不引入第二仓。
+- 课程位置：`VMI 1:N carrier → VPTO scheduling/remat → LLVM/HiVM emission → Bisheng machine scheduling/RA → resource report/object selection → allocator/disassembly Golden（待下章）`。
+- 前置依赖：课程 100 的 logical group-slot→physical carrier 映射；课程 101 的 live-in/use/last-use pressure 与 rematerialization transaction。
+- 新覆盖文件与符号：
+  - `VPTOCANN900LLVMEmitterCommon.cpp::convertVPTOType/VPTOTypeConverter`；`VRegType→LLVM vector`、`MaskType→vector<256xi1>`。
+  - `VPTOCANN900LLVMEmitterPipeline.cpp` 与 arithmetic/memory conversion patterns；VPTO op→`llvm.hivm.*`。
+  - `ObjectEmission.cpp::emitVPTODeviceObject/compileDeviceLLVMToObject`；LLVM module/bridge link/Bisheng object 生命周期。
+  - `BishengScheduler.cpp::StackUsage/readStackUsage/sameFunctions/compareAndSelect/compileWithBishengScheduler`。
+  - `arith_select_vpto_llvm.pto`、`pto-bisheng-scheduler-test.cpp`、`check_bisheng_scheduler.py` 与 scheduler framework 设计记录。
+- 新确认不变量：
+  1. `!pto.vreg<64xf32>` 确定性转换为 `vector<64xf32>`，`!pto.mask<b32>` 转成 `vector<256xi1>`；这保留 lane/payload ABI，不产生物理编号。
+  2. LLVM SSA vector count、PTOAS static pressure 与最终 physical VReg count 是不同证据层，不能直接互推。
+  3. auto 首次以 Bisheng scheduler on + `--cce-res-usage` 编译 vector target；stack=0 立即保留 on，stack>0 才用同一 LLVM IR 编译 off 临时 object。
+  4. `StackUsage` 只保存 `function→stack bytes`；逗号后的 `VReg number/MaskReg(PReg) number` 当前被允许但忽略，不参与决策。
+  5. on/off VF 函数集合必须一致；只有 off stack total 严格更小时才复制 off object。相等、更大、格式错、集合不等或报告不可比均保留成功的 on object并告警。
+  6. 工具链不支持 report 时先重试 on without report；成功即 fail-visible 保留 on。只有 on 本身失败才恢复性尝试 off；这区分观测能力缺失与编译失败。
+  7. object selection 是串行事务：off 使用独立临时 object/log，比较前不能覆盖 on；commit 点是最终路径中的已选 object，而非日志出现。
+- 具体演算：`arith_select_vreg` 的两个 `vdups` source和一个 select result都是 `64xf32=256 B` SSA carrier；mask 是 `256xi1=32 B` payload。三个 SSA 不等于三个 physical VReg。真实 #1506 报告示例为 `Stack=128 B, VReg=13, MaskReg=7`；若 on/off stack均128 B则保留on，13/7差异不会影响当前代码。
+- 测试事实：codegen lit 固定 vdup/select/vsts 与 vreg/mask LLVM type；32个 fake-compiler scenario 覆盖 zero/smaller/equal/larger、VF去重与集合、格式/溢出、report unsupported、编译失败和显式模式；真实脚本跑off/on/auto并做strict numerical compare及zero/compared/unavailable分支。没有测试提供SSA→machine register mapping或spill/reload反汇编Golden。
+- 文档/实验边界：2026-09-20 CANN 9.1.0记录#1506 on/off均128 B，auto编译中位数1.616 s、旧off 1.416 s，ticks差异落在波动内；这是历史特定工具链实验，不是本章复测或普遍收益。
+- 待验证推断：stack减少可能降低spill traffic风险，但非零stack不能单独证明vector spill；VReg/MaskReg总数也不能标识SSA value。需要allocator dump、反汇编、版本化schema与同输入配对ticks才能闭环。
+- 新知识债：machine live interval/physical register mapping；stack物理地址空间；spill/reload指令与同步；MaskReg字段定义；PTOAS remat×Bisheng mode四象限的配对report/disassembly/traffic/ticks。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| VPTO carrier → LLVM type | lane/dtype保留为LLVM vector；mask采用256-bit predicate carrier | 低精度payload与所有instruction constraint的系统覆盖 |
+| VPTO op → HiVM | vdup/select/vsts等由conversion patterns生成HiVM call/LLVM op | machine instruction选择、coalescing与临时量 |
+| LLVM module → device object | ABI rename、写.ll、可选bridge link、Bisheng编译 | object内machine value与源SSA对应关系 |
+| resource log → auto policy | 只解析SIMD VF stack bytes；同VF集合、off严格更小时替换 | VReg/MaskReg稳定schema及多指标决策合理性 |
+| resource report → spill/perf | 只能作为风险信号；文档有特定fixture实验 | allocator dump、spill/reload、traffic与跨shape性能因果 |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增；沿用256 B carrier与predicate语义 | ISA核心地图保持；机器RA不属于公开ISA规范 |
+| hw-native-sys/PTOAS | VPTOTypeConverter、HiVM emission、ObjectEmission、Bisheng stack parser/selection及直接测试 | 本章唯一主仓；编译控制链闭合到resource report |
+| hw-native-sys/pypto | 无新增 | 上游生成边界沿用 |
+| hw-native-sys/simpler | 无新增 | runtime/task覆盖保持 |
+| hw-native-sys/pypto-lib | 无新增 | 后续可选真实kernel fixture，但本章不扩仓 |
+| hw-native-sys/pypto-serving | 无新增 | serving/request/KV覆盖保持 |
+
+- 下一章：**Allocator/Disassembly 证据怎样闭环——从 machine VReg 到 spill/reload 与 stack traffic。**
+
