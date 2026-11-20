@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 91 章沿 `Scheduler logical work → worker actual batch → DP/graph descriptor → GPU Event → evidence join`，确认 main 能分别产生 SchedulerOutput、DPSyncState/BatchExecutionDescriptor 与 warmup StepTimingSample，却没有跨进程、跨 rank 的稳定 step identity；Cost Conservation Golden 必须先以 generation/step/rank/attempt 完成 fail-closed join，再用固定 co-batch/context/RNG/rank/graph policy 的 paired replay估计边际收益。下一章实现 paired replay fixture 的冻结与输出等价契约。
+- 当前主线：第 92 章沿 `trace token path + exact BenchBatch/context → paired replay fixture`，确认 Trace Replay 与 `vllm bench forward` 分别冻结输出路径和设备侧 exact batch，但 main 尚无同时冻结真实 co-batch、KV/state、live ranks 与 serving graph policy 的端到端 fixture。下一章定义 token、logprob、KV/state digest 的等价 Golden，只有语义等价后才接受第 91 章的 paired timing delta。
 
 ## 已完成章节
 
@@ -104,6 +104,7 @@
 | 2026-11-17 89 | `normal lookup side effects → async tri-state peek → boundary interval → cross-step debt conservation` | [`3ea7fcdc`](https://github.com/vllm-project/vllm/commit/3ea7fcdc98380289bb496de0ffff24a2746c9c77) | [反事实 Prefix 的无副作用观测]({{ '/articles/vllm-counterfactual-prefix-side-effect-free-peek-attribution/' | relative_url }}) |
 | 2026-11-18 90 | `logical token map → CUDA Graph padding → batch GPU Event → conserved diagnostic allocation` | [`a2915755`](https://github.com/vllm-project/vllm/commit/a2915755bf1dcaf80623e36d079713bfb190c1e7) | [共享 Batch 的 Padding 与 GPU Time 守恒]({{ '/articles/vllm-token-debt-gpu-time-padding-cost-conservation/' | relative_url }}) |
 | 2026-11-19 91 | `SchedulerOutput → DP/graph shape → per-rank GPU Event → fail-closed evidence join` | [`79897d9f`](https://github.com/vllm-project/vllm/commit/79897d9f47cfe9727749a79253c5b220e71acb39) | [Cost Conservation Golden 的 Join 契约]({{ '/articles/vllm-cost-conservation-step-join-graph-bucket-dp-timing/' | relative_url }}) |
+| 2026-11-20 92 | `Trace Replay token path + exact BenchBatch/KV context → fail-closed paired fixture` | [`07e4d6b9`](https://github.com/vllm-project/vllm/commit/07e4d6b957f70075b132b7e0c05c649dcbd0d4b7) | [Paired Replay Fixture]({{ '/articles/vllm-paired-replay-fixture-trace-exact-batch/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2503,3 +2504,32 @@
 - 第 90–91 章把 logical work、padded shape、batch Event 分账，再指出跨进程、多 rank 的 identity/quorum 是 Cost Golden 的前置条件。
 - 当前闭合链：`capacity authority → promotion outcome → counterfactual boundary → conserved token interval → graph/DP execution shape → joinable timing evidence`。
 - 路线调整：下一组先完成 paired replay 的冻结与输出等价 Golden，再补 PP/MoE timing 和低开销线上采样，避免把诊断分摊误当因果优化收益。
+
+## 第 92 章课程账本增量
+
+- 日期：2026-11-20
+- 章节：**Paired Replay Fixture——冻结 Token Path 与 Exact Batch**
+- 源码基线：[`07e4d6b9`](https://github.com/vllm-project/vllm/commit/07e4d6b957f70075b132b7e0c05c649dcbd0d4b7)，为研究时默认分支最新提交；相对第 91 章基线前进 [120 个提交](https://github.com/vllm-project/vllm/compare/79897d9f47cfe9727749a79253c5b220e71acb39...07e4d6b957f70075b132b7e0c05c649dcbd0d4b7)。本文直接分析的 Trace Replay、forward benchmark、sampling 与对应测试文件在该区间无变化；最新提交是 torch.compile 测试 CI 状态清理，与本题无关。
+- 课程位置：`fail-closed timing join → freeze counterfactual input → paired replay fixture → output/state equivalence Golden`。
+- 前置依赖：第 90 章的 logical/actual/padded work 分账；第 91 章的 generation/step/rank/attempt join、graph descriptor 与 per-rank timing 语义。
+- 新覆盖文件与符号：
+  - `vllm/sampling_params.py::SamplingParams.trace_decode_token_ids`。
+  - `vllm/v1/engine/input_processor.py::InputProcessor._validate_params/_normalize_trace_replay_params` 与 `EngineCoreRequest` 跨进程承载。
+  - `vllm/v1/worker/gpu/sample/trace_replay.py::TraceReplayState/add_request/apply_staged_writes`，`sample/sampler.py::Sampler.__call__`。
+  - `vllm/benchmarks/forward/shapes.py::BenchRequest/BenchCase`、`batch.py::BenchBatch/build_batch`、`capture.py::ForwardBench`、`main.py::run_case`。
+  - `model_runner.py::GPUModelRunner._dummy_run/profile_adaptive_verification` 与 `spec_decode/adaptive_verification.py::batches_to_profile/set_initial_cost_curves`，用来划清 synthetic shape profiling 与真实 paired fixture 的边界。
+  - `test_gpu_trace_replay.py`、`test_forward_cli.py`、`test_batch_invariance.py` 的 trace slot/step、exact batch/block、graph determinism 与 co-batch 数值不变量。
+- 新确认不变量：
+  1. Trace Replay 先保留当前 logits 的真实采样语义，再覆盖 sampled token，并为 forced token 计算真实 logprob；它冻结 token path，不冻结 co-batch、KV、rank 或 graph route。
+  2. `TraceReplayState.trace_token_ids` 为 `[max_num_reqs,max_model_len] int32` UVA-backed staged tensor，`trace_len` 为 `[max_num_reqs] int32`；request slot 是复用单元，必须随 slot mapping/version 校验。
+  3. forward benchmark 的 `BenchBatch` 固定 request 顺序、query/KV 长度、token ids、spec tokens 与不重叠 block ranges；one-shot graph 只重放同一 exact batch，并在每次 replay 前恢复 mutable state views。
+  4. forward benchmark 绕过真实 Scheduler 并排除 CPU step overhead；它可隔离 device forward/sampling/drafter，不能单独证明 admission/prefix/scheduling 策略收益。
+  5. `_dummy_run` 与 adaptive-verification cost curve 是 synthetic shape profiling，不携带真实 request/co-batch/KV identity，不能替代 paired replay。
+  6. paired delta 只有在 logical request、mutable KV/state、execution topology/live ranks 与 graph descriptor 四层 manifest 全部一致时才可归因；任何 mismatch/evidence incomplete 都必须 fail-closed。
+  7. 固定 seed 不能抵抗控制流分支导致的 RNG 消耗变化，也不能冻结 context/topology；完整 device snapshot 虽强但会增加复制、显存和 graph/address 污染，较合理折中是结构化 manifest 加最小 mutated-state snapshot。
+- 具体演算：`mix=16,2*1@65`、`seed=7`、`kv_len_jitter=0` 产生一个16-token prefill和两个1-token decode，后两者各有64个已计算 context，总 scheduled tokens 为18。B/C trace 为 `[101,102]`/`[201,202]`；baseline/candidate 必须共享 request 顺序、token、KV block/content、routing、live ranks 与 graph descriptor，才可计算 `ΔT_i=T_candidate(i)-T_base(i)`。
+- 测试事实：Trace Replay 测试验证两请求不同 prompt length 的逐 step forced token、trace 结束/空 trace不改写以及 `idx_mapping`；forward测试验证186 scheduled tokens、block不重叠、block不足报错、jitter可重复、graph/eager一致；batch-invariance测试验证同请求独跑与随机 co-batch 的 token/logprob模式。没有测试把真实 `SchedulerOutput`、KV内容、trace/RNG、live ranks和serving graph policy锁成同一端到端 fixture。
+- 事实/推断边界：当前 main 没有 `PairedReplayFixture` 类型或统一 manifest API；四层 manifest、AB/BA顺序、最小KV/state snapshot和fail-closed mismatch均为基于现有能力与缺口的设计推断，不是已合入计划。
+- 新知识债：真实 SchedulerOutput capture/replay wire schema；KV/Mamba/stateful cache digest与最小snapshot；MoE routing与spec draft state；FT live-rank revision；PP stage timing；fixture租约、超时与Event安全回收；capture/restore污染测量。
+- 下一章：**Paired Replay Golden 的等价判定——Token、Logprob、KV/State Digest 与 Fail-closed Mismatch。**
+
