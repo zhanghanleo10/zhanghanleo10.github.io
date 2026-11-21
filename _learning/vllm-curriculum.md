@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 92 章沿 `trace token path + exact BenchBatch/context → paired replay fixture`，确认 Trace Replay 与 `vllm bench forward` 分别冻结输出路径和设备侧 exact batch，但 main 尚无同时冻结真实 co-batch、KV/state、live ranks 与 serving graph policy 的端到端 fixture。下一章定义 token、logprob、KV/state digest 的等价 Golden，只有语义等价后才接受第 91 章的 paired timing delta。
+- 当前主线：第 93 章沿 `forced token → real logprob → Host commit` 与 `slot_mapping → KV write` 两条真实链，确认 main 能分别观察 token/logprob 与验证定点 KV 写入，但没有统一的 paired equivalence oracle 或 canonical live-state digest。下一章定义 AB/BA、warmup、validation pass 与 timing pass 的测量事务，避免 Golden 验证本身污染 timing。
 
 ## 已完成章节
 
@@ -105,6 +105,7 @@
 | 2026-11-18 90 | `logical token map → CUDA Graph padding → batch GPU Event → conserved diagnostic allocation` | [`a2915755`](https://github.com/vllm-project/vllm/commit/a2915755bf1dcaf80623e36d079713bfb190c1e7) | [共享 Batch 的 Padding 与 GPU Time 守恒]({{ '/articles/vllm-token-debt-gpu-time-padding-cost-conservation/' | relative_url }}) |
 | 2026-11-19 91 | `SchedulerOutput → DP/graph shape → per-rank GPU Event → fail-closed evidence join` | [`79897d9f`](https://github.com/vllm-project/vllm/commit/79897d9f47cfe9727749a79253c5b220e71acb39) | [Cost Conservation Golden 的 Join 契约]({{ '/articles/vllm-cost-conservation-step-join-graph-bucket-dp-timing/' | relative_url }}) |
 | 2026-11-20 92 | `Trace Replay token path + exact BenchBatch/KV context → fail-closed paired fixture` | [`07e4d6b9`](https://github.com/vllm-project/vllm/commit/07e4d6b957f70075b132b7e0c05c649dcbd0d4b7) | [Paired Replay Fixture]({{ '/articles/vllm-paired-replay-fixture-trace-exact-batch/' | relative_url }}) |
+| 2026-11-21 93 | `forced token → real logprob → canonical KV/state digest → fail-closed equivalence` | [`2f170a0f`](https://github.com/vllm-project/vllm/commit/2f170a0fed20fd84dfcf6da2a3a8188a32f67e4e) | [Paired Replay Golden]({{ '/articles/vllm-paired-replay-golden-token-logprob-kv-state-digest/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -500,6 +501,13 @@
 - `OffloadingConnectorScheduler._maximal_prefix_lookup/get_num_new_matched_tokens` 的 `async_init` gate
 - `PeekTicket/AttributionTrace/PRESENT-ABSENT-UNKNOWN`（第 89 章建议观测协议，尚未合入）
 
+- `TraceReplayState.apply_trace`
+- `LogprobsTensors/LogprobsLists`
+- `AsyncOutput.__init__/get_output`（forced token/logprob D2H）
+- `LogprobsProcessor.update_from_output/_update_sample_logprobs`
+- `triton_reshape_and_cache_flash`
+- `PairedReplayGolden/canonical live-state digest/mismatch taxonomy`（第 93 章建议协议，尚未合入）
+
 ## 已确认不变量
 
 1. Renderer 负责用户输入到 `EngineInput`；InputProcessor 负责 `EngineInput` 到 `EngineCoreRequest`。
@@ -808,6 +816,8 @@
 - 直接向 InputProcessor 传 raw prompt、向 LLMEngine 传 `EngineCoreRequest` 均处于 v0.18 移除迁移期。
 
 ## 尚未解释的知识债
+
+- 缺少统一 `PairedReplayGolden` schema、canonical logical KV/state digest、量化 scale/zero-point 与 Mamba/encoder/spec state adapter、expected-rank quorum、corruption injection、digest collision/version、validation overhead 和 CUDA Graph 污染测试；spec/non-spec 测试中的数值容差不能自动成为通用 paired replay 阈值。
 
 - primary-full 路径仍缺已实现的 side-effect-free peek、跨 tier presence/consistency 契约、采样/QPS/in-flight budget、request-local trace retention，以及 FS/P2P store-delete race 与双请求 observer-noninterference Golden；下一步需把已有 token interval 归因接到 ModelRunner/GPU time，并区分 padding、batch sharing、queueing 与 graph bucket。main 也没有 Capacity Revision、waiter queue、取消或 fair retry Golden。
 
@@ -2532,4 +2542,30 @@
 - 事实/推断边界：当前 main 没有 `PairedReplayFixture` 类型或统一 manifest API；四层 manifest、AB/BA顺序、最小KV/state snapshot和fail-closed mismatch均为基于现有能力与缺口的设计推断，不是已合入计划。
 - 新知识债：真实 SchedulerOutput capture/replay wire schema；KV/Mamba/stateful cache digest与最小snapshot；MoE routing与spec draft state；FT live-rank revision；PP stage timing；fixture租约、超时与Event安全回收；capture/restore污染测量。
 - 下一章：**Paired Replay Golden 的等价判定——Token、Logprob、KV/State Digest 与 Fail-closed Mismatch。**
+
+## 第 93 章课程账本增量
+
+- 日期：2026-11-21
+- 章节：**Paired Replay Golden——Token、Logprob 与 KV/State Digest**
+- 源码基线：[`2f170a0f`](https://github.com/vllm-project/vllm/commit/2f170a0fed20fd84dfcf6da2a3a8188a32f67e4e)，为研究时默认分支最新提交；相对第 92 章基线前进 [118 个提交](https://github.com/vllm-project/vllm/compare/07e4d6b957f70075b132b7e0c05c649dcbd0d4b7...2f170a0fed20fd84dfcf6da2a3a8188a32f67e4e)。本文直接分析的 Trace Replay、Sampler/logprob、AsyncOutput、batch-invariance 与 KV 写入测试文件在该区间无变化；最新 DSv4.1 draft model MoE flag 修复与本题无关。
+- 课程位置：`paired fixture → token/logprob observable → logical KV/state digest → fail-closed equivalence → paired timing transaction`。
+- 前置依赖：第 91 章的 identity/rank/timing join；第 92 章的 token path、exact batch、KV/context 与 graph policy 冻结。
+- 新覆盖文件与符号：
+  - `sample/sampler.py::Sampler.__call__`、`sample/logprob.py::compute_topk_scores/LogprobsTensors` 与 `sample/output.py::SamplerOutput`。
+  - `async_utils.py::AsyncOutput.__init__/get_output`、`outputs.py::ModelRunnerOutput/LogprobsLists`。
+  - `scheduler.py::Scheduler.update_from_output`、`engine/logprobs.py::LogprobsProcessor.update_from_output/_update_sample_logprobs`。
+  - `triton_reshape_and_cache_flash.py::triton_reshape_and_cache_flash` 与 `tests/kernels/attention/test_cache.py`。
+  - `test_gpu_trace_replay.py`、`test_logprobs.py::test_trace_replay_with_spec_decode`、`test_batch_invariance.py::test_logprobs_bitwise_batch_invariance_bs1_vs_bsN`。
+- 新确认不变量：
+  1. Trace Replay 在正常 sampling 后覆盖 token，再用未修改的 logits 为 forced token 计算 score/rank；selected token 位于 logprob row 第一列。
+  2. `LogprobsTensors` 的 score 是 FP32，token IDs/selected rank 与变长请求边界必须随 request/step 一起提交；静态 buffer 尾部不能进入 Host Golden。
+  3. 物理 block/slot、free/padding 区域与 allocator 顺序不是状态语义身份；KV digest 必须按 layer/request/logical token/K|V canonicalize，并纳入 dtype 与量化解释元数据。
+  4. batch-invariant 支持配置可要求 logprob bitwise equal；其它配置的容差必须来自预声明 error budget，不能事后套用 spec/non-spec 测试阈值。
+  5. digest 必须在 write completion fence 后、buffer reuse 前采集，并绑定 engine generation、step、rank、state schema；缺 rank 或缺 adapter 都是 `EVIDENCE_INCOMPLETE`。
+  6. 只有配置证据、exact token、数值输出与 logical live state 全部相等，paired timing 才可接受；token-only 相同不能排除 logits 漂移或潜伏 state corruption。
+- 具体演算：A/B prompt 长度 5/8，trace `[100,101]`/`[200,201]`，step 1 必须输出 `[[101],[201]] int64`；`logprobs=2` 时每行宽 3。8 KV heads、head size 128、BF16 的一个新 token 每层 K+V 逻辑载荷为 4096 bytes，两请求为 8192 bytes/层；不同物理 slot 应归并到相同 logical ordering 后再 digest。
+- 测试事实：Trace Replay 单测覆盖逐 step overwrite、空/结束 trace、idx mapping 与 slot reuse；Qwen3-0.6B spec/non-spec E2E 对三条 32-token trace 断言 token exact，并以 `rel_tol=5e-2, abs_tol=2.5e-1` 比较 forced-token logprob；batch-invariance 对 32 prompts、16 outputs、`logprobs=5` 用 `torch.equal` 验证 bitwise；KV tests 覆盖 NHD/HND、auto/FP8 和 slots `[0,5,16,31]` 的目标/未触碰区域。没有测试把真实 SchedulerOutput、输出 Golden 与 canonical live-state digest 串成跨层 oracle。
+- PR/规划边界：已合入 [PR #46701](https://github.com/vllm-project/vllm/pull/46701) 是 Trace Replay 历史来源；[Issue #27433](https://github.com/vllm-project/vllm/issues/27433) 持续跟踪 batch invariance。统一 Golden、digest adapter 与 mismatch taxonomy 是本文建议，不是当前 main API 或已确认计划。
+- 新知识债：Golden wire/schema；canonical digest kernel；量化/Mamba/encoder/spec adapter；rank quorum；corruption/collision/version Golden；validation overhead、stream/event fence 与 graph pollution；数值 error-budget 校准。
+- 下一章：**Paired Replay 的测量事务——AB/BA 顺序、Warmup、Validation Pass 与 Timing 污染隔离。**
 
