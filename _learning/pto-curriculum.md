@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-20。
+最后更新：2026-11-21。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 102 已闭合 `VPTO carrier → LLVM vector/HiVM → Bisheng object/resource log` 主链：`VRegType` 保留 lane/dtype 转成 LLVM vector，`MaskType` 转成 `vector<256xi1>`，但两者仍是 SSA；Bisheng 才完成机器级 scheduling/RA。当前 PTOAS auto policy 的 parser 只保存每个 SIMD VF 的 stack bytes，报告尾部的 VReg/MaskReg 数不会进入选择逻辑；同 VF 集合下仅当 off stack total 严格更小时才替换 on object。下一步课程 103 寻找 allocator/debug dump 与反汇编证据，把 machine VReg、spill/reload、stack traffic 和 ticks 对齐；若公开工具链无稳定接口，就明确停在黑盒边界。
+当前阶段：课程 103 已闭合 `VPTO/LLVM identity → Bisheng resource → ET_REL/symbol anchor → machine evidence grade`：公开 PTOAS 能稳定证明 object 身份、VF stack bytes、ELF/symbol 与 SIM 功能，但没有维护 allocator dump、SSA→physical VReg map 或稳定反汇编 schema。`Stack size/VReg total` 只能作风险信号，不能证明某个 carrier spill。下一步课程 104 以 `PTOAS rematerialization on/off × Bisheng scheduler on/off` 四象限配对实验，对齐 stack、可用的 machine evidence、strict SIM 与重复 ticks。
 
 ## 已完成章节
 
@@ -126,6 +126,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-18 | Reg/Mask carry 的 layout fixed point 与 group-slot 物理化 | scf.for equality component → costed layout → 1:N VPTO carriers | [课程 100]({% post_url 2026-11-18-pto-vmi-loop-layout-fixed-point-group-slots %}) |
 | 2026-11-19 | VPTO carrier live range、rematerialization 与 spill 边界 | SSA liveness → pressure sets → transactional remat → Bisheng allocation boundary | [课程 101]({% post_url 2026-11-19-pto-vpto-live-range-rematerialization-spill-boundary %}) |
 | 2026-11-20 | VPTO carrier 到 Bisheng：LLVM/HiVM 发射与资源报告边界 | vreg/mask SSA → LLVM vector/HiVM → object → stack-only auto decision | [课程 102]({% post_url 2026-11-20-pto-vpto-llvm-hivm-bisheng-resource-report %}) |
+| 2026-11-21 | PTOAS 机器级证据边界：ET_REL、Symbol Anchor 与 Spill/Reload Golden | object identity → symbol anchor → evidence grade → fail-closed spill verdict | [课程 103]({% post_url 2026-11-21-pto-machine-evidence-et-rel-spill-golden %}) |
 
 ## ISA 知识地图
 
@@ -133,6 +134,7 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- |
 | VMI loop layout 与 group-slot | `scf.for` init/iter_arg/yield/result 必须共享 layout；`group_slots<G,K,LS>` 只给映射 lane 语义，carrier 数为 `ceil(G/K)`；VMI 1:N physicalization 改变 VPTO value arity，不等于硬件寄存器编号分配 | PTOAS assignment→VPTO carrier 已闭合；Mask专项、partial packet、allocator/spill 待补 |
 | VPTO carrier live range 与 register pressure | `VRegType`/`MaskType` 分别贡献 vector/predicate 1 单位；bitcast 共享 pressure representative；last use 与 live-through 决定静态峰值。高压 remat 只塑造 live range，提交需二次调度后全部 set 合法且 vector peak 下降；真实编号/spill 留给 Bisheng，stack bytes 不是 spill 证明 | PTOAS scheduler/remat 已闭合；VPTO emission、allocator mapping/spill dump 待补 |
+| PTOAS machine evidence 与 spill Golden | `ET_REL/Machine 1029/symbol` 提供 object/function anchor；stack bytes、VReg/MaskReg total、spill instruction、dynamic traffic 与 ticks 是五个不同证据层。机器证据必须绑定 toolchain/argv/object SHA；不可用必须显式 fail closed | 公开 PTOAS 稳定到 object/resource/SIM；allocator dump、SSA→physical mapping、versioned disassembly 与 dynamic traffic 待补 |
 | Grouped A5 VF hardware loop | canonical `[0, stop)`、step=1、嵌套≤4；Reg/Mask 以 `iter_args/yield` carry，UB 以稳定 base/origin+access offset 定址；PTOAS 证明 loop-carried footprint disjoint 或在 latch 插 typed membar。`Require` 不是 final instruction certificate | PyPTO→PTOAS 主链已闭合；真机 dynamic/carry 与最终指令审计待补 |
 | Tile static capacity | 编译期决定资源盒子、布局合法性和指令特化 | 已讲透基础 |
 | Valid region | destination 通常定义语义域；是连续前缀，不是任意 mask；区外默认 unspecified | 已讲透基础 |
@@ -2252,3 +2254,47 @@ permalink: /learning/pto-curriculum/
 
 - 下一章：**Allocator/Disassembly 证据怎样闭环——从 machine VReg 到 spill/reload 与 stack traffic。**
 
+## 课程 103 增量（2026-11-21）
+
+- 文章：[PTOAS 机器级证据边界：ET_REL、Symbol Anchor 与 Spill/Reload Golden]({% post_url 2026-11-21-pto-machine-evidence-et-rel-spill-golden %})。
+- 源码基线：PTOAS [`297a791c7c4f`](https://github.com/hw-native-sys/PTOAS/commit/297a791c7c4f632f7c1fc02bf4f777a313b4ea2a)；相对课程 102 基线前进 [4 个提交](https://github.com/hw-native-sys/PTOAS/compare/3ffcf6c7e2046641db64be9346d3885ddd6ad701...297a791c7c4f632f7c1fc02bf4f777a313b4ea2a)。直接相关的 CANN 9.3.0 bridge 修复为 [`15c43c4a0b25`](https://github.com/hw-native-sys/PTOAS/commit/15c43c4a0b25f1307160c1d163d4432bfd9f2c17)，它移除 `llvm-link -S` 并改用 bitcode，说明未版本化文本输出不是稳定证据接口。
+- 所选仓库：仅 hw-native-sys/PTOAS；本章继续 backend evidence boundary，不引入第二仓。
+- 课程位置：`VMI 1:N carrier → VPTO live range/remat → LLVM/HiVM → Bisheng RA → resource/object → versioned machine evidence → strict SIM/ticks`。
+- 新覆盖文件与符号：
+  - `ObjectEmission.cpp::compileDeviceLLVMToObject` 与 `--emit-vpto-device-object` 的 ET_REL/Machine 1029/symbol/atomic rename contract。
+  - `bisheng_extra_arg_argv.pto` 的 `-mllvm/-Xbisheng/--bisheng-arg/pto.bisheng_args` 逐 token 透传、排序和裸 operand 风险。
+  - `arith_select_vpto_llvm.pto` 的两个 `64xf32` source carrier、select result 与 LLVM/HiVM anchor。
+  - `check_bisheng_scheduler.py`、device-object readelf integration 与 issue [#1760](https://github.com/hw-native-sys/PTOAS/issues/1760)、[#1726](https://github.com/hw-native-sys/PTOAS/issues/1726)。
+- 新确认不变量：
+  1. IR/resource/object/runtime 是不同证据层；LLVM vector count、physical VReg count、stack frame、spill event、dynamic traffic 与 ticks 不能互相直接替代。
+  2. `ET_REL + Machine 1029 + VF symbol` 只提供机器 object 与函数 anchor，不提供 SSA→physical register 映射。
+  3. `stack_bytes / 256` 不是 spill count：frame 可能包含 non-vector local、alignment、split/复用 slot，静态 frame 也不是动态 traffic。
+  4. 任何 allocator/disassembly 证据必须绑定 PTOAS/CANN/Bisheng version、完整 argv、LLVM/bitcode digest、object SHA 与 VF symbol。
+  5. evidence unavailable 必须显式记录；`DISASSEMBLY_UNAVAILABLE` 不等于零 spill，on/off 必须达到同一 evidence grade 才能比较。
+  6. strict SIM functional equality 是资源/性能结论的先决条件；ticks 不可单独定位 spill 因果。
+- 具体演算：`arith_select_vreg` 中 `lhs/rhs/chosen` 各为 `64xf32=256 B` SSA carrier；select 前两 source 同时活跃，result 可与死亡 source reuse。报告 `Stack=128 B,VReg=13,MaskReg=7` 不能定位三者、不能推出“半个 VReg spill”，更不能给出动态 bytes。
+- 测试事实：device-object 真实工具链测试用 `llvm-readelf` 固定 ET_REL/Machine 1029/symbol；scheduler unit 覆盖 stack parser/选择/失败；真实脚本对 off/on/auto 做 strict SIM 并记录 decision/ticks/compile time；argv lit 只证明 token 到达 command line，不证明 Bisheng 支持某个 debug flag。公开仓没有 allocator dump、SSA→physical map 或稳定反汇编 Golden。
+- 规划边界：本文提出 identity manifest、evidence grade 与 `REPORT_UNAVAILABLE / DISASSEMBLY_UNAVAILABLE / SYMBOL_NOT_FOUND / FUNCTIONAL_MISMATCH` taxonomy，均为研究/测试建议，不是当前 PTOAS 公共 API。
+- 新知识债：Bisheng/CANN 版本化 disassembler/allocator schema；physical VReg/MaskReg 编号；spill slot address space/opcode；symbol body 切分；dynamic traffic counter；SIM/真机一致性；四象限配对实验。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| LLVM/HiVM → machine object | Bisheng 产物可由 ET_REL/Machine 1029/object SHA 定位 | instruction selection、physical VReg 与源 SSA 映射 |
+| VF symbol → machine evidence | symbol 是函数 anchor，readelf 可验证符号/重定位 | 稳定 symbol body disassembly 与链接后地址归属 |
+| stack/resource → spill | stack bytes 与 VReg/MaskReg total 只作风险信号 | spill/reload opcode、slot/address space 与 value mapping |
+| spill → performance | 需 static event、dynamic count、bytes 与 paired ticks 同时成立 | 真机 counter、噪声控制与跨 shape 因果 |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增；沿用 256 B VReg carrier 与 UB↔VReg 语义 | ISA 核心地图保持；machine RA 非公开 ISA contract |
+| hw-native-sys/PTOAS | device-object identity、symbol anchor、argv pass-through、evidence grade 与直接测试边界 | 本章唯一主仓；公开证据链闭合到 G2/object+resource |
+| hw-native-sys/pypto | 无新增 | 上游生成边界沿用 |
+| hw-native-sys/simpler | 无新增 | runtime/task 覆盖保持 |
+| hw-native-sys/pypto-lib | 无新增 | 后续可选真实 kernel fixture |
+| hw-native-sys/pypto-serving | 无新增 | serving/request/KV 覆盖保持 |
+
+- 下一章：**PTOAS rematerialization × Bisheng scheduler 四象限——怎样把 stack、machine evidence 与 ticks 做成配对因果实验。**
