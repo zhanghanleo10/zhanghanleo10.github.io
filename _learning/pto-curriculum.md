@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-21。
+最后更新：2026-11-22。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 103 已闭合 `VPTO/LLVM identity → Bisheng resource → ET_REL/symbol anchor → machine evidence grade`：公开 PTOAS 能稳定证明 object 身份、VF stack bytes、ELF/symbol 与 SIM 功能，但没有维护 allocator dump、SSA→physical VReg map 或稳定反汇编 schema。`Stack size/VReg total` 只能作风险信号，不能证明某个 carrier spill。下一步课程 104 以 `PTOAS rematerialization on/off × Bisheng scheduler on/off` 四象限配对实验，对齐 stack、可用的 machine evidence、strict SIM 与重复 ticks。
+当前阶段：课程 104 已把 PTOAS 中层 rematerialization 与 Bisheng machine scheduler 拆成正交实验轴：固定 `--vpto-scheduler=on`，显式展开 `remat false/true × Bisheng off/on`，以 strict SIM 为先决门禁，再比较同 evidence grade 的 stack/ticks。当前代码的真实脚本仍固定 `remat=false`，显式 on/off 也没有稳定的 per-cell resource schema；下一步课程 105 将在真实 kernel 上定义可复现的 Artifact Manifest、轮换 run order 与 fail-closed result record。
 
 ## 已完成章节
 
@@ -127,6 +127,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-19 | VPTO carrier live range、rematerialization 与 spill 边界 | SSA liveness → pressure sets → transactional remat → Bisheng allocation boundary | [课程 101]({% post_url 2026-11-19-pto-vpto-live-range-rematerialization-spill-boundary %}) |
 | 2026-11-20 | VPTO carrier 到 Bisheng：LLVM/HiVM 发射与资源报告边界 | vreg/mask SSA → LLVM vector/HiVM → object → stack-only auto decision | [课程 102]({% post_url 2026-11-20-pto-vpto-llvm-hivm-bisheng-resource-report %}) |
 | 2026-11-21 | PTOAS 机器级证据边界：ET_REL、Symbol Anchor 与 Spill/Reload Golden | object identity → symbol anchor → evidence grade → fail-closed spill verdict | [课程 103]({% post_url 2026-11-21-pto-machine-evidence-et-rel-spill-golden %}) |
+| 2026-11-22 | PTOAS Rematerialization × Bisheng Scheduler 四象限归因 | fixed scheduler → R×B cells → strict SIM gate → paired stack/ticks | [课程 104]({% post_url 2026-11-22-pto-rematerialization-bisheng-four-quadrant %}) |
 
 ## ISA 知识地图
 
@@ -2298,3 +2299,56 @@ permalink: /learning/pto-curriculum/
 | hw-native-sys/pypto-serving | 无新增 | serving/request/KV 覆盖保持 |
 
 - 下一章：**PTOAS rematerialization × Bisheng scheduler 四象限——怎样把 stack、machine evidence 与 ticks 做成配对因果实验。**
+
+## 课程 104 增量（2026-11-22）
+
+- 文章：[PTOAS Rematerialization × Bisheng Scheduler：从 Pressure 到 Stack/Ticks 的四象限归因]({% post_url 2026-11-22-pto-rematerialization-bisheng-four-quadrant %})。
+- 源码基线：PTOAS [`297a791c7c4f`](https://github.com/hw-native-sys/PTOAS/commit/297a791c7c4f632f7c1fc02bf4f777a313b4ea2a)，与课程 103 基线相同；本章是对上一章明确知识债的依赖式续讲，不是因源码变化而重访。rematerialization 直接相关合入提交为 [`566d6af8c01`](https://github.com/hw-native-sys/PTOAS/commit/566d6af8c017e7f44402fb2c4e8d204d8f195b9a)，关联 [#1446](https://github.com/hw-native-sys/PTOAS/issues/1446)。
+- 所选仓库：仅 hw-native-sys/PTOAS；没有第二仓，避免把真实 kernel 或 serving 问题提前混入后端归因协议。
+- 课程位置：`VPTO carrier/live range → scheduler/remat transaction → LLVM/HiVM → Bisheng MISched/RA → object/resource → strict SIM → paired ticks`。
+- 新覆盖文件与符号：
+  - `tools/ptoas/ptoas.cpp`：`--vpto-scheduler`、`--vpto-scheduler-remat`、`--bisheng-vec-misched` 与 A5 默认策略。
+  - `VPTOSchedulerPass.cpp::runFunctionWithRematerialization`、`VPTOSchedulerRematerialization.cpp`、`VPTOSchedulerRematPressure.cpp`：snapshot→clone/rewrite→verify→second schedule→commit/rollback。
+  - `ObjectEmission.cpp` 与 `BishengScheduler.cpp::compileWithBishengScheduler`：显式 on/off 与 auto 的 report/selection 不对称。
+  - `check_bisheng_scheduler.py`：真实 toolchain 的 off/on/auto、strict CA-model 与 ticks；确认当前脚本硬编码 `--vpto-scheduler-remat=false`。
+  - `vpto_scheduler_rematerialization_{pressure_sets,rollback,budget}.pto`：跨 pressure set 验收、无改善回滚与 planner 预算上限。
+- 新确认不变量：
+  1. 四象限必须固定 `--vpto-scheduler=on`；scheduler off 不等于 remat false，后者只关闭 scheduler 内的可回滚变换。
+  2. 实验轴为 `R∈{false,true}` 与 `B∈{off,on}`；`auto` 是基于 stack 的 object 选择策略，不是对称实验单元。
+  3. input digest、toolchain、除 R/B 外 argv、shape 与 SIM case 必须相同；每格 object/log/result 独立持有，不可覆盖。
+  4. strict SIM functional equality 先于任何性能归因；compile failure、report unavailable、functional mismatch 是分类终态，不得伪装成零或极大 ticks。
+  5. remat 主效应需在固定 B 下配对，Bisheng 主效应需在固定 R 下配对；交互为 `(Y11-Y01)-(Y10-Y00)`，只对四格均有效且同 evidence grade 的指标计算。
+  6. `pressure_sets` 的 31 个 `64xi32` 输入各为 256 B VReg carrier；测试从 `{vector:33,predicate:6}` 到 `{32,7}`，证明中层合法提交，不证明 stack/spill/ticks。
+  7. 显式 Bisheng on/off 当前通常不请求 resource report；auto 在 on stack=0 时短路。缺失的 off stack 不能由 auto sidecar 补造。
+  8. stack frame、静态 spill/reload、动态 traffic 与 ticks 是不同证据层；run order 需轮换以避免 cache/负载漂移绑定某格。
+- 测试/历史事实：
+  - rollback 用例在二次调度成功但 vector peak 33 未下降时要求 `accepted=false`、删除 clones 并恢复顺序。
+  - budget 用例从 48 candidates 中最多选择 16、32 clones、64 dynamic micro-ops；最终仍越界时回滚。
+  - 当前真实脚本覆盖 Bisheng off/on/auto 与 strict numerical compare，但 remat 固定 false，不是四象限。
+  - 历史提交 `566d6af8c01` 在 #1446 E768/K9 TopK 上记录 13281→6412 ticks 及部分 stack 超限失败；因同时改变 VPTO scheduler 且未覆盖固定 scheduler 下四格，只是特定 shape/toolchain 的历史证据。
+- 规划边界：observation-only per-cell resource report、四格 manifest、轮换执行与结果 taxonomy 是本章提出的研究/测试协议，不是当前 PTOAS 公共 API。
+- 新知识债：显式 on/off 稳定 resource schema；allocator/disassembly；dynamic spill traffic；真机 counter；跨 shape 外部有效性；真实 kernel 四格 artifact identity。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| VPTO scheduler → remat | remat 依附 scheduler=on；合法 candidate 仍需二次调度与全 pressure set 验收 | 更广 producer 成本模型、dynamic trip/profile |
+| remat → static pressure | clone 靠近 use 缩短 live range；33/6→32/7 展示 vector/predicate 交换 | static 模型与 physical allocation 的误差 |
+| static pressure → Bisheng | R 只改中层 IR，B 只改 machine scheduling；必须正交开关 | per-cell allocator interval、physical VReg 与 spill |
+| object/resource → strict SIM | object identity 与功能等价是 stack/ticks 比较前置条件 | 稳定 resource/disassembly schema |
+| strict SIM → paired performance | 同一重复内配对、轮换 run order，才能估计主效应和交互 | 真机 counters、跨 shape/Tile 泛化 |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增；沿用 64xi32=256 B VReg carrier 与 location 语义 | ISA 核心地图保持；machine scheduling/RA 不属公开 ISA contract |
+| hw-native-sys/PTOAS | 三组 flags、remat transaction、explicit/auto Bisheng policy、pressure/rollback/budget 与 strict SIM 脚本边界 | 本章唯一主仓；中层→后端四象限归因协议已闭合，四格实测待补 |
+| hw-native-sys/pypto | 无新增 | 上游生成边界沿用；下一章可提供固定 VPTO artifact |
+| hw-native-sys/simpler | 无新增 | runtime/task 覆盖保持 |
+| hw-native-sys/pypto-lib | 无新增 | 真实 kernel/Golden 留待下一章选择 |
+| hw-native-sys/pypto-serving | 无新增 | serving/request/KV 覆盖保持，不提前扩展 |
+
+- 下一章：**真实 kernel 的四象限 Artifact Manifest——固定 VPTO input、Bisheng argv、object identity、strict SIM Golden 与轮换 run order。**
+
