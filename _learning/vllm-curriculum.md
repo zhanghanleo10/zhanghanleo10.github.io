@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 93 章沿 `forced token → real logprob → Host commit` 与 `slot_mapping → KV write` 两条真实链，确认 main 能分别观察 token/logprob 与验证定点 KV 写入，但没有统一的 paired equivalence oracle 或 canonical live-state digest。下一章定义 AB/BA、warmup、validation pass 与 timing pass 的测量事务，避免 Golden 验证本身污染 timing。
+- 当前主线：第 94 章沿 `vllm bench forward` 的 exact batch、state restore、in-graph CUDA Event 与 rank-max 聚合链，确认当前 CLI 已隔离 restore duration、rank skew、Host launch gap 与 post-timing profiler，但仍按 case 顺序运行且没有统一 Golden gate。下一章进入 PP paired timing：把 stage overlap、bubble 与端到端 critical path 接入同一 pair identity。
 
 ## 已完成章节
 
@@ -106,6 +106,7 @@
 | 2026-11-19 91 | `SchedulerOutput → DP/graph shape → per-rank GPU Event → fail-closed evidence join` | [`79897d9f`](https://github.com/vllm-project/vllm/commit/79897d9f47cfe9727749a79253c5b220e71acb39) | [Cost Conservation Golden 的 Join 契约]({{ '/articles/vllm-cost-conservation-step-join-graph-bucket-dp-timing/' | relative_url }}) |
 | 2026-11-20 92 | `Trace Replay token path + exact BenchBatch/KV context → fail-closed paired fixture` | [`07e4d6b9`](https://github.com/vllm-project/vllm/commit/07e4d6b957f70075b132b7e0c05c649dcbd0d4b7) | [Paired Replay Fixture]({{ '/articles/vllm-paired-replay-fixture-trace-exact-batch/' | relative_url }}) |
 | 2026-11-21 93 | `forced token → real logprob → canonical KV/state digest → fail-closed equivalence` | [`2f170a0f`](https://github.com/vllm-project/vllm/commit/2f170a0fed20fd84dfcf6da2a3a8188a32f67e4e) | [Paired Replay Golden]({{ '/articles/vllm-paired-replay-golden-token-logprob-kv-state-digest/' | relative_url }}) |
+| 2026-11-22 94 | `ForwardBench state restore → in-graph Event → rank MAX → AB/BA paired transaction` | [`8c17e469`](https://github.com/vllm-project/vllm/commit/8c17e4692a7cf393e3d1dacf6404fa4d48d993a1) | [Paired Replay 测量事务]({{ '/articles/vllm-paired-replay-measurement-transaction-ab-ba-validation-timing/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2569,3 +2570,32 @@
 - 新知识债：Golden wire/schema；canonical digest kernel；量化/Mamba/encoder/spec adapter；rank quorum；corruption/collision/version Golden；validation overhead、stream/event fence 与 graph pollution；数值 error-budget 校准。
 - 下一章：**Paired Replay 的测量事务——AB/BA 顺序、Warmup、Validation Pass 与 Timing 污染隔离。**
 
+
+
+## 第 94 章课程账本增量
+
+- 日期：2026-11-22
+- 章节：**Paired Replay 测量事务——AB/BA、Warmup 与 Timing 隔离**
+- 源码基线：[`8c17e469`](https://github.com/vllm-project/vllm/commit/8c17e4692a7cf393e3d1dacf6404fa4d48d993a1)，为研究时默认分支最新提交；相对第 93 章基线前进 [25 个提交](https://github.com/vllm-project/vllm/compare/2f170a0fed20fd84dfcf6da2a3a8188a32f67e4e...8c17e4692a7cf393e3d1dacf6404fa4d48d993a1)。本文直接分析的 `vllm/benchmarks/forward` 与 `tests/benchmarks/test_forward_cli.py` 在该区间无变化；最新 SM120 小矩阵 GEMM 优化与本题无关。
+- 课程位置：`frozen fixture → untimed Golden → per-variant warmup → AB/BA paired Event → rank critical path → evidence commit`。
+- 前置依赖：第 92 章的 exact batch/最小 mutable-state snapshot；第 93 章的 token、logprob 与 canonical logical KV/state Golden。
+- 新覆盖文件与符号：
+  - `vllm/benchmarks/forward/main.py::main/run_case`。
+  - `batch.py::BenchBatch/build_batch`。
+  - `capture.py::ForwardBench.run/_forward/_capture_and_time/_warmup/_time/_compare/check_sampled`。
+  - `profile.py::profile_graph/summarize`。
+  - `tests/benchmarks/test_forward_cli.py::test_bench_forward/test_bench_forward_drafter/test_bench_forward_pipeline`。
+  - 已合入 [PR #66483](https://github.com/vllm-project/vllm/pull/66483)，作为 sampler 进入 timing scope 与 100-replay 验证的历史证据。
+- 新确认不变量：
+  1. 当前 exact-batch CLI 的两次 `execute_model` 分别用于 eager warmup 与 capture；capture 前另做 eager repeat/reference，capture 后验证 hidden graph/eager、determinism、finite。
+  2. 每次 graph replay 内先 restore 显式 `state_views`，多 rank 再 rendezvous，然后才记录 start Event；restore duration、rank skew 和 Host launch gap 不进入 `latency_us`。
+  3. restore 时间在 Event 外不等于无污染：同 stream copy 仍可能改变 cache/带宽热态，A/B 的 restore schema、字节数和顺序必须一致。
+  4. `_warmup` 至少运行 `max(iters, floor(1s/per_replay))` 次，并以 CPU-group MAX 对齐 count；`_time` 默认产生 20×5=100 个 Event 样本。
+  5. 多 rank 当前对每个同 index sample执行 device-group MAX，再计算统计；paired 服务指标必须先按同一 replay identity 收敛 rank critical path，再做 `B-A`。
+  6. profiler 在 timing 后运行，不污染已提交的 Event；当前 hidden/sampler局部检查仍不等价于第 93 章的完整 request/token/logprob/KV-state Golden。
+  7. 当前 main 没有双 graph AB/BA harness。建议事务 `Capture → Validate → Warm → Measure → Commit` 是设计推断；任一 Golden、rank、generation、graph descriptor 或 restore schema mismatch 均 fail closed。
+- 具体演算：`mix=16,2*1@65`、`kv_len_jitter=0` 产生3 requests/18 scheduled tokens；5个 sample block、每块20次。顺序交替 AB/BA，对同 pair 先取 live-rank关键路径，再计算 `δ_i=T_B(i)-T_A(i)`；保存 raw pair/order/rank/manifest，而非只相减两个总体 median。
+- 测试事实：主 CLI 测试用 decode/prefill/mix、`iters=3,samples=2` 断言 latency非零、finite、graph deterministic、sampler token合法与profile产物；drafter测试覆盖 MTP/EAGLE3/DSpark/DFlash 与 timing scope；PP=2测试验证每rank 8样本及stage timeline median。没有测试创建 A/B 两张 graph、执行 AB/BA、把完整 Golden 放在 untimed pass，或证明 validation kernel 不在 Event 区间。
+- 事实/建议边界：`sample_spread_pct > 0.5` 是当前代码的 warning，不是跨模型/硬件的正确性阈值；`PairRecord`、完整 manifest、paired delta distribution 与状态枚举（PASS/NO_EQUIVALENCE/EVIDENCE_INCOMPLETE/GRAPH_BUCKET_TRANSITION）均为本文建议，不是已合入 API 或已确认计划。
+- 新知识债：双 graph地址/allocator隔离；restore copy的cache污染；validation→warmup fence；Golden digest adapter/collision；动态频率与外部tenant；PP stage overlap/bubble；异步NCCL error；弹性rank revision；raw evidence保存与统计校准。
+- 下一章：**PP Paired Timing——Stage Overlap、Bubble 与 Critical-path Golden。**
