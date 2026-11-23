@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 94 章沿 `vllm bench forward` 的 exact batch、state restore、in-graph CUDA Event 与 rank-max 聚合链，确认当前 CLI 已隔离 restore duration、rank skew、Host launch gap 与 post-timing profiler，但仍按 case 顺序运行且没有统一 Golden gate。下一章进入 PP paired timing：把 stage overlap、bubble 与端到端 critical path 接入同一 pair identity。
+- 当前主线：第 95 章沿 `vllm bench forward --pipeline-parallel-size > 1 → ForwardPipelineExecutor → PipelineBench → PipelineClock → pipeline_timeline`，确认稳态 microbatch latency 是共同时间轴上最早 first-stage start 到最晚 last-stage end，并在 DP replica 间取最大值；stage duration、inter-stage gap、same-stage bubble 与 throughput interval 是不同指标。下一章把 microbatch identity、clock calibration、raw stage events、Golden 与 abort reason提交为版本化 `PairEvidence`。
 
 ## 已完成章节
 
@@ -107,6 +107,7 @@
 | 2026-11-20 92 | `Trace Replay token path + exact BenchBatch/KV context → fail-closed paired fixture` | [`07e4d6b9`](https://github.com/vllm-project/vllm/commit/07e4d6b957f70075b132b7e0c05c649dcbd0d4b7) | [Paired Replay Fixture]({{ '/articles/vllm-paired-replay-fixture-trace-exact-batch/' | relative_url }}) |
 | 2026-11-21 93 | `forced token → real logprob → canonical KV/state digest → fail-closed equivalence` | [`2f170a0f`](https://github.com/vllm-project/vllm/commit/2f170a0fed20fd84dfcf6da2a3a8188a32f67e4e) | [Paired Replay Golden]({{ '/articles/vllm-paired-replay-golden-token-logprob-kv-state-digest/' | relative_url }}) |
 | 2026-11-22 94 | `ForwardBench state restore → in-graph Event → rank MAX → AB/BA paired transaction` | [`8c17e469`](https://github.com/vllm-project/vllm/commit/8c17e4692a7cf393e3d1dacf6404fa4d48d993a1) | [Paired Replay 测量事务]({{ '/articles/vllm-paired-replay-measurement-transaction-ab-ba-validation-timing/' | relative_url }}) |
+| 2026-11-23 95 | `PP stage graph → correlated timeline → first/last critical path → paired bubble attribution` | [`edccd1e3`](https://github.com/vllm-project/vllm/commit/edccd1e39ede897504babb9a50aa8bba26089bbb) | [PP Paired Timing]({{ '/articles/vllm-pp-paired-timing-stage-timeline-critical-path/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -508,6 +509,13 @@
 - `LogprobsProcessor.update_from_output/_update_sample_logprobs`
 - `triton_reshape_and_cache_flash`
 - `PairedReplayGolden/canonical live-state digest/mismatch taxonomy`（第 93 章建议协议，尚未合入）
+
+- `ForwardPipelineExecutor`（PP forward benchmark 专用 external-launcher executor）
+- `PipelineBench.run/_prepare_stage/_capture_stage/_stream`
+- `PipelineClock.__init__/timestamp`
+- `pipeline_timeline/pipeline_warmup_microbatches/clock_uncertainty_us`
+- `test_bench_forward_pipeline`
+- `PairKey/PairEvidence/stage gap/bubble taxonomy`（第 95 章建议协议，尚未合入）
 
 ## 已确认不变量
 
@@ -2599,3 +2607,33 @@
 - 事实/建议边界：`sample_spread_pct > 0.5` 是当前代码的 warning，不是跨模型/硬件的正确性阈值；`PairRecord`、完整 manifest、paired delta distribution 与状态枚举（PASS/NO_EQUIVALENCE/EVIDENCE_INCOMPLETE/GRAPH_BUCKET_TRANSITION）均为本文建议，不是已合入 API 或已确认计划。
 - 新知识债：双 graph地址/allocator隔离；restore copy的cache污染；validation→warmup fence；Golden digest adapter/collision；动态频率与外部tenant；PP stage overlap/bubble；异步NCCL error；弹性rank revision；raw evidence保存与统计校准。
 - 下一章：**PP Paired Timing——Stage Overlap、Bubble 与 Critical-path Golden。**
+
+## 第 95 章课程账本增量
+
+- 日期：2026-11-23
+- 章节：**PP Paired Timing——Stage Timeline、Bubble 与 Microbatch Critical Path**
+- 源码基线：[`edccd1e3`](https://github.com/vllm-project/vllm/commit/edccd1e39ede897504babb9a50aa8bba26089bbb)，为研究时默认分支最新提交；相对第 94 章基线前进 [18 个提交](https://github.com/vllm-project/vllm/compare/8c17e4692a7cf393e3d1dacf6404fa4d48d993a1...edccd1e39ede897504babb9a50aa8bba26089bbb)。直接分析的 `vllm/benchmarks/forward/*` 与 `tests/benchmarks/test_forward_cli.py` 在该区间未变化；最新 recipe/model提交与本题无关。
+- 课程位置：`exact BenchBatch → PP stage eager reference → reset/stage graph → P2P microbatch stream → correlated GPU timeline → first/last critical path → paired evidence（待下章）`。
+- 前置依赖：第 92 章的 exact batch/state snapshot；第 93 章的 request-level Golden；第 94 章的 AB/BA、untimed validation 与 paired device timing事务。
+- 新覆盖文件与符号：
+  - `docs/benchmarking/cli.md` 的 exact-batch/steady-state PP forward定位。
+  - `main.py::_make_engine_args/run_case/main` 的 `ForwardPipelineExecutor` 与 `PipelineBench` 选择。
+  - `pipeline.py::ForwardPipelineExecutor`、`PipelineClock.__init__/timestamp`、`PipelineBench.run/_prepare_stage/_restore/_capture_stage/_stream`。
+  - `capture.py::ForwardBench._make_forward` 的 last-stage sampling 与 non-last-stage auxiliary hidden relay。
+  - `test_forward_cli.py::test_bench_forward_pipeline`；已合入 [PR #63616](https://github.com/vllm-project/vllm/pull/63616)。
+- 新确认不变量：
+  1. PP benchmark不使用普通 `ForwardBench._time` 的 rank-local Event MAX；每个 stage捕获独立 graph，再以真实 recv/graph/send串流相同 microbatch。
+  2. `ForwardPipelineExecutor.execute_model` 故意报错；benchmark由每个 external-launcher进程中的 `PipelineBench` 直接驱动 runner。
+  3. local start/end Event只圈 stage graph，不圈 reset/recv/send；full traversal由 first-stage earliest start 到 last-stage latest end形成，因此包含暴露的中间 transfer/wait/bubble。
+  4. 跨设备 Event不可直接相减；`PipelineClock` 用 CPU ping-pong offset、Host/GPU anchor和前后线性插值映射到 rank-0 monotonic clock，并保存 uncertainty。
+  5. 每个 DP replica先取其 first/last TP ranks 的 `max(end)-min(start)`，再对 replica取 MAX；这是服务 critical path，不是 stage sum或local bottleneck。
+  6. `margin=4*PP`，总流转数为 `iters*samples+2*margin`；按相同 microbatch索引裁两端，排除 fill/drain。
+  7. stage compute `E[s,m]-S[s,m]`、inter-stage gap `S[s,m]-E[s-1,m]`、same-stage bubble `S[s,m]-E[s,m-1]` 与 full traversal/throughput interval是不同证据。
+  8. 小负 gap可能来自 clock uncertainty，不能静默 clamp；A/B差值与 uncertainty同量级时，当前证据不足以归因。
+  9. stage-local eager equality是必要证据，但不替代 token/logprob/logical KV-state的 request-level Golden。
+- 具体演算：PP=2、`prefill=8*128`、`iters=4`、`samples=2`；1024 scheduled tokens，`margin=8`，每 stage实际流过24个 microbatch、保留中间8个。示例 stage0 `100→160 µs`、stage1 `175→245 µs`，compute为60/70 µs、gap为15 µs、full traversal为145 µs；既不是130 µs的stage sum，也不是70 µs的local max。
+- 测试事实：2-GPU CLI测试断言 PP rank 0/1、仅末 stage采样、finite、所有 stage output相对 eager的 relative RMS=0、profile含 NCCL、每 rank 8个样本，并从 first/last timeline重算 median。PR #63616的4节点×4 GB200历史验证覆盖PP2/PP4与8192 query tokens，报告100个测量 microbatch、bench/serving差异≤0.35%、clock uncertainty约0.18～0.21 ms；这不是当前CI的普适保证。
+- 设计建议边界：`PairKey=(fixture_digest, graph_descriptor, live_rank_revision, dp_replica, microbatch_id, variant, order)`、stage gap/bubble派生表与 `PairEvidence` commit均为本文建议，不是当前 main API。
+- 新知识债：显式 microbatch/pair identity；cross-node clock drift与uncertainty gate；PP>2、PP+TP/DP/EP topology Golden；request-level Golden；P2P timeout/partial-rank故障；A/B graph地址、run order和raw timeline持久化。
+- 下一章：**PP PairEvidence——把 microbatch identity、clock calibration、stage timeline、Golden 与 abort reason提交为同一证据事务。**
+
