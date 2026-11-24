@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 95 章沿 `vllm bench forward --pipeline-parallel-size > 1 → ForwardPipelineExecutor → PipelineBench → PipelineClock → pipeline_timeline`，确认稳态 microbatch latency 是共同时间轴上最早 first-stage start 到最晚 last-stage end，并在 DP replica 间取最大值；stage duration、inter-stage gap、same-stage bubble 与 throughput interval 是不同指标。下一章把 microbatch identity、clock calibration、raw stage events、Golden 与 abort reason提交为版本化 `PairEvidence`。
+- 当前主线：第 96 章沿 `BenchBatch → PipelineBench eager/capture/stream → PipelineClock → pipeline_timeline → main output_json`，确认当前成功结果依赖数组位置隐式对齐 microbatch，Golden/finite 只有字段而没有统一 accept gate，异常也不会形成 terminal case record；据此定义绑定 fixture/config/topology/calibration/raw stage events/Golden/abort 的版本化 `PairEvidence`。下一章研究 partial-rank failure 下的 collective timeout、topology revision 与 fail-closed reconciliation。
 
 ## 已完成章节
 
@@ -108,6 +108,7 @@
 | 2026-11-21 93 | `forced token → real logprob → canonical KV/state digest → fail-closed equivalence` | [`2f170a0f`](https://github.com/vllm-project/vllm/commit/2f170a0fed20fd84dfcf6da2a3a8188a32f67e4e) | [Paired Replay Golden]({{ '/articles/vllm-paired-replay-golden-token-logprob-kv-state-digest/' | relative_url }}) |
 | 2026-11-22 94 | `ForwardBench state restore → in-graph Event → rank MAX → AB/BA paired transaction` | [`8c17e469`](https://github.com/vllm-project/vllm/commit/8c17e4692a7cf393e3d1dacf6404fa4d48d993a1) | [Paired Replay 测量事务]({{ '/articles/vllm-paired-replay-measurement-transaction-ab-ba-validation-timing/' | relative_url }}) |
 | 2026-11-23 95 | `PP stage graph → correlated timeline → first/last critical path → paired bubble attribution` | [`edccd1e3`](https://github.com/vllm-project/vllm/commit/edccd1e39ede897504babb9a50aa8bba26089bbb) | [PP Paired Timing]({{ '/articles/vllm-pp-paired-timing-stage-timeline-critical-path/' | relative_url }}) |
+| 2026-11-24 96 | `exact PP fixture → microbatch identity → clock/timeline/Golden join → terminal PairEvidence` | [`66e8914f`](https://github.com/vllm-project/vllm/commit/66e8914fc93c1b49f27fda3da33b6f1126d37a37) | [PP PairEvidence]({{ '/articles/vllm-pp-pair-evidence-microbatch-clock-abort/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2636,4 +2637,31 @@
 - 设计建议边界：`PairKey=(fixture_digest, graph_descriptor, live_rank_revision, dp_replica, microbatch_id, variant, order)`、stage gap/bubble派生表与 `PairEvidence` commit均为本文建议，不是当前 main API。
 - 新知识债：显式 microbatch/pair identity；cross-node clock drift与uncertainty gate；PP>2、PP+TP/DP/EP topology Golden；request-level Golden；P2P timeout/partial-rank故障；A/B graph地址、run order和raw timeline持久化。
 - 下一章：**PP PairEvidence——把 microbatch identity、clock calibration、stage timeline、Golden 与 abort reason提交为同一证据事务。**
+
+## 第 96 章课程账本增量
+
+- 日期：2026-11-24
+- 章节：**PP PairEvidence——Microbatch、Clock Calibration 与 Abort 的证据事务**
+- 源码基线：[`66e8914f`](https://github.com/vllm-project/vllm/commit/66e8914fc93c1b49f27fda3da33b6f1126d37a37)，为研究时默认分支最新提交；相对第 95 章基线前进 [69 个提交](https://github.com/vllm-project/vllm/compare/edccd1e39ede897504babb9a50aa8bba26089bbb...66e8914fc93c1b49f27fda3da33b6f1126d37a37)。直接分析的 `pipeline.py`、`capture.py`、`main.py` 与 `test_forward_cli.py` 未变化；benchmarking 文档新增内容与本题无关，最新 HiSparse page reclaim 修复也不改变 PP benchmark。
+- 课程位置：`exact BenchBatch/state snapshot → PP eager/capture/stream → correlated raw timeline → Golden/rank/calibration join → terminal PairEvidence → partial-rank reconciliation（待下章）`。
+- 前置依赖：第 92 章的 exact batch；第 93 章的 token/logprob/KV-state Golden；第 94 章的 AB/BA事务；第 95 章的 PP critical path 与 clock uncertainty。
+- 新覆盖文件与符号：
+  - `vllm/benchmarks/forward/pipeline.py::PipelineClock::{__init__,timestamp}`、`PipelineBench::{run,_prepare_stage,_capture_stage,_restore,_stream}`。
+  - `capture.py::_compare/check_sampled/write_input_ids`。
+  - `main.py::run_case/main` 的 `BenchBatch` ownership、两次 result gather 与最终 JSON 写入。
+  - `tests/benchmarks/test_forward_cli.py::test_bench_forward_pipeline`；历史合入 [PR #63616](https://github.com/vllm-project/vllm/pull/63616)。
+- 新确认不变量：
+  1. 当前 `pipeline_timeline` 只保存 stage、dp_rank、start/end arrays 与合成 uncertainty；microbatch identity 隐含在所有 rank 同步推进的数组位置。
+  2. `latency_us.samples_us` 已裁掉 margin，而 raw timeline 保留全部 `count+2*margin` 项；steady index 0 对应 raw ordinal `margin`，不能跨这两个坐标系直接连接。
+  3. `PipelineClock` 以最小 RTT CPU ping-pong、Host-bracketed GPU anchor 与前后线性插值建立共同时间轴；当前没有保存 trial/offset/anchor width 的版本化 transcript。
+  4. `graph_vs_eager`、`pipeline_vs_eager`、`finite`、sampler/drafter check 是结果字段，不是统一 accept gate；CLI 可能写出带 mismatch/false 的 JSON。
+  5. `_stream()` 内 timeline gather 与 `main()` 的 rank-result gather 职责不同：前者构造每个 rank 可重算的 aggregate latency，后者把 rank-local evidence 写入 `ranks[]`。
+  6. Event 只圈 stage graph；first→last critical path 包含暴露的 transfer/wait，但 `next_start-prev_end` 不是纯通信时间。
+  7. 任一 rank 异常会使 collective/CLI 失败，当前没有 per-case `ABORTED` record；最终 `output_json` 只在所有 case 成功后写入。
+  8. 建议的 PairEvidence 必须绑定 fixture/config/topology revision、raw ordinal、attempt/variant/order、calibration、expected ranks、raw events、Golden 和 terminal state；缺失或 mismatch 不得进入 paired 统计。
+- 具体演算：PP=2、`prefill=8*128`、`iters=4`、`samples=2`，每个 microbatch 1024 scheduled tokens，margin=8，两个 stage 各保存 24 对 Event 并保留 raw ordinal 8～15。示例 A ordinal 10 为 stage0 `100→160 µs`、stage1 `175→245 µs`，critical path 145 µs；B 为 134 µs，delta=-11 µs。若 Golden、fixture、topology 或 clock evidence 不一致，delta 必须拒绝；gap 也只能解释为 transfer+wait+误差的合成。
+- 测试事实：2-GPU 测试验证 PP rank 0/1、仅末 stage sampling、finite、每 rank 8 个样本、pipeline/eager relative RMS=0，并从 raw first/last arrays 和 margin 重算 median。没有测试覆盖 rank 在第 k 个 microbatch 退出、timeout abort record、duplicate/missing ordinal、Golden mismatch 阻止 timing、AB/BA pair、PP>2+TP/DP quorum 或 atomic per-case commit。
+- 事实/建议边界：当前 main 没有 `PairEvidence` 类型、calibration transcript、topology revision 或 terminal taxonomy；`PREPARED/CAPTURED/VALIDATED/MEASURED/SEALED/ABORTED` 与 join key 均为本文建议，不是已合入接口或确认计划。
+- 新知识债：版本化 PairEvidence wire/schema；comparator/error-budget manifest；request-level Golden；calibration digest；rank/topology revision；collective timeout owner；atomic per-case record；bounded raw-event retention；PP>2 与跨节点故障注入。
+- 下一章：**PP Partial-rank Failure——Collective Timeout、Topology Revision 与 PairEvidence 的 Fail-closed Reconciliation。**
 
