@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-23。
+最后更新：2026-11-24。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 105 已把课程 104 的四象限从“数学上的四格”推进到“可审计的 artifact identity”：确认默认 `vmula` fixture 已迁移，且当前真实脚本分别编译计时 object 与 strict SIM object而没有 digest 绑定；据此定义 live fixture、canonical argv、toolchain/object/Golden digest、轮换 run order、terminal failure 与 atomic seal。下一步课程 106 将定义 Four-cell Join Transaction，解决完整 pair 提交、partial retry、duplicate/conflict 与 evidence-grade 一致性。
+当前阶段：课程 106 已把课程 105 的 per-cell Artifact Manifest 推进为 Four-cell Join Transaction：以 immutable CellAttempt、显式 supersedes、duplicate/conflict 分类、同 evidence-grade 配对和原子 RepetitionJoin，保证 partial retry 不会伪造完整实验。下一步课程 107 将定义 Repetition Statistical Seal，处理配对样本、run-order block、异常值与停止规则。
 
 ## 已完成章节
 
@@ -129,6 +129,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-21 | PTOAS 机器级证据边界：ET_REL、Symbol Anchor 与 Spill/Reload Golden | object identity → symbol anchor → evidence grade → fail-closed spill verdict | [课程 103]({% post_url 2026-11-21-pto-machine-evidence-et-rel-spill-golden %}) |
 | 2026-11-22 | PTOAS Rematerialization × Bisheng Scheduler 四象限归因 | fixed scheduler → R×B cells → strict SIM gate → paired stack/ticks | [课程 104]({% post_url 2026-11-22-pto-rematerialization-bisheng-four-quadrant %}) |
 | 2026-11-23 | PTOAS 四象限 Artifact Manifest：Stale Fixture 与 Fail-closed Record | live fixture → exact object identity → strict SIM binding → sealed result | [课程 105]({% post_url 2026-11-23-pto-four-cell-artifact-manifest-fail-closed-record %}) |
+| 2026-11-24 | Four-cell Join Transaction：完整对提交、partial retry 与冲突封存 | immutable CellAttempt → unique winner → PairJoin → atomic RepetitionJoin | [课程 106]({% post_url 2026-11-24-pto-four-cell-join-transaction-retry-conflict %}) |
 
 ## ISA 知识地图
 
@@ -2401,4 +2402,51 @@ permalink: /learning/pto-curriculum/
 
 - 下一章：**Four-cell Join Transaction——完整 pair 提交、partial retry 与 evidence-grade 一致性。**
 
+## 课程 106 增量（2026-11-24）
 
+- 文章：[PTOAS Four-cell Join Transaction：完整对提交、Partial Retry 与冲突封存]({% post_url 2026-11-24-pto-four-cell-join-transaction-retry-conflict %})。
+- 源码基线：PTOAS [`72e84642cbfc`](https://github.com/hw-native-sys/PTOAS/commit/72e84642cbfcc303ad06053a3f9ac820d10e13d7)；相对课程 105 基线前进 [14 个提交](https://github.com/hw-native-sys/PTOAS/compare/297a791c7c4f632f7c1fc02bf4f777a313b4ea2a...72e84642cbfcc303ad06053a3f9ac820d10e13d7)。直接研究的 scheduler runner、validation runner、cache 与 native build 四个 blob 未变化；本章是在最新基线上闭合既有 join 知识债，不是仓库动态摘要。
+- 所选仓库：仅 `hw-native-sys/PTOAS`；四格 cell、artifact cache、board result fail-closed pattern 与直接测试均在同仓，未引入无因果关系的第二仓。
+- 课程位置：`live fixture → per-cell artifact identity → immutable CellAttempt → PairJoin → four-cell RepetitionJoin → paired effect/interaction → statistical seal（待下章）`。
+- 新覆盖文件与符号：
+  - `test/vpto/scripts/check_bisheng_scheduler.py::{main,validate_sample,compile_sample}`：固定 remat=false、off/on/auto 顺序、只 append 成功 row、逐次覆盖 `results.json` 的恢复边界。
+  - `test/vpto/scripts/run_host_vpto_validation.sh`：`set -euo pipefail`、build/link/SIM/Golden/compare 的进程失败传播与“缺 terminal record”差异。
+  - `ptodsl/ptodsl/_runtime/cache.py::{NativeBuildArtifacts,write_manifest,is_native_build_current}` 与 `native_build.py::_materialize_native_library`：输入/config digest 的 fail-closed reuse、manifest-last 发布方向，以及无 locking/temp/fallback 的当前并发边界。
+  - `.github/scripts/report_a5_board_results.py::{BoardSummary,load_results,render_not_validated}` 与 `report_a5_board_results_test.py`：缺结果不是通过、SKIP/未生成显式可见的仓内模式。
+  - `tools/pto-test-opt/pto-bisheng-scheduler-test.cpp`：fake compile 的 duplicate/conflicting report、fallback、失败与 retry 文件清理覆盖，但不验证四格 join。
+- 新确认不变量：
+  1. cell 成功不等于 repetition 成功；interaction 只能由同 repetition 的四个唯一 winner 计算。
+  2. `CellKey` 不含 attempt；每次尝试用 `AttemptKey=CellKey+attempt_id` 不可变持有，重试必须显式 `supersedes_record_digest`。
+  3. 同 `AttemptKey` 同 record digest 是幂等 duplicate；同 key 不同 digest 是 `RECORD_CONFLICT`，不得按 mtime 自动选择。
+  4. pair 与四格必须满足相同 fixture/toolchain/base argv 和指标所需 evidence grade；`REPORT_UNAVAILABLE` 可保留 raw ticks，但不可参与需要 report 的 effect。
+  5. 执行前确定性失败可单 cell retry；SIM/设备执行已经开始后的失败可能改变测量窗口，默认新建 repetition 并按轮换顺序重跑四格。
+  6. 统计读取者只消费 sealed join 引用的 raw record digests，不扫描工作目录自行补格。
+  7. join 发布的 linearization point 是 conditional/atomic publish，不是最后一个 worker 退出；冲突或未知 schema 必须 fail closed。
+- 具体演算：初始 `C00=1010(G2), C10=SIM_TIMEOUT, C01=980(G1), C11=900(G2)` 时为 `JOIN_INCOMPLETE/GRADE_MISMATCH`，不能计算 interaction。完整 G2 重跑得到 `Y00=1010,Y10=930,Y01=970,Y11=900` 后，remat effects 为 `-80/-70`，Bisheng effects 为 `-40/-30`，interaction 为 `+10` ticks；这些是协议演算，不是真机性能结论。
+- 测试事实：scheduler fake compiler 覆盖 report parsing、fallback、编译失败与 cleanup；board reporter 单测覆盖 missing TSV fail、失败详情和通知失败隔离；native build 测试覆盖缺失/错误 output fail fast。当前公开代码没有 Four-cell join、supersedes、record conflict、atomic seal、crash replay 或并发 publisher 的直接测试。
+- 规划边界：`CellKey/AttemptKey/CellTerminal/PairJoin/RepetitionJoin` schema、revision CAS、临时写+fsync+原子发布、execution-stage full-quartet retry 与 property/crash tests 均为本章提出的协议，不是当前 PTOAS 公共 API。
+- 新知识债：join schema/version codec；terminal append；supersedes DAG；evidence-grade lattice；atomic/conditional publish；compile-once/validate-exact-object；四格 fault injection；跨 repetition 稳健统计；SIM/真机 parity。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| cell artifact → terminal record | object/Golden/ticks 身份必须先于 join 固定；失败也需 terminal | compile-once exact object 与 loader digest |
+| terminal attempts → unique winner | duplicate 幂等、conflict 隔离、retry 需显式 supersedes | schema/version、并发 publisher 与 crash recovery |
+| two cells → PairJoin | 固定另一实验轴、同身份/grade 才能 seal effect | grade lattice 与 repair-lane policy |
+| four cells → RepetitionJoin | 四个唯一 winner 同 repetition 才能计算 interaction | 原子发布、revision CAS 与直接 fault tests |
+| repetition → statistics | 统计只读 sealed join，raw values 可重算 | 稳健估计、异常值、停止规则与真机外部有效性 |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增指令；沿用 `vmula` 的 GM/UB/VReg 与 load-compute-store 生命周期 | ISA 核心地图保持；本章补实验 join，不改 ISA 语义 |
+| hw-native-sys/PTOAS | success-only result、cache manifest 发布边界、missing-result fail-closed pattern、Four-cell join 协议 | 本章唯一主仓；per-cell identity 已推进到 pair/repetition 事务 |
+| hw-native-sys/pypto | 无新增 | 上游 emitted PTO identity 沿用 |
+| hw-native-sys/simpler | 无新增 | runtime/task 与恢复边界保持 |
+| hw-native-sys/pypto-lib | 无新增 | 真实 kernel/Golden 待 join/statistical seal 稳定后接入 |
+| hw-native-sys/pypto-serving | 无新增 | serving/request/KV 不提前扩展 |
+
+- 第 99～105 章知识图谱回顾：`grouped VF hardware loop/membar → VMI loop layout fixed point → VPTO live range/remat → LLVM/HiVM/Bisheng report → ET_REL/spill machine evidence → 四象限 → artifact manifest`；当前路线先完成 join 与统计 seal，再进入真实 kernel/真机扩展。
+- 下一章：**Repetition Statistical Seal——配对样本、run-order block、异常值与停止规则怎样不破坏 Four-cell 因果边界。**
