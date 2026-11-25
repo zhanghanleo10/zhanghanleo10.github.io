@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 96 章沿 `BenchBatch → PipelineBench eager/capture/stream → PipelineClock → pipeline_timeline → main output_json`，确认当前成功结果依赖数组位置隐式对齐 microbatch，Golden/finite 只有字段而没有统一 accept gate，异常也不会形成 terminal case record；据此定义绑定 fixture/config/topology/calibration/raw stage events/Golden/abort 的版本化 `PairEvidence`。下一章研究 partial-rank failure 下的 collective timeout、topology revision 与 fail-closed reconciliation。
+- 当前主线：第 97 章沿 `PipelineBench._stream → device P2P/CPU collective timeout → rank-local terminal → fixed topology revision → fail-closed reconciliation`，确认 PP 缺一 stage 不能缩容续跑，timeout 也不是 device completion 证明；旧 partial timeline 不得跨 process-group/graph generation 拼接。下一章研究 Rank-local Terminal、Atomic Case Commit 与 Crash Replay。
 
 ## 已完成章节
 
@@ -109,6 +109,7 @@
 | 2026-11-22 94 | `ForwardBench state restore → in-graph Event → rank MAX → AB/BA paired transaction` | [`8c17e469`](https://github.com/vllm-project/vllm/commit/8c17e4692a7cf393e3d1dacf6404fa4d48d993a1) | [Paired Replay 测量事务]({{ '/articles/vllm-paired-replay-measurement-transaction-ab-ba-validation-timing/' | relative_url }}) |
 | 2026-11-23 95 | `PP stage graph → correlated timeline → first/last critical path → paired bubble attribution` | [`edccd1e3`](https://github.com/vllm-project/vllm/commit/edccd1e39ede897504babb9a50aa8bba26089bbb) | [PP Paired Timing]({{ '/articles/vllm-pp-paired-timing-stage-timeline-critical-path/' | relative_url }}) |
 | 2026-11-24 96 | `exact PP fixture → microbatch identity → clock/timeline/Golden join → terminal PairEvidence` | [`66e8914f`](https://github.com/vllm-project/vllm/commit/66e8914fc93c1b49f27fda3da33b6f1126d37a37) | [PP PairEvidence]({{ '/articles/vllm-pp-pair-evidence-microbatch-clock-abort/' | relative_url }}) |
+| 2026-11-25 97 | `PP stage failure → device/CPU timeout → topology revision → terminal reconciliation` | [`b3bad87e`](https://github.com/vllm-project/vllm/commit/b3bad87eb137c6d2fedda152ff2d3e3df3a32952) | [PP Partial-rank Failure]({{ '/articles/vllm-pp-partial-rank-failure-timeout-topology-reconciliation/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2665,3 +2666,30 @@
 - 新知识债：版本化 PairEvidence wire/schema；comparator/error-budget manifest；request-level Golden；calibration digest；rank/topology revision；collective timeout owner；atomic per-case record；bounded raw-event retention；PP>2 与跨节点故障注入。
 - 下一章：**PP Partial-rank Failure——Collective Timeout、Topology Revision 与 PairEvidence 的 Fail-closed Reconciliation。**
 
+## 第 97 章课程账本增量
+
+- 日期：2026-11-25
+- 章节：**PP Partial-rank Failure——Timeout、Topology Revision 与证据收敛**
+- 源码基线：[`b3bad87e`](https://github.com/vllm-project/vllm/commit/b3bad87eb137c6d2fedda152ff2d3e3df3a32952)，为研究时默认分支最新提交；相对第 96 章基线前进 [95 个提交](https://github.com/vllm-project/vllm/compare/66e8914fc93c1b49f27fda3da33b6f1126d37a37...b3bad87eb137c6d2fedda152ff2d3e3df3a32952)。直接研究的 `pipeline.py`、`main.py`、`test_forward_cli.py`、`ParallelConfig`、`GroupCoordinator` 与 timeout helper 在该区间无语义变化；最新 CuTeDSL GEMM epilogue store提交与本题无关。
+- 课程位置：`PairEvidence → partial-rank failure → device/CPU timeout → fixed topology revision → rank terminal reconciliation → AttemptFinal persistence（待下章）`。
+- 前置依赖：第 95 章的 PP critical path；第 96 章的 microbatch identity、clock calibration、Golden 与 terminal PairEvidence。
+- 新覆盖文件与符号：
+  - `vllm/benchmarks/forward/pipeline.py::PipelineClock::{__init__,timestamp}`、`PipelineBench::{run,_prepare_stage,_capture_stage,_stream}` 的 CPU clock、barrier、device P2P 与 timeline gather failure domains。
+  - `vllm/benchmarks/forward/main.py::{run_case,main}` 的 cleanup、rank-result gather、内存 `results` 与最终整文件 `json.dump` 边界。
+  - `vllm/config/parallel.py::ParallelConfig::{distributed_timeout_seconds,cpu_distributed_timeout_seconds,effective_cpu_distributed_timeout}`。
+  - `vllm/distributed/parallel_state.py::GroupCoordinator` 与 `vllm/distributed/utils.py::{get_distributed_timeout_or_none,get_cpu_distributed_timeout_or_none,cpu_all_reduce_}`。
+  - `tests/benchmarks/test_forward_cli.py::test_bench_forward_pipeline`、`tests/distributed/test_cpu_all_reduce.py::test_cpu_all_reduce_timeout`；历史合入 PR [#63616](https://github.com/vllm-project/vllm/pull/63616)、[#45159](https://github.com/vllm-project/vllm/pull/45159)、[#42968](https://github.com/vllm-project/vllm/pull/42968)、[#63016](https://github.com/vllm-project/vllm/pull/63016)。
+- 新确认不变量：
+  1. PP rank持有独占模型 stage；partial failure后不能缩小membership续跑同一case，除非重新建立完整模型fixture，而那已经是新实验。
+  2. `_stream()` 同时依赖 device P2P与CPU barrier/clock/gather；两个timeout分别约束局部等待，但都不是per-case terminal owner。
+  3. timeout只证明观察者未按时得到完成，不证明peer device work已停止；旧graph/state属于completion unknown。
+  4. rank-local `COMPLETE`不等于case完成；只有同一attempt/topology revision的expected ranks全部 `COMPLETE`才允许seal latency。
+  5. 未完成后置 `PipelineClock`/gather的CUDA Event没有共同时间轴；不能用已有前缀样本计算median。
+  6. rank restart会改变process-group、clock anchor、graph/address generation；即使global rank相同也必须新建attempt并从ordinal 0完整重跑。
+  7. rank 0可以聚合成功结果，但不能作为唯一故障owner；reconciliation必须位于不依赖故障collective的外部harness/sideband。
+  8. `ABORTED`必须保存expected/observed ranks、首因、派生timeout、last progress与partial evidence refs；统计字段缺省，不能填0/NaN。
+- 具体演算：PP=2、`prefill=8*128`、1024 scheduled tokens/microbatch、`iters=4,samples=2,margin=8`，计划24个raw ordinal。rank 1在ordinal 10接收后graph失败，rank 0可能在ordinal 11的`isend.wait()`超时；两者未完成后置clock/gather，故0～10的Event也不能形成前缀median。owner封存rank1 `FAILED`、rank0 `TIMED_OUT`，case=`ABORTED`；restart后attempt+1完整重跑24次。
+- 测试事实：2-GPU pipeline测试只覆盖成功路径，并以`subprocess.run(timeout=600)`限制整条测试命令；CPU all-reduce测试只证明1秒p2p wait在3秒内抛错。没有ordinal级stage故障、device P2P/clock/gather分点timeout、rank 0失败、首因保留、missing-rank synthesis、stale output fence或restart-generation Golden。
+- 事实/建议边界：当前main没有`RankTerminal/AttemptFinal/topology_revision`或外部reconciler；rank-local immutable terminal、synthesized `MISSING`、三层deadline关系、atomic case final与full-rerun policy均为本文建议，不是已合入API。
+- 新知识债：terminal wire/schema；独立sideband；atomic per-case commit；首因与cleanup error chain；device completion containment；stale output fencing；PP>2+TP/DP故障矩阵；fault injection；跨节点timeout校准。
+- 下一章：**PP AttemptFinal 的持久化——Rank-local Terminal、Atomic Case Commit 与 Crash Replay。**
