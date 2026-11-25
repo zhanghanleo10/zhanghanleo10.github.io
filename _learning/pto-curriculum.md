@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 106 已把课程 105 的 per-cell Artifact Manifest 推进为 Four-cell Join Transaction：以 immutable CellAttempt、显式 supersedes、duplicate/conflict 分类、同 evidence-grade 配对和原子 RepetitionJoin，保证 partial retry 不会伪造完整实验。下一步课程 107 将定义 Repetition Statistical Seal，处理配对样本、run-order block、异常值与停止规则。
+当前阶段：课程 107 已把课程 106 的 Four-cell Join Transaction 推进为 Repetition Statistical Seal：以完整 RepetitionJoin 为统计单位，先求 paired effect/interaction，再按位置平衡 run-order block 汇总；invalid evidence 整组隔离，valid extreme 保留，停止规则必须预声明。下一步课程 108 将把同一证据协议提升到真实 NPU cohort，并研究 SIM/NPU parity、clock 与 health evidence。
 
 ## 已完成章节
 
@@ -130,6 +130,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-22 | PTOAS Rematerialization × Bisheng Scheduler 四象限归因 | fixed scheduler → R×B cells → strict SIM gate → paired stack/ticks | [课程 104]({% post_url 2026-11-22-pto-rematerialization-bisheng-four-quadrant %}) |
 | 2026-11-23 | PTOAS 四象限 Artifact Manifest：Stale Fixture 与 Fail-closed Record | live fixture → exact object identity → strict SIM binding → sealed result | [课程 105]({% post_url 2026-11-23-pto-four-cell-artifact-manifest-fail-closed-record %}) |
 | 2026-11-24 | Four-cell Join Transaction：完整对提交、partial retry 与冲突封存 | immutable CellAttempt → unique winner → PairJoin → atomic RepetitionJoin | [课程 106]({% post_url 2026-11-24-pto-four-cell-join-transaction-retry-conflict %}) |
+| 2026-11-25 | PTOAS Repetition Statistical Seal：配对样本、Run-order Block 与停止规则 | RepetitionJoin → order block → paired effects/interaction → StatisticalSeal | [课程 107]({% post_url 2026-11-25-pto-repetition-statistical-seal-blocked-pairs %}) |
 
 ## ISA 知识地图
 
@@ -138,6 +139,7 @@ permalink: /learning/pto-curriculum/
 | VMI loop layout 与 group-slot | `scf.for` init/iter_arg/yield/result 必须共享 layout；`group_slots<G,K,LS>` 只给映射 lane 语义，carrier 数为 `ceil(G/K)`；VMI 1:N physicalization 改变 VPTO value arity，不等于硬件寄存器编号分配 | PTOAS assignment→VPTO carrier 已闭合；Mask专项、partial packet、allocator/spill 待补 |
 | VPTO carrier live range 与 register pressure | `VRegType`/`MaskType` 分别贡献 vector/predicate 1 单位；bitcast 共享 pressure representative；last use 与 live-through 决定静态峰值。高压 remat 只塑造 live range，提交需二次调度后全部 set 合法且 vector peak 下降；真实编号/spill 留给 Bisheng，stack bytes 不是 spill 证明 | PTOAS scheduler/remat 已闭合；VPTO emission、allocator mapping/spill dump 待补 |
 | PTOAS machine evidence 与 spill Golden | `ET_REL/Machine 1029/symbol` 提供 object/function anchor；stack bytes、VReg/MaskReg total、spill instruction、dynamic traffic 与 ticks 是五个不同证据层。机器证据必须绑定 toolchain/argv/object SHA；不可用必须显式 fail closed | 公开 PTOAS 稳定到 object/resource/SIM；allocator dump、SSA→physical mapping、versioned disassembly 与 dynamic traffic 待补 |
+| PTOAS Repetition Statistical Seal | 完整 `RepetitionJoin` 是最小统计单位；先在轮内计算四个 main-effect contrast 与 interaction，再跨轮汇总。run-order block 平衡执行位置；invalid evidence 整组隔离，valid extreme 保留；stop rule 先于观测固定 | 协议边界已闭合；schema、blocked analyzer、crash test 与 SIM/NPU parity 待实现 |
 | Grouped A5 VF hardware loop | canonical `[0, stop)`、step=1、嵌套≤4；Reg/Mask 以 `iter_args/yield` carry，UB 以稳定 base/origin+access offset 定址；PTOAS 证明 loop-carried footprint disjoint 或在 latch 插 typed membar。`Require` 不是 final instruction certificate | PyPTO→PTOAS 主链已闭合；真机 dynamic/carry 与最终指令审计待补 |
 | Tile static capacity | 编译期决定资源盒子、布局合法性和指令特化 | 已讲透基础 |
 | Valid region | destination 通常定义语义域；是连续前缀，不是任意 mask；区外默认 unspecified | 已讲透基础 |
@@ -244,7 +246,7 @@ permalink: /learning/pto-curriculum/
 | --- | --- | --- | --- |
 | pto-isa | [b1d460ee](https://github.com/hw-native-sys/pto-isa/commit/b1d460ee8c001585ede36b68ba3678dc5a226bbf) | 既有 Tile/DMA/GEMM/TPipe/Reduce/Online Softmax 与 recovery；新增 RDMA completion record export 修正、workspace 完整 allocation-plan 边界、revisioned admission token、resource-vector reservation 与 reclaim/census 闭环 | ISA 深挖 45 |
 | simpler | [e151a2d5](https://github.com/hw-native-sys/simpler/commit/e151a2d5433fbc2acdfd21eca41afe3a7cca07c2) | 既有 Worker/task fan-in、workspace owner、census/admission 与 hidden binding；`remote_wire` Frame/COMPLETION 的 session/worker/sequence、strict decode 与 sequence matching 为 rank frontier 提供最小 source identity；明确 wire completion 不等于 durable snapshot evidence | 跨仓深挖 11 |
-| PTOAS | [5089169d](https://github.com/hw-native-sys/PTOAS/commit/5089169d517c921842e644a0d5ec09921c6351ab) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI 与 VPTO；新增 `PTONarrowVPTOLoopCounters`、`VecScopeMemBarAnalysis` 的 loop result/iter_arg/yield value walk、跨迭代 RAW/WAR/WAW footprint 与 mask/dynamic-disjoint lit | 跨仓深挖 29 |
+| PTOAS | [b43b4404](https://github.com/hw-native-sys/PTOAS/commit/b43b440428318953313ac5903c957755958d5197) | 既有 InsertSync/memplan/ReserveBuffer/Pipe ABI、VPTO live range/remat、LLVM/HiVM/Bisheng machine evidence；新增 four-cell RepetitionJoin 的 blocked paired StatisticalSeal、invalid/valid-extreme 与 stopping 边界 | 跨仓持续深挖（课程 107） |
 | pypto | [442b793f](https://github.com/hw-native-sys/pypto/commit/442b793f38ab7ff43ab6304d6bc34fb001841f81) | 既有 Tensor→Tile/partition、prefetch、Artifact recovery 与 grouped VF ABI；新增 `hardware_loop` contract、Reg/Mask-only carry、`scf.for iter_args/yield`、dynamic loop-invariant view-origin capture 与 compile tests | 跨仓深挖 31 |
 | pypto-lib | [5b8d1e9](https://github.com/hw-native-sys/pypto-lib/commit/5b8d1e9846ff7401f0f8525bc5a5b67c8191c13e) | build_swa_metadata、decode_sparse_attn_csa、golden | 深挖 1 |
 | pypto-serving | [272b874](https://github.com/hw-native-sys/pypto-serving/commit/272b87492695f78d44c2e8cfe808f372706de594) | cache metadata、prepared inputs、_run_l3 | 初步 |
@@ -2450,3 +2452,50 @@ permalink: /learning/pto-curriculum/
 
 - 第 99～105 章知识图谱回顾：`grouped VF hardware loop/membar → VMI loop layout fixed point → VPTO live range/remat → LLVM/HiVM/Bisheng report → ET_REL/spill machine evidence → 四象限 → artifact manifest`；当前路线先完成 join 与统计 seal，再进入真实 kernel/真机扩展。
 - 下一章：**Repetition Statistical Seal——配对样本、run-order block、异常值与停止规则怎样不破坏 Four-cell 因果边界。**
+
+## 课程 107 增量（2026-11-25）
+
+- 文章：[PTOAS Repetition Statistical Seal：配对样本、Run-order Block 与停止规则]({% post_url 2026-11-25-pto-repetition-statistical-seal-blocked-pairs %})。
+- 源码基线：PTOAS [`b43b44042831`](https://github.com/hw-native-sys/PTOAS/commit/b43b440428318953313ac5903c957755958d5197)；相对课程 106 基线前进 [6 个提交](https://github.com/hw-native-sys/PTOAS/compare/72e84642cbfcc303ad06053a3f9ac820d10e13d7...b43b440428318953313ac5903c957755958d5197)。直接研究的 scheduler runner、validation runner、策略测试和 scheduler framework 文档在该区间没有语义变化；最新 Linx IR、offset 文档和 VMI combine 变更与本章统计边界无直接关系。
+- 所选仓库：仅 `hw-native-sys/PTOAS`；采集顺序、fatobj compile timing、SIM tick/Golden、per-mode median 和直接策略测试均在同仓，不引入无因果关系的第二仓。
+- 课程位置：`cell artifact identity → immutable CellAttempt → four-cell RepetitionJoin → run-order block → paired effects/interaction → StatisticalSeal → SIM/NPU promotion（待下章）`。
+- 新覆盖文件、符号与历史证据：
+  - `test/vpto/scripts/check_bisheng_scheduler.py::{parse_args,run_logged,compile_sample,validate_sample,main}`：`1..10` repetitions、固定 `off/on/auto` 次序、success-only append、逐次覆盖 JSON 与 per-mode compile median。
+  - `test/vpto/scripts/run_host_vpto_validation.sh`：fatobj 之后的 host/SIM/strict compare 证据链。
+  - `docs/designs/vpto-scheduler-framework.md`：#1506 三次中位数、单次 tick 范围、归因限制与代表性性能 gate 规划。
+  - `tools/pto-test-opt/pto-bisheng-scheduler-test.cpp`、`test/lit/vpto/bisheng_vec_misched_cli.pto`：决策分支、报告解析、失败恢复、临时文件清理与 CLI contract；历史合入提交 [`63f6aa7c`](https://github.com/hw-native-sys/PTOAS/commit/63f6aa7ca4e48027531f0c6ab5575a44f8178654)。
+- 新确认不变量：
+  1. `RepetitionJoin` 而非单个 tick/cell median 是最小统计样本；任一格无效，整组不能产生 effect。
+  2. 先在 repetition 内计算 `Y10-Y00`、`Y11-Y01`、`Y01-Y00`、`Y11-Y10` 与 `I=Y11-Y10-Y01+Y00`，再跨 repetition 汇总；四个独立 median 会丢失共同噪声和缺格身份。
+  3. run-order 必须进入 manifest；四-repetition 位置平衡 block 使四格各占一次第 1～4 位置，但不能替代 toolchain/device/health 同 cohort。
+  4. identity、Golden、health gate 失败是 invalid evidence，整组隔离；合法极端观测保留在主分析并做 robust/sensitivity report，不能按结果删单格。
+  5. fixed horizon 在运行前声明。任何 sequential stop 都必须预声明 `N_min/N_max`、effect/precision target 与 repeated-look 校正，不能看到显著后才决定停止。
+  6. compile time 与 execution ticks 是不同 metric family；auto 的额外 compile 不能与最终 object tick 混成一个 estimator。
+  7. seal 必须引用 raw `RepetitionJoin` digest、order block、analysis version、invalid reason 与 stop reason；新增样本产生新 revision，不能原地改写旧 seal。
+- 具体演算：一轮 `Y00=1010,Y10=930,Y01=970,Y11=900` ticks，remat effects 为 `-80/-70`，Bisheng effects 为 `-40/-30`，interaction 为 `+10`。五轮 interaction `[10,10,9,8,10]` 的 median 为 10；公共漂移导致的合法慢轮仍保留，simulator restart/Golden fail 则整轮 invalid。公开 #1506 只有 per-mode 三次范围，无法反推 paired four-cell interaction。
+- 测试事实与缺口：fake compiler/CLI 测试验证策略和错误路径，真实 runner 验证 object、SIM success、strict compare 与 tick；当前没有四格 join/order、block balance、invalid whole-repetition、valid extreme、stop manifest、atomic seal、crash replay或 SIM/NPU parity 的直接测试。
+- 事实/规划边界：当前 main 没有 `StatisticalSeal`、blocked design、paired bootstrap、MAD/outlier taxonomy 或 sequential stop API；本文定义的是由当前采集能力与缺口推导的协议，不是已合入计划。历史三次中位数是指定工具链/fixture 的实验事实，不是通用性能保证。
+- 新知识债：`StatisticalSealV1` codec；order-block verifier；paired estimator/CI；invalid taxonomy；analysis revision CAS；采集 crash replay；环境 telemetry；SIM/NPU cohort 与 parity gate。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| four-cell join → statistical sample | 完整 `RepetitionJoin` 是最小统计单位；缺格不能跨轮补齐 | schema、codec 与 property test |
+| repetition → paired effects | 先求四个 main-effect contrast 和 interaction，再跨轮汇总 | estimator、CI 与 small-N calibration |
+| run order → block | 预声明位置平衡 block，factor 与位置不得混同 | generator/verifier 与 crash resume |
+| anomaly → inclusion | invalid evidence 整组隔离；valid extreme 保留并做敏感性分析 | health gate、telemetry 与 taxonomy |
+| observations → stopping | fixed horizon 最简单；sequential rule 必须预注册并校正 repeated looks | stop manifest、decision gate 与直接测试 |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增指令；ISA object/load-compute-store 语义沿用 | 核心 ISA 地图保持；本章不改语义 |
+| hw-native-sys/PTOAS | repetition loop、fixed mode order、fatobj timing、SIM tick/Golden、per-mode median；提出 blocked paired StatisticalSeal | 本章唯一主仓；four-cell evidence 已推进到统计终态 |
+| hw-native-sys/pypto | 无新增 | 上游 emitted PTO identity 沿用 |
+| hw-native-sys/simpler | 无新增 | runtime/task 与恢复边界保持 |
+| hw-native-sys/pypto-lib | 无新增 | 真实 kernel 将在 StatisticalSeal 稳定后接入 |
+| hw-native-sys/pypto-serving | 无新增 | serving/request/KV 不提前扩展 |
+
+- 下一章：**Real-kernel Evidence Promotion——从 SIM StatisticalSeal 到 NPU cohort、clock/health evidence 与 parity 判定。**
