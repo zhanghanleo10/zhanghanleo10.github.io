@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 97 章沿 `PipelineBench._stream → device P2P/CPU collective timeout → rank-local terminal → fixed topology revision → fail-closed reconciliation`，确认 PP 缺一 stage 不能缩容续跑，timeout 也不是 device completion 证明；旧 partial timeline 不得跨 process-group/graph generation 拼接。下一章研究 Rank-local Terminal、Atomic Case Commit 与 Crash Replay。
+- 当前主线：第 98 章沿 `RankTerminal → external reconciliation → AttemptFinal → atomic per-case commit → crash replay`，确认当前 whole-file `output_json` 只承载全成功快照，不能表示 partial-rank terminal、持久化首因或 crash 后的确定恢复；因此将不可变 attempt final 设为源记录，aggregate JSON 仅为可重建视图。下一章研究不依赖故障 collective 的 RankTerminal sideband mailbox 与 missing-rank synthesis。
 
 ## 已完成章节
 
@@ -110,6 +110,7 @@
 | 2026-11-23 95 | `PP stage graph → correlated timeline → first/last critical path → paired bubble attribution` | [`edccd1e3`](https://github.com/vllm-project/vllm/commit/edccd1e39ede897504babb9a50aa8bba26089bbb) | [PP Paired Timing]({{ '/articles/vllm-pp-paired-timing-stage-timeline-critical-path/' | relative_url }}) |
 | 2026-11-24 96 | `exact PP fixture → microbatch identity → clock/timeline/Golden join → terminal PairEvidence` | [`66e8914f`](https://github.com/vllm-project/vllm/commit/66e8914fc93c1b49f27fda3da33b6f1126d37a37) | [PP PairEvidence]({{ '/articles/vllm-pp-pair-evidence-microbatch-clock-abort/' | relative_url }}) |
 | 2026-11-25 97 | `PP stage failure → device/CPU timeout → topology revision → terminal reconciliation` | [`b3bad87e`](https://github.com/vllm-project/vllm/commit/b3bad87eb137c6d2fedda152ff2d3e3df3a32952) | [PP Partial-rank Failure]({{ '/articles/vllm-pp-partial-rank-failure-timeout-topology-reconciliation/' | relative_url }}) |
+| 2026-11-26 98 | `RankTerminal → AttemptFinal → atomic per-case commit → crash replay` | [`ed686cce`](https://github.com/vllm-project/vllm/commit/ed686ccec527b48de4c8a67927184933886f062a) | [PP AttemptFinal]({{ '/articles/vllm-pp-attempt-final-atomic-case-commit-crash-replay/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2693,3 +2694,33 @@
 - 事实/建议边界：当前main没有`RankTerminal/AttemptFinal/topology_revision`或外部reconciler；rank-local immutable terminal、synthesized `MISSING`、三层deadline关系、atomic case final与full-rerun policy均为本文建议，不是已合入API。
 - 新知识债：terminal wire/schema；独立sideband；atomic per-case commit；首因与cleanup error chain；device completion containment；stale output fencing；PP>2+TP/DP故障矩阵；fault injection；跨节点timeout校准。
 - 下一章：**PP AttemptFinal 的持久化——Rank-local Terminal、Atomic Case Commit 与 Crash Replay。**
+
+## 第 98 章课程账本增量
+
+- 日期：2026-11-26
+- 章节：**PP AttemptFinal——原子 Case Commit 与 Crash Replay**
+- 源码基线：[`ed686cce`](https://github.com/vllm-project/vllm/commit/ed686ccec527b48de4c8a67927184933886f062a)，为研究时默认分支最新提交；相对第 97 章基线前进 [82 个提交](https://github.com/vllm-project/vllm/compare/b3bad87eb137c6d2fedda152ff2d3e3df3a32952...ed686ccec527b48de4c8a67927184933886f062a)。直接研究的 `main.py`、`pipeline.py` 与 `test_forward_cli.py` 未发生语义变化；最新 HiSparse/NIXL host KV 修复与本题无关。
+- 课程位置：`rank-local terminal → external reconciliation → AttemptFinal → atomic per-case record → crash replay → rebuildable aggregate → sideband mailbox（待下章）`。
+- 前置依赖：第 92 章的 exact batch/state snapshot；第 93 章的 request-level Golden；第 94 章的 AB/BA transaction；第 95 章的 PP critical path；第 96 章的 PairEvidence；第 97 章的 partial-rank fail-closed reconciliation。
+- 新覆盖文件与符号：
+  - `vllm/benchmarks/forward/main.py::run_case` 的 `bench.run`、fixture check、`finally` cleanup 与 primary/cleanup exception 链。
+  - `main.py::main` 的内存 `results`、CPU-group `all_gather_object`、rank-0 row synthesis 与最终 whole-file `open(..., "w") + json.dump`。
+  - `vllm/benchmarks/forward/pipeline.py::PipelineBench.run/_stream` 的 monkey-patch restore、capture/stream/profile 与无 durable terminal 边界。
+  - `tests/benchmarks/test_forward_cli.py::test_bench_forward_pipeline`；历史合入 [PR #63616](https://github.com/vllm-project/vllm/pull/63616)。
+- 新确认不变量：
+  1. 当前 `output_json` 是所有 case 全成功后的聚合快照，不是 per-case transaction log；最终 open 前 crash 会保留 stale old file，dump 中 crash 可留下 truncated JSON。
+  2. rank-local `COMPLETE`、rank-0 `results.append`、result gather 与 `json.dump` 开始都不是 durable commit；建议的线性化点是特定 attempt identity 的 canonical `AttemptFinal` 原子发布并达到约定 durability。
+  3. `RankTerminal` 必须不可变并保存 `first_cause`；cleanup error 只能作为派生错误，不能因 Python `finally` 再抛异常而替换首因。
+  4. `AttemptFinal` identity 至少绑定 experiment/case/attempt/topology revision；同 global rank restart 不等价于同 process-group/graph generation。
+  5. 只有同 attempt/revision 的全部 expected ranks 为 `COMPLETE` 才能 `SEALED`；任一 `FAILED/TIMED_OUT/MISSING` 均为 `ABORTED`，且 latency 字段缺省。
+  6. per-case record 同 identity+同 digest 是幂等 duplicate；同 identity+不同 digest 是 conflict，必须 quarantine/fail closed，不能 last-writer-wins。
+  7. 已发布 final 永不原地重开；late terminal 只作为证据，retry 必须 attempt+1，并完整重跑所有 raw ordinal。
+  8. 推荐写入序列为 canonical serialize→same-dir temp→flush/file fsync→atomic publish→parent-dir fsync；rename 的原子可见性不等于断电 durability。
+  9. crash 在 temp durable 前、temp fsync 后 rename 前、rename 后 dir fsync 前、final 后 aggregate 前具有不同恢复语义；最后一种只需重建 aggregate，不重跑 kernel。
+  10. aggregate JSON 是 derived view；其丢失、stale 或重建不改变 immutable per-case finals 的结论。
+- 具体演算：PP=2，case A=`prefill=8*128`，1024 scheduled tokens/microbatch，`iters=4,samples=2,margin=8`，每 stage 流过 24 个 raw ordinal。A/attempt0 两 rank 均 `COMPLETE` 并 `SEALED`；case B=`decode=8*1@512`，rank1 ordinal10 `FAILED`、rank0 `TIMED_OUT`，故 B/attempt0=`ABORTED`、无 median。若 final 发布后 aggregate 前 crash，restart 直接恢复 A/B finals；B retry 使用 attempt1/new topology revision，完整重跑 24 次，不拼 attempt0 前缀。
+- 测试事实：2-GPU pipeline CLI 测试验证 subprocess 成功、单 row、PP ranks `[0,1]`、finite、last-stage sampler、NCCL profile、每 rank 8 样本，并从 first/last timeline 重算 median；只覆盖全成功 snapshot。没有 stale-output、primary+cleanup double failure、rank-local terminal、missing rank、duplicate/conflict、各 write/fsync/rename crash point、aggregate replay 或 retry-generation fence。
+- 事实/建议边界：当前代码没有 `RankTerminal`、`AttemptFinal`、canonical digest、per-case atomic writer、CAS/manifest 或 replay scanner；文中的 schema、状态、线性化点与写入协议均为基于当前失败语义的设计建议，不是已合入 API 或确认计划。
+- 七篇知识图谱回顾（第 92–98 章）：`exact fixture → request Golden → AB/BA timing transaction → PP stage critical path → PairEvidence → partial-rank fail-closed reconciliation → durable AttemptFinal`。后续路线调整为 sideband terminal transport→直接 fault/crash matrix→跨节点 clock/timeout 校准。
+- 新知识债：terminal wire/schema；sideband mailbox owner/认证/backpressure；missing-rank synthesis；CAS/manifest；目标文件系统断电 durability；raw evidence retention；PP>2+TP/DP/EP 故障矩阵；device completion containment；跨节点 fault injection。
+- 下一章：**PP AttemptFinal 的侧带传输——不依赖故障 collective 的 RankTerminal Mailbox 与 Missing-rank Synthesis。**
