@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-24。
+最后更新：2026-11-26。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 107 已把课程 106 的 Four-cell Join Transaction 推进为 Repetition Statistical Seal：以完整 RepetitionJoin 为统计单位，先求 paired effect/interaction，再按位置平衡 run-order block 汇总；invalid evidence 整组隔离，valid extreme 保留，停止规则必须预声明。下一步课程 108 将把同一证据协议提升到真实 NPU cohort，并研究 SIM/NPU parity、clock 与 health evidence。
+当前阶段：课程 108 已把 SIM Repetition StatisticalSeal 提升到真实 kernel 的 Golden-gated NPU evidence：语义 parity 不等于 tick/µs 换算，validation 必须先于 benchmark，CI 对 rounds、warmup、STRACE 与 rank samples fail closed；但 clock、temperature、ECC/reset、firmware 与 artifact digest 尚未进入统一 cohort seal。下一步课程 109 将研究 baseline/candidate 的 NPU 配对轮换、温频漂移与多卡聚合策略。
 
 ## 已完成章节
 
@@ -131,6 +131,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-23 | PTOAS 四象限 Artifact Manifest：Stale Fixture 与 Fail-closed Record | live fixture → exact object identity → strict SIM binding → sealed result | [课程 105]({% post_url 2026-11-23-pto-four-cell-artifact-manifest-fail-closed-record %}) |
 | 2026-11-24 | Four-cell Join Transaction：完整对提交、partial retry 与冲突封存 | immutable CellAttempt → unique winner → PairJoin → atomic RepetitionJoin | [课程 106]({% post_url 2026-11-24-pto-four-cell-join-transaction-retry-conflict %}) |
 | 2026-11-25 | PTOAS Repetition Statistical Seal：配对样本、Run-order Block 与停止规则 | RepetitionJoin → order block → paired effects/interaction → StatisticalSeal | [课程 107]({% post_url 2026-11-25-pto-repetition-statistical-seal-blocked-pairs %}) |
+| 2026-11-26 | PTO 真实 Kernel 证据提升：从 SIM StatisticalSeal 到 Golden-gated NPU Cohort | KernelSpec → Golden gate → NPU raw rank samples → CI evidence gate → proposed NpuCohortSeal | [课程 108]({% post_url 2026-11-26-pto-real-kernel-evidence-promotion-npu-cohort %}) |
 
 ## ISA 知识地图
 
@@ -2499,3 +2500,51 @@ permalink: /learning/pto-curriculum/
 | hw-native-sys/pypto-serving | 无新增 | serving/request/KV 不提前扩展 |
 
 - 下一章：**Real-kernel Evidence Promotion——从 SIM StatisticalSeal 到 NPU cohort、clock/health evidence 与 parity 判定。**
+
+## 课程 108 增量（2026-11-26）
+
+- 文章：[PTO 真实 Kernel 证据提升：从 SIM StatisticalSeal 到 Golden-gated NPU Cohort]({% post_url 2026-11-26-pto-real-kernel-evidence-promotion-npu-cohort %})。
+- 源码基线：pypto-lib [`1e801c98d37b`](https://github.com/hw-native-sys/pypto-lib/commit/1e801c98d37b11e11ce21a03f99ffc2abc374d16)；PTOAS [`7cd970b79963`](https://github.com/hw-native-sys/PTOAS/commit/7cd970b79963e051f35f6180b76f0350ffa64695)。PTOAS 相对课程 107 的 scheduler/runner 直接相关文件无语义变化；pypto-lib 是本章真实 kernel、Golden 与 NPU benchmark 的主证据源。
+- 所选仓库：主仓 `hw-native-sys/pypto-lib`；关联仓 `hw-native-sys/PTOAS` 仅承接上一章的 SIM StatisticalSeal parent。二者构成“SIM 候选 → 真实设备证据”的直接因果链，没有扩展到 serving。
+- 课程位置：`SIM StatisticalSeal → KernelSpec/RunConfig → compile/replay artifact → dedicated correctness dispatch → Golden validation → NPU benchmark → CI evidence gate → proposed NpuCohortSeal`。
+- 新覆盖文件与符号：
+  - `golden/runner.py::{RunResult,_run_pipeline,_benchmark_and_report}`：ABI 校验、host Golden、correctness dispatch、validation 先于 benchmark、raw rank samples。
+  - `golden/spec.py::TensorSpec` 与 `golden/validation.py::{validate_golden,ratio_allclose}`：shape/dtype/direction/resident ownership 与数值 contract。
+  - `.github/scripts/ci_perf.py::{make_capture,benchmark_payload,effective_us}`：correctness、round/warmup、flattened/unstable/all-zero、rank completeness 的 fail-closed gate。
+  - `models/qwen3_8_27b/{out_proj.py,a8w8_linear.py}`：`[512,6144]int8 × [5120,6144]int8 → [512,5120]bf16`、`128×128×512` tile、patch grouping、双 accumulator。
+  - `tests/golden/test_runner.py`：validation-before-benchmark mutation、device error propagation、missing STRACE 降级边界、raw per-rank sample 完整性。
+- 新确认不变量：
+  1. SIM tick 与 NPU `effective_us` 属于不同 metric family，不能直接换算 speedup；可提升的是语义身份和实验协议。
+  2. dedicated correctness dispatch 与 Golden validation 必须先于 benchmark；Golden 未通过时没有有效性能证据。
+  3. benchmark 的有效性不仅需要数值，还需要固定 timing schema、round/warmup、完整 rank set、非 flattened、非 unstable、非 all-zero device span。
+  4. `effective_us` 是 post-graph-build orchestration/scheduler span 的并集，不等同 CLI wall time 或单条硬件指令时长。
+  5. multi-card 当前 `min(per-rank median)` 是聚合策略，不自动代表 barrier/服务 critical path；聚合策略必须进入 seal。
+  6. semantic parity 要求同 KernelSpec、shape/dtype、input/golden/comparator、artifact/toolchain 身份；不是 SIM/NPU 数值相等。
+  7. performance effect 只能在同一 NPU health cohort 内由 baseline/candidate 配对估计；clock/temperature/ECC/reset/firmware 不同则 cohort invalid。
+- 具体演算：Qwen3.8-27B out projection 有 20 个 SPMD patch block、每 block 12 个 K chunk；逻辑约 16.1B MAC。patch grouping 的 int8 operand 逻辑读取约 94.4 MB，相比 160 个独立 output tile 的 251.7 MB 约减少 2.67×；这是源码结构推导，不是 HBM 实测。
+- 测试/事实边界：直接测试证明 validation 顺序、错误传播与 raw samples；当前公开 CI 没有 clock/temperature/ECC/reset 前后快照、artifact/source/input digest、SIM parent seal 或 multi-card critical-path 直接测试。`compile-runtime-workflow.md` 把 benchmark 写在 validation 前，和当前代码/测试不一致，以已合入代码与直接测试为准。
+- 规划边界：`NpuCohortSeal`、health before/after、parent seal digest 与 cohort threshold 是本章提出的证据协议，不是当前仓库 API；公开材料不能确认目标机型的具体 telemetry API/阈值。
+- 新知识债：设备 health/clock/firmware schema；artifact/input/golden digest；cohort 阈值；AB/BA 轮换；温频漂移检测；multi-card fastest/slowest/barrier 聚合语义；文档顺序修正。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| SIM seal → NPU semantic parity | 同 kernel/spec/input/golden/comparator/artifact 身份；不比较 tick 与 µs 数值 | parent digest、artifact canonical digest、SIM/NPU loader identity |
+| TensorSpec → device buffers | direction/resident placement 决定上传、持有、readback；纯 output 不上传 | 跨 runtime 的 buffer address/placement telemetry |
+| correctness → benchmark | dedicated dispatch 先验证，成功后才 warmup/timed rounds | measured dispatch 逐轮 output/state sampling |
+| raw samples → CI metric | rounds/ranks/schema 完整且非 flattened/unstable/all-zero 才产生指标 | clock/temperature/ECC/reset/firmware health gate |
+| rank metric → performance claim | 聚合策略决定结论范围；min rank median 不等同 critical path | barrier completion 与服务端到端关联 |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增指令；沿用 Tile/GM/片上 buffer 与 load-compute-store 语义 | ISA 核心地图保持；本章补真实设备证据提升 |
+| hw-native-sys/PTOAS | 承接课程 107 StatisticalSeal；最新相关 runner 无语义变化 | 关联仓；SIM parent evidence 已闭合到统计 seal |
+| hw-native-sys/pypto | 无新增 | Python/IR 生成边界沿用 |
+| hw-native-sys/simpler | runtime benchmark 的执行域由 pypto-lib 观察，未扩展 simpler 源码 | task/runtime 内部计时与 telemetry 仍待专题 |
+| hw-native-sys/pypto-lib | Golden-gated runner、TensorSpec、validation、BenchmarkStats、CI evidence gate、Qwen3.8-27B out_proj | 本章主仓；真实 kernel 语义到 NPU raw samples 已闭合，health cohort 待补 |
+| hw-native-sys/pypto-serving | 无新增 | serving/request/KV 不提前扩展 |
+
+- 下一章：**NPU Cohort Pairing——Baseline/Candidate 轮换、Clock/Temperature Drift 与 Multi-card Aggregation。**
