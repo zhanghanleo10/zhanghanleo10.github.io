@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-26。
+最后更新：2026-11-27。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 108 已把 SIM Repetition StatisticalSeal 提升到真实 kernel 的 Golden-gated NPU evidence：语义 parity 不等于 tick/µs 换算，validation 必须先于 benchmark，CI 对 rounds、warmup、STRACE 与 rank samples fail closed；但 clock、temperature、ECC/reset、firmware 与 artifact digest 尚未进入统一 cohort seal。下一步课程 109 将研究 baseline/candidate 的 NPU 配对轮换、温频漂移与多卡聚合策略。
+当前阶段：课程 109 已把 Golden-gated NPU raw grid 提升为可比较的 paired cohort：runner 的 per-round max-rank headline 与 Daily CI 的 lowest per-rank median 是不同 estimand，baseline/candidate 必须固定 metric、aggregation 与 device map，并用 AB/BA block 抵消一阶温频漂移。下一步课程 110 将封存 clock/temperature/ECC/reset/firmware 与 artifact/input/Golden digest 的 canonical cohort manifest。
 
 ## 已完成章节
 
@@ -132,6 +132,7 @@ permalink: /learning/pto-curriculum/
 | 2026-11-24 | Four-cell Join Transaction：完整对提交、partial retry 与冲突封存 | immutable CellAttempt → unique winner → PairJoin → atomic RepetitionJoin | [课程 106]({% post_url 2026-11-24-pto-four-cell-join-transaction-retry-conflict %}) |
 | 2026-11-25 | PTOAS Repetition Statistical Seal：配对样本、Run-order Block 与停止规则 | RepetitionJoin → order block → paired effects/interaction → StatisticalSeal | [课程 107]({% post_url 2026-11-25-pto-repetition-statistical-seal-blocked-pairs %}) |
 | 2026-11-26 | PTO 真实 Kernel 证据提升：从 SIM StatisticalSeal 到 Golden-gated NPU Cohort | KernelSpec → Golden gate → NPU raw rank samples → CI evidence gate → proposed NpuCohortSeal | [课程 108]({% post_url 2026-11-26-pto-real-kernel-evidence-promotion-npu-cohort %}) |
+| 2026-11-27 | PTO NPU Cohort 配对：AB/BA 去漂移与多卡聚合语义 | raw rank grid → metric/aggregation → AB/BA pair → paired effect → health/artifact manifest | [课程 109]({% post_url 2026-11-27-pto-npu-cohort-pairing-drift-multicard-aggregation %}) |
 
 ## ISA 知识地图
 
@@ -2548,3 +2549,52 @@ permalink: /learning/pto-curriculum/
 | hw-native-sys/pypto-serving | 无新增 | serving/request/KV 不提前扩展 |
 
 - 下一章：**NPU Cohort Pairing——Baseline/Candidate 轮换、Clock/Temperature Drift 与 Multi-card Aggregation。**
+
+## 课程 109 增量（2026-11-27）
+
+- 文章：[PTO NPU Cohort 配对：AB/BA 去漂移与多卡聚合语义]({% post_url 2026-11-27-pto-npu-cohort-pairing-drift-multicard-aggregation %})。
+- 源码基线：pypto-lib [`f4c950cea9e0`](https://github.com/hw-native-sys/pypto-lib/commit/f4c950cea9e038000f7318a840f5f8b0c764751f)，相对课程 108 的 [`1e801c98`](https://github.com/hw-native-sys/pypto-lib/commit/1e801c98d37b11e11ce21a03f99ffc2abc374d16) 前进 15 个提交；最新 DSpark tail-latency 变更未触及本章直接研究文件。直接相关变更：计时 metric/invalid timing [PR #1982](https://github.com/hw-native-sys/pypto-lib/pull/1982)，fastest-rank/slowest-rank 文档契约 [PR #1983](https://github.com/hw-native-sys/pypto-lib/pull/1983)。
+- 所选仓库：仅 `hw-native-sys/pypto-lib`。本章研究 Golden 后的 benchmark evidence、CI reducer 与真实 EP8 kernel workload；没有第二仓能为 AB/BA 或设备 telemetry 提供已合入的直接实现，因此不机械扩仓。
+- 课程位置：`Golden-gated NPU raw grid → metric selection → rank aggregation → AB/BA paired block（建议）→ health/artifact manifest（待下章）→ NpuCohortSeal`。
+- 新覆盖文件与符号：
+  - `golden/runner.py::{_benchmark_and_report,_report_effective,_report_aicore_wall,_report_l3_per_rank}`：一次注册、多轮 steady-state、每轮 max-rank headline、per-rank breakdown。
+  - `.github/scripts/ci_perf.py::{benchmark_payload,make_capture,checked_benchmark,rank_median,median_timing,render_report}`：`[round][rank][dispatch]` 序列化、metric fail closed、lowest per-rank median。
+  - `docs/debug-and-tune/performance-tuning.md` 与 `.claude/rules/benchmarking.md`：fastest-rank 是 tuning floor，不是 end-to-end latency；warmup 不消除 start skew。
+  - `tests/golden/test_runner.py::TestBenchReports`：AICore wall 跨 dispatch 求和、raw rank samples、per-rank/slot breakdown 与 CI-safe headline。
+  - `models/deepseek_v4_1_flash/gate.py`：BF16 input、FP32 bias/score、UINT32 index、`pl.Mem.Vec`、96 experts 的 128-column envelope。
+- 新确认不变量：
+  1. evidence identity 必须包含 metric、aggregation、rounds/warmup、rank/device map、dispatch schema 与 artifact/input/Golden identity；任一不同不能直接相减。
+  2. runner 的 L3 headline 是每轮跨 rank max 后的汇总；Daily CI 是各 rank 跨轮 median 的最小值。二者分别估计 synchronous critical path 与 fastest-rank kernel floor。
+  3. fastest-rank median 不能冒充 step latency；slowest-rank headline 也不能在未分离 start skew 时冒充纯 kernel latency。
+  4. baseline/candidate effect 应在相邻 pair 内计算，再跨 pair 汇总；`AB/BA` 位置平衡可抵消一阶线性时间漂移。
+  5. warmup 只去除 leading launches，不消除持续的 clock/temperature drift，也不固定 device health。
+  6. `fallback_flattened`、`unstable_dispatch_slots`、all-zero、缺 rank/dispatch、metric mismatch 或 health invalid 都使整个 pair invalid，不能只丢一侧。
+  7. raw grid 是可重算源证据；单一 aggregate median 不能恢复 rank imbalance、dispatch 结构或 alternative estimand。
+  8. 当前 main 没有 AB/BA coordinator、health snapshot、`NpuPairBlock` 或 canonical `NpuCohortSeal`；这些是建议协议，不是已合入 API。
+- 具体演算：runner 直接测试的 rank10 两轮 totals 为 `40/46`，rank11 为 `80/90`；per-round max headline median=85，Daily CI lowest per-rank median=43。AB/BA 演算中 A 真值 100、B 真值 97，线性漂移每位置 +1：AB effect=-2、BA effect=-4，block average=-3，恢复真实差值。
+- 真实 workload：`dsv4.1-flash-decode-moe-ep8-b64-eplb` 使用 8 cards、384 active tokens、96 experts、12 experts/rank、balanced routing；96 列有效 score 放进 128-column tile envelope。最新提交报告 router service time `44.38→42.54 µs`，但该 commit 实验值不是跨机器保证。
+- 测试事实与缺口：runner tests 覆盖 metric/report/raw grid；未发现 `rank_median/median_timing` 独立单测，也没有 baseline/candidate 同 allocation 轮换、health snapshot、device-map permutation、pair crash replay、非线性漂移或 fastest/slowest 联合 gate。
+- 新知识债：`NpuPairBlockV1` schema；AB/BA coordinator；clock/temperature/ECC/reset/firmware 采集与 missing policy；device serial/rank map；artifact/input/golden canonical digest；paired effect/CI；kernel-floor 与 critical-path 双 estimand gate。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| `BenchmarkStats` → raw evidence | 保留 `[round][rank][dispatch]` 才能重算不同聚合量 | schema version、digest 与 crash-safe persist |
+| raw grid → kernel floor | rank 内先合 dispatch、跨 round median、最后取 fastest rank | start-skew 诊断与 device-map 固定 |
+| raw grid → critical path | 每轮跨 rank max 后再汇总，表达同步 device path | host skew 与真实通信/负载不均分离 |
+| baseline/candidate → paired effect | 同 identity 下 AB/BA，先 pair 内差分再跨 pair 汇总 | coordinator、paired CI 与非线性漂移 gate |
+| health → cohort validity | warmup 不等于 health control；reset/ECC/firmware 变化应 fail closed | telemetry API、阈值和机型校准 |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增指令；沿用 Tile/Vec memory/valid shape 语义 | ISA 核心地图保持；本章补设备性能证据协议 |
+| hw-native-sys/PTOAS | 无新增；课程 107 StatisticalSeal 作为统计前置 | SIM 证据 parent 保持 |
+| hw-native-sys/pypto | 无新增 | runtime BenchmarkStats 来源需后续单独追踪 |
+| hw-native-sys/simpler | 无新增 | device telemetry/clock 来源仍待确认 |
+| hw-native-sys/pypto-lib | raw grid、metric selection、fastest/slowest rank aggregation、EP8 router workload | 本章唯一主仓；paired cohort 尚未实现 |
+| hw-native-sys/pypto-serving | 无新增 | serving/request/KV 不提前扩展 |
+
+- 下一章：**NPU Cohort Manifest——Clock/Temperature/ECC/Reset/Firmware 与 Artifact Digest 的 Canonical Seal。**
