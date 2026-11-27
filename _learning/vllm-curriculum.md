@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 阶段 9：测试、性能与故障诊断，聚焦 fatal failure、timeout、资源回收和诊断证据链。
-- 当前主线：第 98 章沿 `RankTerminal → external reconciliation → AttemptFinal → atomic per-case commit → crash replay`，确认当前 whole-file `output_json` 只承载全成功快照，不能表示 partial-rank terminal、持久化首因或 crash 后的确定恢复；因此将不可变 attempt final 设为源记录，aggregate JSON 仅为可重建视图。下一章研究不依赖故障 collective 的 RankTerminal sideband mailbox 与 missing-rank synthesis。
+- 当前主线：第 99 章沿 `external launcher → PP ranks → failure-independent sideband → RankTerminal slots → missing-rank synthesis → AttemptFinal`，确认 CPU backend 仍共享 PP membership，不能作为故障 sideband；rank-authored terminal 与 process sentinel/exit code 必须分层，deadline 后无 terminal 的 expected slot 只能合成 `MISSING`。下一章研究 calibration、P2P、replay、gather 与 terminal publish 的分点 fault matrix。
 
 ## 已完成章节
 
@@ -111,6 +111,7 @@
 | 2026-11-24 96 | `exact PP fixture → microbatch identity → clock/timeline/Golden join → terminal PairEvidence` | [`66e8914f`](https://github.com/vllm-project/vllm/commit/66e8914fc93c1b49f27fda3da33b6f1126d37a37) | [PP PairEvidence]({{ '/articles/vllm-pp-pair-evidence-microbatch-clock-abort/' | relative_url }}) |
 | 2026-11-25 97 | `PP stage failure → device/CPU timeout → topology revision → terminal reconciliation` | [`b3bad87e`](https://github.com/vllm-project/vllm/commit/b3bad87eb137c6d2fedda152ff2d3e3df3a32952) | [PP Partial-rank Failure]({{ '/articles/vllm-pp-partial-rank-failure-timeout-topology-reconciliation/' | relative_url }}) |
 | 2026-11-26 98 | `RankTerminal → AttemptFinal → atomic per-case commit → crash replay` | [`ed686cce`](https://github.com/vllm-project/vllm/commit/ed686ccec527b48de4c8a67927184933886f062a) | [PP AttemptFinal]({{ '/articles/vllm-pp-attempt-final-atomic-case-commit-crash-replay/' | relative_url }}) |
+| 2026-11-27 99 | `external launcher → sideband mailbox → RankTerminal/MISSING → AttemptFinal` | [`3aad861c`](https://github.com/vllm-project/vllm/commit/3aad861c8dcd5101b865bb846615a5f9425b426d) | [PP RankTerminal Sideband]({{ '/articles/vllm-pp-rank-terminal-sideband-mailbox-missing-rank/' | relative_url }}) |
 
 ## 既有专题（课程前置资料）
 
@@ -2724,3 +2725,31 @@
 - 七篇知识图谱回顾（第 92–98 章）：`exact fixture → request Golden → AB/BA timing transaction → PP stage critical path → PairEvidence → partial-rank fail-closed reconciliation → durable AttemptFinal`。后续路线调整为 sideband terminal transport→直接 fault/crash matrix→跨节点 clock/timeout 校准。
 - 新知识债：terminal wire/schema；sideband mailbox owner/认证/backpressure；missing-rank synthesis；CAS/manifest；目标文件系统断电 durability；raw evidence retention；PP>2+TP/DP/EP 故障矩阵；device completion containment；跨节点 fault injection。
 - 下一章：**PP AttemptFinal 的侧带传输——不依赖故障 collective 的 RankTerminal Mailbox 与 Missing-rank Synthesis。**
+
+## 第 99 章课程账本增量
+
+- 日期：2026-11-27
+- 章节：**PP RankTerminal Sideband——Mailbox 与 Missing-rank Synthesis**
+- 源码基线：[`3aad861c`](https://github.com/vllm-project/vllm/commit/3aad861c8dcd5101b865bb846615a5f9425b426d)，为研究时默认分支最新提交；相对第 98 章基线前进 [76 个提交](https://github.com/vllm-project/vllm/compare/ed686ccec527b48de4c8a67927184933886f062a...3aad861c8dcd5101b865bb846615a5f9425b426d)。直接研究的 forward benchmark、multiprocess executor 与相关测试在区间内没有语义变化；最新 renderer、QSA、NIXL 变更与本题无关。
+- 课程位置：`rank-local result → failure-independent sideband → RankTerminal slots → missing-rank synthesis → AttemptFinal → fault matrix（待下章）`。
+- 前置依赖：第 97 章的 partial-rank fail-closed reconciliation；第 98 章的不可变 AttemptFinal、原子 per-case commit 与 crash replay。
+- 新覆盖文件与符号：
+  - `vllm/entrypoints/cli/benchmark/forward.py::BenchmarkForwardSubcommand`：公开 `vllm bench forward` 入口。
+  - `vllm/benchmarks/forward/main.py::{_setup_env,_make_engine_args,run_case,main}`：关闭 V1 multiprocessing、external launcher、per-rank result、CPU-group gather 与 output JSON。
+  - `vllm/benchmarks/forward/pipeline.py::{ForwardPipelineExecutor.collective_rpc,PipelineClock,PipelineBench.run/_stream}`：local RPC、CPU collective、clock calibration 与 PP stream。
+  - `vllm/v1/executor/multiproc_executor.py::{start_worker_monitor,WorkerProc.make_worker_process,monitor_death_pipe}`：MessageQueue、proc sentinel、death pipe 与 failure callback。
+  - `tests/benchmarks/test_forward_cli.py::test_bench_forward_pipeline` 与 `tests/v1/executor/test_executor.py`：成功 PP timeline、shutdown deadline、response MQ failure 对齐。
+- 新确认不变量：
+  1. CPU backend 不等于 failure-independent；`world.cpu_group` 与 PP data plane 共享 membership，缺一 rank 时不能作为权威故障 sideband。
+  2. expected rank set 必须由 attempt 开始前的 `AttemptSpec` 固定；不能由实际到达的 terminal 反推 membership。
+  3. rank-authored `COMPLETE/FAILED/TIMED_OUT` 与 observer-authored process exit、EOF、launcher timeout 是不同证据层。
+  4. deadline 前无合法 terminal 的 expected slot 只能合成 `MISSING`；exit code 可作 observer evidence，但不能替 rank 编造 first cause。
+  5. `MessageQueue` 传业务响应，`proc.sentinel` 观察 child death，`death pipe` 让 child 观察 parent death；三者方向、语义和所有权不同。
+  6. terminal identity 至少绑定 experiment/case/attempt/topology revision/rank/expected-ranks digest；同 identity 同 digest 幂等，不同 digest 冲突。
+  7. terminal 与 sentinel 到达有竞态；顺序不得改变最终 slot。AttemptFinal 发布后 late terminal 只作诊断，retry 使用新 attempt。
+  8. sideband 不传 activation、CUDA Event 或逐 replay 样本，不进入 latency estimator；其目标是故障可判定性，不是性能优化。
+- 具体演算：PP=4，`decode=8*1@512`，`iters=4,samples=2,margin=8`，每 rank 计划 24 个 ordinal。rank0 发布 TIMED_OUT、rank1 FAILED、rank3 COMPLETE；rank2 被 SIGKILL 且只留下 exit=-9 observer evidence。deadline 后 rank2 合成为 MISSING，AttemptFinal=ABORTED，无 median。
+- 测试事实：2-GPU forward CLI 测试只覆盖全成功 gather/timeline；executor 测试覆盖 shutdown deadline 和显式 worker failure payload，但没有直接覆盖 monitor sentinel/failure callback、terminal/sentinel 乱序、missing synthesis、mailbox partition、coordinator replay 或混合 topology identity。
+- 事实/建议边界：当前代码没有 `AttemptSpec/RankTerminal/RankTerminalMailbox` 或外部 reconciler；本文 schema、deadline synthesis 与 sideband ownership 是由现有 collective failure boundary 和 executor monitor 模式推导的建议协议，不是已合入 API 或确认计划。
+- 新知识债：跨节点 terminal wire；mailbox coordinator durability/认证/backpressure；terminal/sentinel race；live-but-hung rank；fault injection；PP+TP/DP/EP rank identity。
+- 下一章：**PP Fault Matrix——Calibration、P2P、Replay、Gather 与 Terminal Publish 的分点注入。**
