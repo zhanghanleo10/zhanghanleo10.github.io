@@ -6,7 +6,7 @@ permalink: /learning/pto-curriculum/
 
 # PTO 全栈课程账本
 
-最后更新：2026-11-27。
+最后更新：2026-11-28。
 
 ## 总体路线
 
@@ -19,7 +19,7 @@ permalink: /learning/pto-curriculum/
 7. simpler Host/AICPU/AICore runtime、TensorMap/RingBuffer
 8. pypto-lib kernel/模型、Golden、性能与 serving 集成
 
-当前阶段：课程 109 已把 Golden-gated NPU raw grid 提升为可比较的 paired cohort：runner 的 per-round max-rank headline 与 Daily CI 的 lowest per-rank median 是不同 estimand，baseline/candidate 必须固定 metric、aggregation 与 device map，并用 AB/BA block 抵消一阶温频漂移。下一步课程 110 将封存 clock/temperature/ECC/reset/firmware 与 artifact/input/Golden digest 的 canonical cohort manifest。
+当前阶段：课程 110 已把 paired NPU benchmark 的可比性前提显式化：当前 CI 有 per-case build-root 隔离、compiled-spec ABI 校验、logical→physical device mapping 与 raw rank grid，但尚未封存实际 loaded artifact/input/Golden digest，也没有 before/after clock/temperature/ECC/reset/firmware health snapshot。本章提出 `NpuCohortManifestV1` 的 canonical identity/evidence/seal 边界；下一步课程 111 将闭合 manifest join、missing telemetry、worker crash 与 pair-level fail-closed。
 
 ## 已完成章节
 
@@ -134,10 +134,13 @@ permalink: /learning/pto-curriculum/
 | 2026-11-26 | PTO 真实 Kernel 证据提升：从 SIM StatisticalSeal 到 Golden-gated NPU Cohort | KernelSpec → Golden gate → NPU raw rank samples → CI evidence gate → proposed NpuCohortSeal | [课程 108]({% post_url 2026-11-26-pto-real-kernel-evidence-promotion-npu-cohort %}) |
 | 2026-11-27 | PTO NPU Cohort 配对：AB/BA 去漂移与多卡聚合语义 | raw rank grid → metric/aggregation → AB/BA pair → paired effect → health/artifact manifest | [课程 109]({% post_url 2026-11-27-pto-npu-cohort-pairing-drift-multicard-aggregation %}) |
 
+| 2026-11-28 | PTO NPU Cohort Manifest：Artifact Digest 与 Health Snapshot 的 Canonical Seal | prepared artifact/data → allocation map → before/after health → raw grid → canonical seal | [课程 110]({% post_url 2026-11-28-pto-npu-cohort-manifest-artifact-health-seal %}) |
+
 ## ISA 知识地图
 
 | 主题 | 已确认结论 | 状态 |
 | --- | --- | --- |
+| NPU Cohort Manifest | compiled-spec ABI 只证明可调用，loaded artifact bytes digest 才证明执行身份；`TASK_DEVICE` 的 logical/physical map 不等于 stable device identity；before/after health 与 raw grid 必须在同 allocation 内闭环，hash/telemetry 位于 timed region 外；mandatory evidence 缺失使整个 pair invalid | 当前 main 有 build-root 隔离、ABI/map/raw-grid 锚点；canonical digest、telemetry adapter、policy 与 crash-safe seal 待实现 |
 | VMI loop layout 与 group-slot | `scf.for` init/iter_arg/yield/result 必须共享 layout；`group_slots<G,K,LS>` 只给映射 lane 语义，carrier 数为 `ceil(G/K)`；VMI 1:N physicalization 改变 VPTO value arity，不等于硬件寄存器编号分配 | PTOAS assignment→VPTO carrier 已闭合；Mask专项、partial packet、allocator/spill 待补 |
 | VPTO carrier live range 与 register pressure | `VRegType`/`MaskType` 分别贡献 vector/predicate 1 单位；bitcast 共享 pressure representative；last use 与 live-through 决定静态峰值。高压 remat 只塑造 live range，提交需二次调度后全部 set 合法且 vector peak 下降；真实编号/spill 留给 Bisheng，stack bytes 不是 spill 证明 | PTOAS scheduler/remat 已闭合；VPTO emission、allocator mapping/spill dump 待补 |
 | PTOAS machine evidence 与 spill Golden | `ET_REL/Machine 1029/symbol` 提供 object/function anchor；stack bytes、VReg/MaskReg total、spill instruction、dynamic traffic 与 ticks 是五个不同证据层。机器证据必须绑定 toolchain/argv/object SHA；不可用必须显式 fail closed | 公开 PTOAS 稳定到 object/resource/SIM；allocator dump、SSA→physical mapping、versioned disassembly 与 dynamic traffic 待补 |
@@ -2598,3 +2601,52 @@ permalink: /learning/pto-curriculum/
 | hw-native-sys/pypto-serving | 无新增 | serving/request/KV 不提前扩展 |
 
 - 下一章：**NPU Cohort Manifest——Clock/Temperature/ECC/Reset/Firmware 与 Artifact Digest 的 Canonical Seal。**
+
+
+## 课程 110 增量（2026-11-28）
+
+- 文章：[PTO NPU Cohort Manifest：Artifact Digest 与 Health Snapshot 的 Canonical Seal]({% post_url 2026-11-28-pto-npu-cohort-manifest-artifact-health-seal %})。
+- 源码基线：pypto-lib [`dcfa6d601d91`](https://github.com/hw-native-sys/pypto-lib/commit/dcfa6d601d91b1e4f0cb21b0183a8ea8462f0621)，相对课程 109 的 [`f4c950cea9e0`](https://github.com/hw-native-sys/pypto-lib/commit/f4c950cea9e038000f7318a840f5f8b0c764751f) 前进 11 个提交。直接相关变更是 [PR #1992](https://github.com/hw-native-sys/pypto-lib/pull/1992)：host compile/golden 与 device allocation 解耦、每 entry 独立 build root、logical rank 映射到实际 allocation、输出返回原进程验证。
+- 所选仓库：仅 `hw-native-sys/pypto-lib`。固定六仓检索未发现第二仓提供已合入的 clock/temperature/ECC/reset/firmware telemetry API；不把负面检索结果扩大为硬件事实，也不机械扩仓。
+- 课程位置：`Golden correctness → raw rank grid → metric/aggregation → AB/BA pair → canonical cohort manifest → pair-level seal`。
+- 新覆盖文件与符号：
+  - `.github/scripts/run_device_tests.py::{run_case,main}`：每 entry 私有 `PYPTO_PROG_BUILD_DIR`，host compile/golden/inflight 分离限流。
+  - `.github/scripts/ci_device.py::{prepare_dispatch,submit_dispatch,execute}`：`request.pt` 跨 allocation 传递、logical→physical map、runtime reload、ABI validation、`outputs.pt` 回传。
+  - `.github/scripts/ci_perf.py::{prepare_case,replay_prepared,make_capture,run_case,benchmark_payload,run_ci}`：prepared runtime/data、`TASK_DEVICE`、raw `[round][rank][dispatch]` evidence 与发布边界。
+  - `golden/runner.py::_validate_compiled_spec_abi`：参数名/顺序/kind/shape/dtype/direction fail-closed；ABI 相同不等于 binary bytes 相同。
+  - `tests/golden/test_runner.py::{ABI tests,TestRuntimeDir}`：runtime-dir skip compile、mismatch 在 input/dispatch 前失败、缺目录不执行、raw rank samples。
+- 新确认不变量：
+  1. artifact identity 至少拆成 ABI digest 与 loaded-bytes digest；前者证明合法调用，后者证明实际实现。
+  2. workload/data identity 绑定 case/argv/shape/dtype/stride、input/Golden/comparator、sampling/metric/aggregation；路径与 mtime 不能替代内容 digest。
+  3. candidate artifact digest 可按 experiment spec 明确变化；其他 identity 使用字段级 allowlist 固定，新增字段默认 fail closed。
+  4. `TASK_DEVICE` 的 physical ID 是 allocation 句柄，不是 stable device identity；无法获得 stable identity 时结论只限同 allocation。
+  5. health snapshot 必须在同一 allocation 内形成 before/after 闭环；continuous state 由 platform/firmware/policy version 校准，不能臆造通用温度/频率阈值。
+  6. hash 与 telemetry 在 timed region 外；after 缺失、部分卡查询失败、rank permutation、digest mismatch 或 schema/policy 不兼容都使整个 pair invalid。
+  7. canonical JSON 必须固定 schema/key/order/number encoding，拒绝 NaN/Infinity；unsupported telemetry 显式记录 reason，不用零或字段缺失伪装。
+  8. 当前 main 没有 `NpuCohortManifestV1`、canonical artifact/data digest、health adapter 或 terminal seal；这些是建议协议，不是已合入 API。
+- 具体演算：真实 case `dsv4.1-flash-decode-moe-ep8-b64-eplb` 使用 A5、8 cards、384 tokens、EP=8、12 experts/rank。allocation `[4,5,6,7,0,1,2,3]` 必须保存 rank map；任一 stable device replacement、B after snapshot 缺失或 input digest mismatch 都使整个 AB/BA pair invalid，不能保留单边样本。
+- 测试事实与缺口：当前 runner tests 覆盖 ABI/runtime-dir/raw samples；当前 main 未找到 `ci_device.py`、canonical digest 或 health snapshot 的直接测试。待补 canonicalization fixture、artifact/data byte mutation、rank permutation/device replacement、telemetry partial failure、after-before crash、attempt retry idempotence、schema conflict 与真机 telemetry 权限/超时。
+- 新知识债：telemetry adapter；platform-calibrated health policy；实际 loaded-file census；content-addressed frozen data；stable device identity/topology；atomic attempt publication；manifest join、duplicate/conflict 与 crash replay。
+
+### ISA 知识地图增量
+
+| 连接 | 本章已确认 | 尚未闭合 |
+| --- | --- | --- |
+| compiled artifact → execution identity | per-case build root 与 ABI validation 是必要隔离；ABI 不能替代 binary bytes digest | loaded-file census、toolchain/runtime/backend canonical identity |
+| input/Golden → data identity | tensor bytes 还必须绑定 shape/dtype/stride 与 comparator policy | content-addressed frozen data、large tensor streaming hash |
+| allocation → device identity | logical rank 精确映射 physical ID；临时 ID 不等于 stable identity | serial/topology API、跨 allocation identity |
+| before/after health → cohort verdict | snapshot 在 allocation 内闭环，telemetry 不进入 timed loop | adapter、counter scope、platform/firmware calibrated policy |
+| raw grid → terminal seal | identity/evidence/seal digest 分层；mandatory evidence 缺失整 pair invalid | canonical schema、atomic publish、pair join/crash replay |
+
+### 仓库覆盖矩阵增量
+
+| 仓库 | 本章增量 | 当前覆盖状态 |
+| --- | --- | --- |
+| hw-native-sys/pto-isa | 无新增指令；沿用 Tile/data bytes 与 layout identity 语义 | ISA 核心地图保持；本章补设备证据封存 |
+| hw-native-sys/PTOAS | 无新增；toolchain identity 是 manifest 待封字段 | object/resource/SIM parent evidence 沿用 |
+| hw-native-sys/pypto | 无新增 | compile/runtime artifact identity 需后续跨仓追踪 |
+| hw-native-sys/simpler | 固定仓检索未发现直接 health adapter，未扩写源码 | runtime telemetry 来源仍待确认 |
+| hw-native-sys/pypto-lib | build-root isolation、prepared dispatch、ABI validation、device map、raw grid | 本章唯一主仓；canonical manifest/health seal 尚未实现 |
+| hw-native-sys/pypto-serving | 无新增 | serving/request/KV 不提前扩展 |
+
+- 下一章：**NPU Cohort Seal——Manifest Join、Missing Telemetry 与 Pair-level Fail-closed。**
